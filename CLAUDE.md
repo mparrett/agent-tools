@@ -19,18 +19,19 @@ just fix      # ruff autofixes
 it anyway. Running a single suite is how a cross-package break gets merged — see
 below.
 
-## CI runs these same recipes, and cannot block a merge
+## CI runs these same recipes, and gates `main`
 
 `.github/workflows/ci.yml` calls `just check` and `just test` on every PR. It
 deliberately does not restate the suite list: a second copy is how a suite goes
 missing from one side without anyone noticing, which is the bug it exists to
 catch. Add a suite to the justfile and CI picks it up.
 
-Two things it will not do for you:
+Two things to know:
 
 - **It blocks a merge, and nobody bypasses it.** A ruleset on `main` requires
   the `lint + tests` check and forbids force-pushes and deleting `main`, with no
-  bypass actors. A change to `main` goes through a PR, config edits included.
+  bypass actors. There is no PR rule, but a direct push is refused all the same:
+  the pushed commit has no passing check yet. Config edits go through a PR too.
 - **A cancelled run on `main` is not a failure.** The workflow sets
   `cancel-in-progress`, and merges land close enough together here that one run
   supersedes another. Check the run for the newer SHA.
@@ -154,8 +155,9 @@ merged one — a session may still be working from it.
 
 ## This repo is checked out twice
 
-You commit in `~/projects-new/agent-tools-public`. Claude Code *loads this repo's skills*
-from `~/projects-new/read-only-clones/agent-tools`, a second clone pinned to `main`.
+You commit in a worktree of `~/projects-new/agent-tools-public` (`just wt`).
+Claude Code *loads this repo's skills* from
+`~/projects-new/read-only-clones/agent-tools`, a second clone pinned to `main`.
 Both see this file, so the rules above apply in either — but only one of them is
 yours to write in.
 
