@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root { color-scheme: light dark;
+    --bg:#f5f6f4; --panel:#ffffff; --bar:#eceeea; --ink:#1f1e1b; --ink2:#5c5b57; --ink3:#8c8b86; --line:#dfe1dc; --grid:#e8eae6; --accent:#2a78d6; --tint:.055; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --panel:#1e1e1c; --bar:#232322; --ink:#ecebe7; --ink2:#b4b3ae; --ink3:#7e7d78; --line:#333331; --grid:#262624; --tint:.11; } }
+  * { box-sizing: border-box; }
+  html { font-size: 14px; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:"IBM Plex Sans", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; line-height:1.45; font-variant-numeric: tabular-nums; overflow-x:hidden; }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+
+  header { position:sticky; top:0; z-index:5; background:var(--bg); border-bottom:1px solid var(--line); }
+  .ident { display:flex; align-items:baseline; gap:14px; padding:12px 18px 8px; flex-wrap:wrap; }
+  .ident h1 { font-size:17px; font-weight:600; margin:0; letter-spacing:-.01em; }
+  .ident .sub { color:var(--ink2); font-size:12.5px; max-width:70ch; }
+  .ident .sub .data { margin-left:8px; white-space:nowrap; }
+  .ident .legend { margin-left:auto; display:flex; gap:14px; font-size:12px; color:var(--ink2); flex-wrap:wrap; }
+  .legend svg { vertical-align:-2px; margin-right:3px; }
+  .bar { display:flex; align-items:center; gap:6px 10px; flex-wrap:wrap; padding:6px 18px; background:var(--bar); }
+  .bar + .bar { border-top:1px solid var(--line); }
+  .bar .grp { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .bar .lbl { font-size:11.5px; color:var(--ink3); margin-right:2px; }
+  .bar .sep { width:1px; height:18px; background:var(--line); margin:0 4px; }
+  .chip { display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border:1px solid transparent; border-radius:999px; cursor:pointer; user-select:none; font:inherit; font-size:12px; color:var(--ink3); background:transparent; }
+  .chip.on { color:var(--ink); background:var(--panel); border-color:var(--line); }
+  .chip .sw { width:9px; height:9px; border-radius:50%; display:inline-block; opacity:.35; }
+  .chip.on .sw { opacity:1; }
+  .chip .n { color:var(--ink3); font-size:11px; }
+  .chip.reset { font-style:italic; }
+  input[type=search] { font:inherit; font-size:12.5px; padding:4px 10px; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:var(--ink); width:230px; max-width:100%; }
+
+  main { display:grid; grid-template-columns: 1fr 350px; }
+  main.nopanel { grid-template-columns: 1fr; }
+  main.nopanel aside { display:none; }
+  #chart { overflow:auto; min-height: 60vh; }
+  svg { display:block; }
+  aside { border-left:1px solid var(--line); padding:16px 18px; background:var(--panel); overflow:auto; max-height: calc(100vh - 100px); position:sticky; top:100px; }
+  aside h2 { font-size:14.5px; font-weight:600; margin:0 0 8px; line-height:1.35; }
+  aside h2 a { color:var(--ink); }
+  aside h2 .num { color:var(--accent); margin-right:6px; }
+  aside h3 { font-size:12px; font-weight:600; color:var(--ink2); margin:16px 0 6px; }
+  aside .meta { color:var(--ink2); font-size:12px; line-height:1.5; }
+  aside .meta b { color:var(--ink); font-weight:500; }
+  aside .start { margin:10px 0; padding:8px 10px; border-left:3px solid var(--lane, var(--accent)); background:color-mix(in srgb, var(--lane, var(--accent)) 8%, transparent); font-size:12.5px; border-radius:0 6px 6px 0; }
+  aside ol, aside ul { padding-left:0; margin:4px 0; list-style:none; }
+  aside li { margin:0; padding:5px 0; border-top:1px solid var(--line); font-size:12.5px; line-height:1.4; }
+  aside li:first-child { border-top:0; }
+  aside li .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:0; }
+  aside li .st { color:var(--ink3); font-size:11.5px; margin-left:4px; }
+  aside li .why { display:block; color:var(--ink2); }
+  .muted { color:var(--ink3); }
+  .intro { font-size:12.5px; color:var(--ink2); }
+
+  .laneband { fill:var(--lane); fill-opacity:var(--tint); }
+  .lanehdr { font-size:12.5px; font-weight:600; fill:var(--ink); }
+  .lanehdr2 { font-size:11px; fill:var(--ink3); }
+  .hdrbtn { cursor:default; }
+  .hdrbtn .hit { fill:transparent; }
+  .hdrbtn:hover .hit { fill:var(--ink); fill-opacity:.05; }
+  .month { font-size:11px; fill:var(--ink3); }
+  .month.year { fill:var(--ink2); font-weight:500; }
+  .grid { stroke:var(--grid); }
+  .edge { fill:none; stroke:var(--ink3); stroke-opacity:.2; stroke-width:1; }
+  .edge.hi { stroke:var(--ink); stroke-opacity:.85; stroke-width:1.5; }
+  .edge.dim { stroke-opacity:.04; }
+  .node { cursor:pointer; }
+  .node.dim { opacity:.14; }
+  .node text { font-size:10.5px; fill:var(--ink2); pointer-events:none; }
+  .node.hi text, .node.sel text { fill:var(--ink); font-weight:600; }
+  .node .halo { fill:none; stroke:var(--ink); stroke-opacity:.35; }
+  .tip { position:fixed; pointer-events:none; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 11px; font-size:12px; line-height:1.45; max-width:380px; box-shadow:0 6px 20px rgba(0,0,0,.12); z-index:9; display:none; }
+  .tip b { font-weight:600; }
+  table.tbl { border-collapse:collapse; width:100%; font-size:12.5px; }
+  table.tbl th, table.tbl td { text-align:left; padding:5px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  table.tbl th { position:sticky; top:100px; background:var(--bg); font-weight:600; color:var(--ink2); }
+  #tableview { display:none; padding:12px 18px; overflow-x:auto; }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+    aside { position:static; max-height:none; border-left:0; border-top:1px solid var(--line); }
+    .ident .legend { margin-left:0; }
+    #chart { min-height: 70vh; }
+    input[type=search] { width:100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="ident">
+    <h1>__TITLE__</h1>
+    <span class="sub">__SUBTITLE__. As of __TODAY__.<span class="data">Data: <a href="data.json">JSON</a>, <a href="inventory.md">Markdown</a></span></span>
+    <div class="legend">
+      <span><svg width="12" height="12"><rect x="1.5" y="1.5" width="9" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>PR</span>
+      <span><svg width="12" height="12"><circle cx="6" cy="6" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>issue</span>
+      <span><svg width="12" height="12"><circle cx="6" cy="6" r="4.5" fill="currentColor"/></svg>merged or closed</span>
+      <span><svg width="12" height="12"><circle cx="6" cy="6" r="4" fill="none" stroke="currentColor" stroke-width="2"/></svg>open</span>
+      <span>★ start here</span>
+    </div>
+  </div>
+  <div class="bar">
+    <span class="lbl">Lanes</span>
+    <div class="grp" id="lanes"></div>
+  </div>
+  <div class="bar">
+    <div class="grp" id="states"></div>
+    <span class="sep"></span>
+    <span class="lbl">People</span>
+    <div class="grp" id="people"></div>
+    <span class="sep"></span>
+    <div class="grp">
+      <button class="chip" data-k="starts">start here only</button>
+      <button class="chip" data-k="table">table</button>
+      <button class="chip on" data-k="panel">panel</button>
+    </div>
+    <input type="search" id="q" placeholder="Find a title or number" aria-label="Find a title or number">
+  </div>
+</header>
+<main id="main">
+  <div id="chart"></div>
+  <aside id="panel"><div class="intro">Lanes are the sub-themes, time flows down, and every line is a <code>#</code>-reference between two items, from either side. Hover an item to see its neighborhood, click to pin it here. Hover a lane header to isolate the lane. Chips toggle a filter; shift-click one to keep only it.</div>
+  <div id="hubs"></div></aside>
+</main>
+<div id="tableview"></div>
+<div class="tip" id="tip"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script>
+const DATA = __DATA__;
+const PAL = __PAL__;
+const USER = __USER_JSON__;
+const laneName = Object.fromEntries(DATA.lanes);
+const laneOrder = DATA.lanes.map(l => l[0]);
+const people = (DATA.contributors || []).map(c => c.login);
+const state = { lanes: new Set(laneOrder), states: new Set(['open','merged','closed']), people: new Set(people.includes(USER) ? [USER] : []), starts: false, table: false, panel: true, q: '', sel: null };
+const nodes = DATA.nodes.map(n => ({...n}));
+const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+const links = DATA.edges.map(e => ({source: byId[e.s], target: byId[e.t], w: e.w})).filter(l => l.source && l.target);
+const nbrs = {}; links.forEach(l => { (nbrs[l.source.id] ||= new Set()).add(l.target.id); (nbrs[l.target.id] ||= new Set()).add(l.source.id); });
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const touched = (n, who) => n.author === who || (n.engaged || []).includes(who);
+
+// ---- controls
+// Every filter group works the same way: click toggles one chip, shift-click keeps
+// only that chip, and the reset chip at the head of the group puts it back to
+// "no restriction". For lanes and states that is every chip on; for people it is
+// nobody selected, which the filter reads as everyone.
+function chipGroup(el, attr, keys, set, reset) {
+  const label = k => reset.label(k);
+  const r = document.createElement('button'); r.className = 'chip reset'; r.dataset[attr] = ''; r.textContent = reset.text;
+  r.onclick = () => { set.clear(); reset.all.forEach(k => set.add(k)); sync(); render(); };
+  el.appendChild(r);
+  keys.forEach(k => {
+    const c = document.createElement('button'); c.className = 'chip'; c.dataset[attr] = k; c.innerHTML = label(k);
+    c.onclick = ev => {
+      if (ev.shiftKey) { set.clear(); set.add(k); }
+      else set.has(k) ? set.delete(k) : set.add(k);
+      sync(); render();
+    };
+    el.appendChild(c);
+  });
+  function sync() {
+    el.querySelectorAll(`.chip[data-${attr}]`).forEach(c => {
+      const k = c.dataset[attr];
+      c.classList.toggle('on', k === '' ? reset.isNeutral() : set.has(k));
+    });
+  }
+  sync();
+  return sync;
+}
+chipGroup(document.getElementById('lanes'), 'lane', laneOrder, state.lanes, {
+  text: 'all', all: laneOrder, isNeutral: () => state.lanes.size === laneOrder.length,
+  label: k => `<span class="sw" style="background:${PAL[k]}"></span>${esc(laneName[k])} <span class="n">${nodes.filter(n => n.lane === k).length}</span>`,
+});
+const STATES = ['open','merged','closed'];
+chipGroup(document.getElementById('states'), 'state', STATES, state.states, {
+  text: 'all', all: STATES, isNeutral: () => state.states.size === STATES.length, label: esc,
+});
+const peopleN = Object.fromEntries((DATA.contributors || []).map(p => [p.login, p.n]));
+chipGroup(document.getElementById('people'), 'person', people, state.people, {
+  text: 'everyone', all: [], isNeutral: () => state.people.size === 0,
+  label: k => `${esc(k)} <span class="n">${peopleN[k]}</span>`,
+});
+document.querySelectorAll('.chip[data-k]').forEach(c => c.onclick = () => { const k = c.dataset.k; state[k] = !state[k]; c.classList.toggle('on'); render(); });
+document.getElementById('q').oninput = e => { state.q = e.target.value.trim().toLowerCase(); render(); };
+
+function visible(n) {
+  if (!state.lanes.has(n.lane)) return false;
+  if (!state.states.has(n.state)) return false;
+  // an empty people set means "everyone"; otherwise the item must be touched by one of them
+  if (state.people.size && ![...state.people].some(p => touched(n, p))) return false;
+  if (state.starts && !n.start) return false;
+  if (state.q && !(n.title.toLowerCase().includes(state.q) || String(n.num).includes(state.q) || n.id.includes(state.q))) return false;
+  return true;
+}
+
+// ---- layout: lane columns on x, time on y, collision-resolved
+let laneW = 190; const padL = 56, padT = 84, padB = 30, minLaneW = 120;
+const t0 = d3.timeParse('%Y-%m-%d');
+const [dmin, dmax] = d3.extent(nodes.map(n => t0(n.created)));
+const y = d3.scaleTime();
+function layout(vis) {
+  const H = Math.max(900, vis.length * 9 + 200);
+  y.range([padT, H - padB]);
+  const lanesVis = laneOrder.filter(k => state.lanes.has(k));
+  laneW = Math.max(minLaneW, Math.floor((document.getElementById('chart').clientWidth - padL - 20) / Math.max(1, lanesVis.length)));
+  const [vmin, vmax] = d3.extent(vis, n => t0(n.created));
+  y.domain([d3.timeDay.offset(vmin || dmin, -7), d3.timeDay.offset(vmax || dmax, 7)]);
+  const lx = Object.fromEntries(lanesVis.map((k, i) => [k, padL + laneW * i + laneW / 2]));
+  vis.forEach(n => { n.x = lx[n.lane]; n.y = y(t0(n.created)); n.r = n.start ? 7.5 : (n.deg >= 6 ? 6.5 : 5); });
+  const sim = d3.forceSimulation(vis)
+    .force('x', d3.forceX(n => lx[n.lane]).strength(0.25))
+    .force('y', d3.forceY(n => y(t0(n.created))).strength(1))
+    .force('c', d3.forceCollide(n => n.r + 12).iterations(3))
+    .stop();
+  for (let i = 0; i < 160; i++) sim.tick();
+  vis.forEach(n => { const c = lx[n.lane]; n.x = Math.max(c - laneW/2 + 14, Math.min(c + laneW/2 - 14, n.x)); });
+  return { H, W: padL + laneW * lanesVis.length + 20, lanesVis, lx };
+}
+
+const chart = d3.select('#chart');
+const tip = document.getElementById('tip');
+function edgePath(l) { const dx = l.target.x - l.source.x; const mx = (l.source.x + l.target.x) / 2 + (dx === 0 ? 24 : 0); return `M${l.source.x},${l.source.y} Q${mx},${(l.source.y + l.target.y) / 2} ${l.target.x},${l.target.y}`; }
+
+function render() {
+  document.getElementById('main').classList.toggle('nopanel', !state.panel);
+  document.getElementById('tableview').style.display = state.table ? 'block' : 'none';
+  document.getElementById('chart').style.display = state.table ? 'none' : 'block';
+  const vis = nodes.filter(visible);
+  const visId = new Set(vis.map(n => n.id));
+  if (state.table) { renderTable(vis); return; }
+  const { H, W, lanesVis, lx } = layout(vis);
+  chart.selectAll('*').remove();
+  const svg = chart.append('svg').attr('width', W).attr('height', H).attr('role', 'img').attr('aria-label', 'Lane map');
+  lanesVis.forEach((k, i) => { if (i % 2 === 0) svg.append('rect').attr('class', 'laneband').attr('x', lx[k] - laneW/2).attr('y', 0).attr('width', laneW).attr('height', H).style('--lane', PAL[k]); });
+  const months = y.ticks(d3.timeMonth.every(1));
+  svg.append('g').selectAll('line').data(months).join('line').attr('class', 'grid').attr('x1', padL - 6).attr('x2', W - 10).attr('y1', d => y(d)).attr('y2', d => y(d));
+  svg.append('g').selectAll('text').data(months).join('text').attr('class', d => d.getMonth() === 0 ? 'month year' : 'month').attr('x', 6).attr('y', d => y(d) + 12).text(d => d3.timeFormat(d.getMonth() === 0 ? '%Y' : '%b')(d));
+  const vl = links.filter(l => visId.has(l.source.id) && visId.has(l.target.id));
+  const eg = svg.append('g').selectAll('path').data(vl).join('path').attr('class', 'edge').attr('d', edgePath);
+  const ng = svg.append('g').selectAll('g').data(vis, d => d.id).join('g').attr('class', 'node').attr('transform', d => `translate(${d.x},${d.y})`);
+  ng.each(function(d) {
+    const g = d3.select(this); const col = PAL[d.lane]; const filled = d.state !== 'open';
+    if (d.start) g.append('circle').attr('class', 'halo').attr('r', d.r + 3.5).attr('stroke-width', 1);
+    if (d.pr) g.append('rect').attr('x', -d.r).attr('y', -d.r).attr('width', 2*d.r).attr('height', 2*d.r).attr('rx', 2).attr('fill', filled ? col : 'var(--bg)').attr('stroke', col).attr('stroke-width', filled ? 1 : 2);
+    else g.append('circle').attr('r', d.r).attr('fill', filled ? col : 'var(--bg)').attr('stroke', col).attr('stroke-width', filled ? 1 : 2);
+    if (d.state === 'closed' && d.pr) g.append('line').attr('x1', -d.r).attr('y1', -d.r).attr('x2', d.r).attr('y2', d.r).attr('stroke', 'var(--bg)').attr('stroke-width', 1.5);
+    g.append('text').attr('x', d.r + 5).attr('y', 3.5).text((d.start ? '★ ' : '') + d.label);
+  });
+  // lane headers: hover isolates the lane; hiding one is the chip's job
+  const hdr = svg.append('g');
+  lanesVis.forEach(k => {
+    const cnt = vis.filter(n => n.lane === k).length;
+    const g = hdr.append('g').attr('class', 'hdrbtn').attr('data-lane', k)
+      .on('mouseenter', () => { ng.classed('dim', n => n.lane !== k); eg.classed('dim', l => l.source.lane !== k && l.target.lane !== k); })
+      .on('mouseleave', () => { ng.classed('dim', false); eg.classed('dim', false); });
+    g.append('rect').attr('class', 'hit').attr('x', lx[k] - laneW/2 + 4).attr('y', 6).attr('width', laneW - 8).attr('height', padT - 14).attr('rx', 6);
+    g.append('rect').attr('x', lx[k] - laneW/2 + 10).attr('y', 14).attr('width', laneW - 20).attr('height', 3).attr('rx', 1.5).attr('fill', PAL[k]);
+    const words = laneName[k].split(' '); const lines = ['']; const maxChars = Math.max(10, Math.floor((laneW - 24) / 7.2));
+    words.forEach(w => { if ((lines[lines.length-1] + ' ' + w).trim().length > maxChars && lines.length < 2) lines.push(w); else lines[lines.length-1] = (lines[lines.length-1] + ' ' + w).trim(); });
+    const t = g.append('text').attr('class', 'lanehdr').attr('x', lx[k] - laneW/2 + 10).attr('y', 34);
+    lines.forEach((ln, i) => t.append('tspan').attr('x', lx[k] - laneW/2 + 10).attr('dy', i ? 15 : 0).text(ln));
+    g.append('text').attr('class', 'lanehdr2').attr('x', lx[k] - laneW/2 + 10).attr('y', 34 + 15 * lines.length).text(`${cnt} in view`);
+  });
+  function focus(d, on) {
+    const nb = nbrs[d.id] || new Set();
+    ng.classed('hi', n => on && (n.id === d.id || nb.has(n.id))).classed('dim', n => on && !(n.id === d.id || nb.has(n.id)));
+    eg.classed('hi', l => on && (l.source.id === d.id || l.target.id === d.id)).classed('dim', l => on && !(l.source.id === d.id || l.target.id === d.id));
+  }
+  ng.on('mouseenter', (ev, d) => { focus(d, true); tip.style.display = 'block'; tip.innerHTML = `<b>${d.label}</b> ${esc(d.title)}<br><span class="muted">${d.pr ? 'PR' : 'issue'}, ${d.state}, by ${esc(d.author)}, ${d.created}. ${(nbrs[d.id]||new Set()).size} references.</span>${d.start ? `<br>★ ${esc(d.start)}` : ''}`; })
+    .on('mousemove', ev => { tip.style.left = Math.min(ev.clientX + 14, window.innerWidth - 400) + 'px'; tip.style.top = (ev.clientY + 14) + 'px'; })
+    .on('mouseleave', (ev, d) => { if (state.sel !== d.id) focus(d, false); else focus(byId[state.sel], true); tip.style.display = 'none'; })
+    .on('click', (ev, d) => { state.sel = d.id; focus(d, true); showPanel(d); });
+  if (state.sel && byId[state.sel]) { ng.classed('sel', n => n.id === state.sel); }
+  renderHubs(vis);
+}
+function row(n, extra) {
+  return `<li><span class="dot" style="background:${PAL[n.lane]}"></span><a href="#" data-id="${n.id}">${n.label}</a><span class="st">${n.state}</span> ${esc(n.title).slice(0, 84)}${extra ? `<span class="why">${esc(extra)}</span>` : ''}</li>`;
+}
+function wire(root) {
+  root.querySelectorAll('a[data-id]').forEach(a => a.onclick = ev => { ev.preventDefault(); const n = byId[a.dataset.id]; state.sel = n.id; showPanel(n); render(); });
+}
+function showPanel(d) {
+  if (!state.panel) { state.panel = true; document.querySelector('.chip[data-k="panel"]').classList.add('on'); document.getElementById('main').classList.remove('nopanel'); }
+  const nb = [...(nbrs[d.id] || [])].map(k => byId[k]).sort((a, b) => a.created < b.created ? -1 : 1);
+  const when = d.merged ? `merged ${d.merged}` : d.closed ? `closed ${d.closed}` : 'still open';
+  const branch = d.base ? `<br>${esc(d.head)} into ${esc(d.base)}` : '';
+  document.getElementById('panel').innerHTML = `
+    <h2><a href="${d.url}" target="_blank" rel="noopener"><span class="num">${d.label}</span>${esc(d.title)}</a></h2>
+    <div class="meta">${d.pr ? 'Pull request' : 'Issue'} by <b>${esc(d.author)}</b>, opened ${d.created}, ${when}.${branch}<br>Lane: <b style="color:${PAL[d.lane]}">${esc(laneName[d.lane])}</b>${d.labels ? `. Labels: ${esc(d.labels)}` : ''}${d.engaged && d.engaged.length ? `<br>Also engaged: ${d.engaged.map(esc).join(', ')}` : ''}</div>
+    ${d.start ? `<div class="start" style="--lane:${PAL[d.lane]}">★ Start here: ${esc(d.start)}</div>` : ''}
+    <h3>References (${nb.length})</h3>
+    <ul>${nb.map(n => row(n)).join('') || '<li class="muted">None inside this map.</li>'}</ul>
+    ${d.notes && d.notes.length ? `<h3>Notes that mention it</h3><ul>${d.notes.map(m => `<li><code>${esc(m)}</code></li>`).join('')}</ul>` : ''}
+    <div id="hubs"></div>`;
+  wire(document.getElementById('panel'));
+}
+function renderHubs(vis) {
+  const el = document.getElementById('hubs'); if (!el || state.sel) return;
+  const top = [...vis].sort((a, b) => b.deg - a.deg).slice(0, 10);
+  el.innerHTML = `<h3>Start here</h3><ul>${vis.filter(n => n.start).map(n => row(n, n.start)).join('') || '<li class="muted">No start-here entries in view.</li>'}</ul>
+    <h3>Most referenced in view</h3><ol>${top.map(n => row(n, `${n.deg} references`)).join('')}</ol>`;
+  wire(el);
+}
+function renderTable(vis) {
+  const rows = [...vis].sort((a, b) => a.lane === b.lane ? (a.created < b.created ? -1 : 1) : laneOrder.indexOf(a.lane) - laneOrder.indexOf(b.lane));
+  document.getElementById('tableview').innerHTML = `<table class="tbl"><thead><tr><th>Lane</th><th>Item</th><th>Type</th><th>State</th><th>Opened</th><th>Author</th><th>Title</th><th>Refs</th><th>Related</th></tr></thead><tbody>${rows.map(n => `<tr><td style="color:${PAL[n.lane]}">${esc(laneName[n.lane])}</td><td><a href="${n.url}" target="_blank" rel="noopener">${n.label}</a></td><td>${n.pr ? 'PR' : 'issue'}</td><td>${n.state}</td><td>${n.created}</td><td>${esc(n.author)}</td><td>${esc(n.title)}</td><td>${n.deg}</td><td>${[...(nbrs[n.id]||[])].map(k => byId[k].label).join(', ')}</td></tr>`).join('')}</tbody></table>`;
+}
+window.addEventListener('resize', () => { if (!state.table) render(); });
+render();
+</script>
+</body>
+</html>

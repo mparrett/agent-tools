@@ -1,0 +1,20 @@
+#!/bin/sh
+# `mdview FILE.md` is `mdfeed open FILE.md`: put the file in the feed, then show
+# it in the viewer, starting one if none is running. It exists as its own
+# command because that is what a Finder droplet (and muscle memory) calls.
+#
+# $0 is resolved through symlinks by hand because BSD readlink has no -f, and
+# this file is itself expected to be symlinked again (see `just link`). Without
+# the loop, the exec below would point at whichever bin/ the caller's PATH found.
+src=$0
+while [ -L "$src" ]; do
+    dir=$(cd -P "$(dirname "$src")" && pwd)
+    src=$(readlink "$src")
+    case $src in
+        /*) ;;
+        *) src=$dir/$src ;;
+    esac
+done
+root=$(cd -P "$(dirname "$src")/.." && pwd)
+
+exec "$root/mdfeed/mdfeed.py" open "$@"

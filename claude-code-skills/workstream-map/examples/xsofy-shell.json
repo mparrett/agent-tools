@@ -1,0 +1,113 @@
+{
+  "title": "xsofy shell and deploy map",
+  "subtitle": "Shell, mobile, input, and deploy issues and PRs Matt touched in nooga/xsofy",
+  "user": "mparrett",
+  "repos": [
+    "nooga/xsofy"
+  ],
+  "primary_repo": "nooga/xsofy",
+  "relevance": "\\b(shell|mobile|touch|deploy|pages|wasm|browser|xterm|font|input|keyboard|keypad|release|responsive|phone|portrait|landscape|viewport|resize|bundle|serve|smoke|e2e|COI|Homebrew)\\w*",
+  "min_score": 3,
+  "body_cap": 2,
+  "data_dir": "data",
+  "out_html": "xsofy-shell-map/index.html",
+  "out_md": "xsofy-shell-map/inventory-copy.md",
+  "lanes": [
+    {
+      "key": "mobile",
+      "name": "Mobile & touch UI",
+      "match": "\\b(mobile|touch|responsive|phone|portrait|landscape|viewport|orientation|letterbox|top ?bar|keypad|OPTIONS panel|narrow)\\b"
+    },
+    {
+      "key": "input",
+      "name": "Input & keys",
+      "match": "\\b(input|keys?|keyboard|keystroke|arrow|Ctrl-C|poll)\\b"
+    },
+    {
+      "key": "deploy",
+      "name": "Deploy, Pages & releases",
+      "match": "\\b(deploy|Pages|release|tag|version|CNAME|Homebrew|CHANGELOG|preview|canary|build-info|cache|smoke|e2e|\\bci\\b)\\b"
+    },
+    {
+      "key": "shell",
+      "name": "Web shell & host",
+      "match": "\\b(shell|xterm|font|browser|wasm|host|bundle|serve|COI|worker|WebGL|GL|replay link|resize|fit)\\b"
+    }
+  ],
+  "default_lane": {
+    "nooga/xsofy": "shell"
+  },
+  "exclude": {
+    "nooga/xsofy": [
+      37,
+      47,
+      40,
+      73,
+      72,
+      98,
+      109,
+      142,
+      169,
+      171,
+      176,
+      178,
+      179,
+      190,
+      108,
+      145,
+      146,
+      149,
+      151,
+      160,
+      192,
+      194,
+      111,
+      130,
+      144,
+      153,
+      180,
+      166
+    ]
+  },
+  "include": {
+    "nooga/xsofy": [
+      128,
+      58,
+      65,
+      84,
+      83,
+      22,
+      3,
+      56
+    ]
+  },
+  "override": {
+    "nooga/xsofy#113": "mobile",
+    "nooga/xsofy#116": "mobile",
+    "nooga/xsofy#137": "mobile",
+    "nooga/xsofy#155": "mobile",
+    "nooga/xsofy#156": "mobile",
+    "nooga/xsofy#173": "mobile",
+    "nooga/xsofy#135": "mobile",
+    "nooga/xsofy#61": "input",
+    "nooga/xsofy#193": "deploy",
+    "nooga/xsofy#163": "deploy",
+    "nooga/xsofy#196": "deploy",
+    "nooga/xsofy#195": "deploy",
+    "nooga/xsofy#129": "deploy",
+    "nooga/xsofy#150": "shell",
+    "nooga/xsofy#154": "shell",
+    "nooga/xsofy#168": "shell",
+    "nooga/xsofy#105": "shell",
+    "nooga/xsofy#121": "mobile",
+    "nooga/xsofy#122": "mobile",
+    "nooga/xsofy#139": "shell",
+    "nooga/xsofy#85": "input"
+  },
+  "start_here": {
+    "nooga/xsofy#128": "Epic: mobile and responsive shell",
+    "nooga/xsofy#84": "Epic: player interaction ergonomics",
+    "nooga/xsofy#58": "why Pages deploys from tags, not main",
+    "nooga/xsofy#197": "release prep for the first tag since v0.0.2"
+  }
+}

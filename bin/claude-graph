@@ -1,0 +1,20 @@
+#!/bin/sh
+# claude-graph ships as a package, not a single script, so it has no script to
+# symlink the way every other tool here does. This wrapper gives it the same bare
+# command name anyway.
+#
+# $0 is resolved through symlinks by hand because BSD readlink has no -f, and
+# this file is itself expected to be symlinked again (see `just link`). Without
+# the loop, --directory would point at whichever bin/ the caller's PATH found.
+src=$0
+while [ -L "$src" ]; do
+    dir=$(cd -P "$(dirname "$src")" && pwd)
+    src=$(readlink "$src")
+    case $src in
+        /*) ;;
+        *) src=$dir/$src ;;
+    esac
+done
+root=$(cd -P "$(dirname "$src")/.." && pwd)
+
+exec uv run --directory "$root/claude-graph" claude-graph "$@"

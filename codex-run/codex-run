@@ -1,0 +1,687 @@
+#!/usr/bin/env bash
+# codex-run — drive the Codex CLI non-interactively with templated prompts.
+#
+# Each invocation is a run: a directory holding the rendered prompt, the JSONL
+# event stream, stderr, a status file, and the final message (review.md or
+# result.md). Runs go to the background by default, and the `status` file is the
+# completion signal: created -> running -> done or failed, written after codex
+# exits, where done means both a zero exit and a non-empty output. `wait` polls
+# it. Watching the output file instead cannot tell a finished run from a failed
+# one, and codex writes that file itself, before the status is settled.
+#
+# Sandbox: `codex exec` defaults to read-only, which also blocks the network, so
+# gh cannot read or post anything. Runs use workspace-write + network access
+# with approval never. `--full-access` swaps in danger-full-access.
+#
+# Templates: $CODEX_RUN_TEMPLATES/<kind>.md, written by `codex-run init`.
+# Placeholders: {{slug}} {{dir}} {{repo}} {{pr}} {{issue}} {{prompt}}
+# {{review_flag}} {{body_file}} (post) {{preview}} {{diff_file}}
+# {{base}} {{head}} (review-local) {{rubric_note}} (review, review-local)
+
+set -euo pipefail
+
+XDG_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+CODEX_RUN_HOME="${CODEX_RUN_HOME:-$XDG_DATA/codex-run/runs}"
+CODEX_RUN_ROOTS="${CODEX_RUN_ROOTS:-$(dirname "$PWD")}"
+CODEX_RUN_TEMPLATES="${CODEX_RUN_TEMPLATES:-$XDG_CONFIG/codex-run/templates}"
+CODEX_SESSIONS="${CODEX_HOME:-$HOME/.codex}/sessions"
+
+# The review rubric the review templates name. Found relative to this script,
+# with symlinks resolved by hand (BSD readlink has no -f), because codex-run is
+# normally run through a link in ~/bin.
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  selfdir="$(cd -P "$(dirname "$self")" && pwd)"
+  self="$(readlink "$self")"
+  case "$self" in /*) ;; *) self="$selfdir/$self" ;; esac
+done
+CODEX_RUN_RUBRIC="${CODEX_RUN_RUBRIC:-$(cd -P "$(dirname "$self")/.." && pwd)/claude-code-skills/pr-shepherd/references/review-rubric.md}"
+unset self selfdir
+
+# Empty when the rubric is missing (a copied-out script), so the prompt says
+# nothing rather than naming a file Codex cannot open.
+rubric_note() {
+  [ -f "$CODEX_RUN_RUBRIC" ] || return 0
+  printf ' Judge what counts as a finding, its priority, and the verdict by the review rubric at %s.' "$CODEX_RUN_RUBRIC"
+}
+
+usage() {
+  cat <<EOF
+Usage: codex-run <command> [args] [options]
+
+Commands:
+  review <project> <pr>            Review a GitHub PR. Findings land in <run>/review.md; nothing is posted.
+  review-local <project> [base] [head] [-- preview-diff args]
+                                   Review a local change rendered with preview-diff. No GitHub involved.
+  post <run-id> [--force]          Post a review run's review.md on its PR (resumes the same
+                                     thread). Refuses if the PR head moved since the review.
+  build <project> <issue>          Implement an issue on a new branch. Commits, never pushes.
+  task <project> "<prompt>"        Free-form prompt in a project.
+  resume <run-id> "<prompt>"       Continue a run's thread with a new prompt (new run dir).
+  wait <run-id> [--timeout <s>]    Block until a run finishes. Exit 0 done, 1 failed, 124 timeout.
+  ls                               Recent runs with status.
+  show <run-id>                    A run's metadata and result.
+  limits [--json]                  5h / weekly usage, from the newest Codex rollout.
+  tui <project> ["prompt"]         Interactive codex in a detached tmux session.
+  init                             Write the default prompt templates for editing.
+
+<project> is a path, a directory name under \$CODEX_RUN_ROOTS (colon-separated;
+default: the parent of the current directory), or a GitHub owner/name whose
+repo name is found there.
+
+Options (review / review-local / post / build / task / resume):
+  --model <m>       Codex model (default: ~/.codex/config.toml)
+  --effort <e>      low | medium | high | xhigh | max (default: config.toml)
+  --repo <o/n>      GitHub repo (default: from <project> if owner/name, else the checkout's origin)
+  --fg              Run in the foreground and stream a compact event log.
+  --full-access     danger-full-access sandbox (default: workspace-write + network).
+  --dry-run         Print the codex command and prompt; run nothing.
+
+Environment:
+  CODEX_RUN_HOME       run directories   (default: \$XDG_DATA_HOME/codex-run/runs)
+  CODEX_RUN_ROOTS      project lookup    (default: parent of the current directory)
+  CODEX_RUN_TEMPLATES  prompt templates  (default: \$XDG_CONFIG_HOME/codex-run/templates)
+EOF
+  # Asking for help is not an error; a usage error still exits 1.
+  exit "${1:-1}"
+}
+
+die() { echo "codex-run: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+
+# ---------------------------------------------------------------- templates
+
+# The review prompts stay thin on purpose, and name one rubric rather than
+# restating one. The old wording defined its own severity scale, and redefined
+# P2 as "nice to have" where the rubric calls it a normal correctness problem --
+# which flips a verdict from request-changes to approve. Codex's built-in rubric
+# does not help here: it loads for `codex exec review`, and this is a plain
+# `codex exec` turn. So the prompt points at pr-shepherd's copy of it
+# ({{rubric_note}}), and otherwise says only what Codex cannot infer: the
+# target, that the checkout is not the PR's branch, and not to post. The verdict
+# line is the one piece of form it dictates, because `post` parses it.
+default_template() {
+  case "$1" in
+    review) cat <<'EOF'
+Please review {{repo}} PR #{{pr}}. The local checkout is {{dir}} (your working directory), but it is not necessarily on the PR's branch: read the PR -- description, diff, linked issues, CI status, existing review comments -- with `gh`. If you need to run anything at the PR's head, fetch it into a separate `git worktree` rather than switching this checkout.{{rubric_note}}
+
+Do not post anything to GitHub in this turn. Your final message is the review itself, in markdown, and will be saved for a human to read before it is posted. Start it with a verdict line — `Verdict: approve`, `Verdict: request changes`, or `Verdict: comment` — and then review as you see fit.
+EOF
+      ;;
+    review-local) cat <<'EOF'
+Please review the local change rendered at file://{{preview}} — a self-contained HTML diff page of `{{base}}...{{head}}` in {{dir}}, your working directory. The raw unified diff is also at {{diff_file}}; read whichever is easier. There is no pull request for this change.{{rubric_note}}
+
+Your final message is the review itself, in markdown, and will be saved for a human to read. Start it with a verdict line — `Verdict: approve`, `Verdict: request changes`, or `Verdict: comment` — and then review as you see fit.
+EOF
+      ;;
+    post) cat <<'EOF'
+Post the review you wrote earlier on {{repo}} PR #{{pr}} by running exactly this, and nothing else:
+
+    gh pr review --repo {{repo}} {{pr}} {{review_flag}} --body-file {{body_file}}
+
+The body file already holds the review as it should be posted — a human may have edited it, and the verdict line and review flag have already been resolved into the command above. Do not edit the body, choose a different flag, or add commentary of your own. Reply with the URL of the posted review and nothing else.
+EOF
+      ;;
+    build) cat <<'EOF'
+Implement {{repo}} issue #{{issue}}. The local checkout is {{dir}} (your working directory); read the issue and its comments with `gh issue view {{issue}} --repo {{repo}} --comments`.
+
+Work on a new branch named `codex/issue-{{issue}}` cut from the current default branch. Follow the repository's conventions (CLAUDE.md / AGENTS.md / CONTRIBUTING if present). Run the project's tests and formatter. Commit with a conventional-commit message that references the issue. Do not push and do not open a PR.
+
+Your final message: what changed and why, how it was verified (with the actual test output summary), and any open questions or scope you deliberately left out.
+EOF
+      ;;
+    task) printf '%s\n' '{{prompt}}' ;;
+    *) die "no default template for '$1'" ;;
+  esac
+}
+
+load_template() {
+  local name="$1" file="$CODEX_RUN_TEMPLATES/$1.md"
+  if [ -f "$file" ]; then cat "$file"; else default_template "$name"; fi
+}
+
+render() {
+  # render <template-text> key=value ... — literal replacement, no eval.
+  # Not `${text//pat/$val}`: bash 5.2 expands `&` in the replacement to the
+  # matched text (patsub_replacement), so a prompt containing `&&` is mangled.
+  local text="$1"; shift
+  local kv key val ph out rest
+  for kv in "$@"; do
+    key="${kv%%=*}"; val="${kv#*=}"; ph="{{$key}}"
+    out=""; rest="$text"
+    while [ "${rest%%"$ph"*}" != "$rest" ]; do
+      out="$out${rest%%"$ph"*}$val"
+      rest="${rest#*"$ph"}"
+    done
+    text="$out$rest"
+  done
+  printf '%s' "$text"
+}
+
+cmd_init() {
+  mkdir -p "$CODEX_RUN_TEMPLATES"
+  local t
+  for t in review review-local post build; do
+    if [ -f "$CODEX_RUN_TEMPLATES/$t.md" ]; then
+      echo "exists: $CODEX_RUN_TEMPLATES/$t.md"
+    else
+      default_template "$t" > "$CODEX_RUN_TEMPLATES/$t.md"
+      echo "wrote:  $CODEX_RUN_TEMPLATES/$t.md"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------- resolution
+
+# Directory for a name: a path as given, else <root>/<name> for each root.
+find_dir() {
+  local arg="$1" root
+  if [ -d "$arg" ]; then (cd "$arg" && pwd -P); return 0; fi
+  local IFS=':'
+  for root in $CODEX_RUN_ROOTS; do
+    if [ -d "$root/$arg" ]; then (cd "$root/$arg" && pwd -P); return 0; fi
+  done
+  return 1
+}
+
+# resolve_project <arg> — sets DIR. An owner/name that is not itself a path
+# resolves by its repo name and also fills REPO unless --repo was given, so
+# `review owner/name 42` works without knowing where the checkout lives.
+resolve_project() {
+  local arg="$1"
+  if DIR="$(find_dir "$arg")"; then return; fi
+  if [[ "$arg" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] && DIR="$(find_dir "${arg##*/}")"; then
+    REPO="${REPO:-$arg}"
+    return
+  fi
+  die "cannot resolve '$arg' as a path, under \$CODEX_RUN_ROOTS ($CODEX_RUN_ROOTS), or as owner/name"
+}
+
+# owner/name from the checkout's origin, without touching the network.
+repo_from_dir() {
+  local url
+  url="$(git -C "$1" remote get-url origin 2>/dev/null || true)"
+  [ -n "$url" ] || return 1
+  url="${url%.git}"
+  case "$url" in
+    git@github.com:*) echo "${url#git@github.com:}" ;;
+    https://github.com/*) echo "${url#https://github.com/}" ;;
+    ssh://git@github.com/*) echo "${url#ssh://git@github.com/}" ;;
+    *) return 1 ;;
+  esac
+}
+
+require_repo() {
+  # $1 = dir. Fills REPO unless already set.
+  if [ -z "$REPO" ]; then
+    REPO="$(repo_from_dir "$1")" || die "cannot infer GitHub repo from $1; pass --repo owner/name"
+  fi
+}
+
+# ---------------------------------------------------------------- runs
+
+new_run_id() {
+  # <stamp>-<slug>[-<tag>][-N]. The stamp is second-granular, so the directory
+  # is claimed here with a bare mkdir (atomic) and a -2, -3 ... suffix on
+  # collision; two dispatches in the same second must not share a run dir.
+  local slug tag="${2:-}" base id n=1
+  slug="$(basename "$1" | tr -c 'A-Za-z0-9_.-' '-' | sed 's/-*$//')"
+  base="$(date +%Y%m%d-%H%M%S)-$slug${tag:+-$tag}"
+  id="$base"
+  mkdir -p "$CODEX_RUN_HOME"
+  until mkdir "$CODEX_RUN_HOME/$id" 2>/dev/null; do
+    n=$((n+1)); id="$base-$n"
+    [ "$n" -lt 1000 ] || die "cannot allocate a run directory under $CODEX_RUN_HOME"
+  done
+  printf '%s' "$id"
+}
+
+run_dir() { printf '%s/%s' "$CODEX_RUN_HOME" "$1"; }
+
+# Does the PR belong to the account gh is authenticated as? `gh pr view --json`
+# has no viewerDidAuthor, so ask GraphQL, which answers for *this* token rather
+# than for a login we would otherwise have to fetch and compare separately.
+# Prints "true", "false", or nothing when the question can't be answered.
+viewer_authored() {
+  gh api graphql \
+    -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){viewerDidAuthor}}}' \
+    -f "o=${1%%/*}" -f "r=${1##*/}" -F "n=$2" \
+    -q '.data.repository.pullRequest.viewerDidAuthor' 2>/dev/null || true
+}
+
+# The head the PR was at when something was recorded about it. Empty when the
+# question can't be answered, which callers treat as "unknown", never as "same".
+pr_head_sha() {
+  gh pr view "$2" --repo "$1" --json headRefOid -q .headRefOid 2>/dev/null || true
+}
+
+# The verdict is the model's judgement; turning it into a `gh pr review` flag is
+# mechanical, so it is decided here rather than in the prompt. GitHub rejects
+# --approve and --request-changes on a PR you authored, and a model asked to
+# recover from that mid-turn has reported the rejection and stopped instead
+# (seen on a real PR), leaving the review unposted with the run marked done.
+review_flag_for() {
+  local review_file="$1" repo="$2" pr="$3" verdict flag
+  verdict="$(sed -n '1s/^[Vv]erdict:[[:space:]]*//p' "$review_file" | tr '[:upper:]' '[:lower:]')"
+  case "$verdict" in
+    approve*) flag="--approve" ;;
+    request*) flag="--request-changes" ;;
+    *)        flag="--comment" ;;
+  esac
+  if [ "$flag" != "--comment" ] && [ "$(viewer_authored "$repo" "$pr")" = "true" ]; then
+    printf '%s\t%s' "--comment" "$flag"
+  else
+    printf '%s\t' "$flag"
+  fi
+}
+
+meta_get() { jq -r --arg k "$2" '.[$k] // empty' "$(run_dir "$1")/meta.json"; }
+
+# Option parsing shared by the dispatching commands. Sets globals; anything
+# after `--` is left in PASSTHRU for commands that forward it (review-local).
+MODEL=""; EFFORT=""; REPO=""; DIR=""; FG=false; FULL_ACCESS=false; DRY_RUN=false; FORCE=false; TIMEOUT=1800
+parse_opts() {
+  POSITIONAL=(); PASSTHRU=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --model) MODEL="${2:?--model needs a value}"; shift 2 ;;
+      --effort) EFFORT="${2:?--effort needs a value}"; shift 2 ;;
+      --repo) REPO="${2:?--repo needs a value}"; shift 2 ;;
+      --timeout) TIMEOUT="${2:?--timeout needs a value}"; shift 2 ;;
+      --fg) FG=true; shift ;;
+      --full-access) FULL_ACCESS=true; shift ;;
+      --dry-run) DRY_RUN=true; shift ;;
+      --force) FORCE=true; shift ;;
+      -h|--help) usage 0 ;;
+      --) shift; PASSTHRU=("$@"); break ;;
+      --*) die "unknown option $1" ;;
+      *) POSITIONAL+=("$1"); shift ;;
+    esac
+  done
+}
+
+# create_run <id> <kind> <dir> <output-name> <prompt-text> [meta-json-extras]
+create_run() {
+  local id="$1" kind="$2" dir="$3" output="$4" prompt="$5" extras="${6:-}"
+  [ -n "$extras" ] || extras='{}'
+  local rd; rd="$(run_dir "$id")"   # already created by new_run_id
+  printf '%s\n' "$prompt" > "$rd/prompt.md"
+  jq -n \
+    --arg id "$id" --arg kind "$kind" --arg dir "$dir" --arg output "$output" \
+    --arg model "$MODEL" --arg effort "$EFFORT" --arg repo "$REPO" \
+    --argjson full_access "$FULL_ACCESS" --argjson extras "$extras" \
+    '{id: $id, kind: $kind, dir: $dir, output: $output, repo: $repo,
+      model: $model, effort: $effort, full_access: $full_access,
+      status: "created", started_at: null, finished_at: null,
+      exit_code: null, thread_id: null} + $extras' > "$rd/meta.json"
+  echo created > "$rd/status"
+}
+
+# The codex argv for a run, as an array in CODEX_ARGV. Reads meta.json so the
+# background worker and --dry-run build the identical command.
+build_argv() {
+  local rd="$1" model effort dir full thread common
+  model="$(jq -r '.model // ""' "$rd/meta.json")"
+  effort="$(jq -r '.effort // ""' "$rd/meta.json")"
+  dir="$(jq -r '.dir' "$rd/meta.json")"
+  full="$(jq -r '.full_access' "$rd/meta.json")"
+  thread="$(jq -r '.resume_thread // ""' "$rd/meta.json")"
+
+  CODEX_ARGV=(codex exec)
+  if [ -n "$thread" ]; then
+    CODEX_ARGV+=(resume "$thread")
+  else
+    # Redundant with the worker's cd, but it keeps --dry-run's argv self-describing.
+    CODEX_ARGV+=(-C "$dir")
+    # A linked worktree keeps its git metadata in the main repo's .git, which is
+    # outside the workspace-write sandbox: `git checkout` inside the worktree
+    # dies on index.lock with EPERM, and Codex reviews from an archive instead.
+    # Hand that directory over as an extra writable root. Only on dispatch --
+    # `codex exec resume` rejects --add-dir, which is why post/resume go without.
+    common="$(cd "$dir" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)" || common=""
+    # An ordinary checkout's common dir is already inside the workspace; adding
+    # it would widen the sandbox for nothing.
+    if [ -n "$common" ] && [ "$common" != "$dir/.git" ]; then
+      CODEX_ARGV+=(--add-dir "$common")
+    fi
+  fi
+  CODEX_ARGV+=(--json -o "$rd/$(jq -r .output "$rd/meta.json")")
+  # `-c` forms rather than -s so the same flags work on `exec` and `exec resume`.
+  if [ "$full" = true ]; then
+    CODEX_ARGV+=(-c 'sandbox_mode="danger-full-access"')
+  else
+    CODEX_ARGV+=(-c 'sandbox_mode="workspace-write"' -c 'sandbox_workspace_write.network_access=true')
+  fi
+  CODEX_ARGV+=(-c 'approval_policy="never"')
+  [ -n "$model" ] && CODEX_ARGV+=(-m "$model")
+  [ -n "$effort" ] && CODEX_ARGV+=(-c "model_reasoning_effort=\"$effort\"")
+  CODEX_ARGV+=(-)   # prompt on stdin: no shell quoting of the template
+}
+
+# Worker: runs codex for a run dir, records status. Invoked directly for --fg
+# or via nohup for the background path.
+cmd__exec() {
+  local rd="$1" dir
+  # The codex process is started from the project directory below, so paths it
+  # is handed must not be relative to wherever the caller happened to be.
+  rd="$(cd "$rd" && pwd -P)"
+  build_argv "$rd"
+  dir="$(jq -r '.dir' "$rd/meta.json")"
+  jq --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.status = "running" | .started_at = $t' \
+    "$rd/meta.json" > "$rd/meta.json.tmp" && mv "$rd/meta.json.tmp" "$rd/meta.json"
+  echo running > "$rd/status"
+
+  local code=0
+  if [ "${2:-}" = "--stream" ]; then
+    # Foreground: mirror the event stream through the compact formatter.
+    # errexit is off around the pipeline so a codex failure reaches
+    # PIPESTATUS[0] intact — an `|| true` here would replace it with 0.
+    set +e
+    (cd "$dir" && exec "${CODEX_ARGV[@]}") < "$rd/prompt.md" 2> "$rd/stderr.log" | tee "$rd/events.jsonl" | stream_events
+    code=${PIPESTATUS[0]}
+    set -e
+  else
+    # A failed cd surfaces as a non-zero exit and a message in stderr.log, which
+    # is the same path a codex failure takes, so the run is marked failed.
+    (cd "$dir" && exec "${CODEX_ARGV[@]}") < "$rd/prompt.md" > "$rd/events.jsonl" 2> "$rd/stderr.log" || code=$?
+  fi
+
+  local thread status
+  thread="$(jq -r 'select(.type=="thread.started") | .thread_id' "$rd/events.jsonl" 2>/dev/null | head -1)"
+  # A zero exit with no output file means codex ended without a final message.
+  if [ "$code" -eq 0 ] && [ -s "$rd/$(jq -r .output "$rd/meta.json")" ]; then status="done"; else status="failed"; fi
+  jq --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg s "$status" --arg th "$thread" --argjson c "$code" \
+    '.status = $s | .finished_at = $t | .exit_code = $c | .thread_id = (if $th == "" then .thread_id else $th end)' \
+    "$rd/meta.json" > "$rd/meta.json.tmp" && mv "$rd/meta.json.tmp" "$rd/meta.json"
+  echo "$status" > "$rd/status"
+  [ "$status" = "done" ]
+}
+
+# Compact one-line-per-event view of the JSONL stream, for --fg.
+stream_events() {
+  jq -r --unbuffered '
+    if .type == "item.completed" and .item.type == "agent_message" then "[msg] " + .item.text
+    elif .type == "item.started" and .item.type == "command_execution" then "[cmd] " + .item.command
+    elif .type == "item.completed" and .item.type == "command_execution" then "[exit " + (.item.exit_code|tostring) + "]"
+    elif .type == "turn.completed" then "[done] tokens in=" + (.usage.input_tokens|tostring) + " cached=" + (.usage.cached_input_tokens|tostring) + " out=" + (.usage.output_tokens|tostring)
+    elif .type == "error" then "[error] " + (.message // tostring)
+    else empty end'
+}
+
+dispatch() {
+  local id="$1" rd; rd="$(run_dir "$id")"
+  if $DRY_RUN; then
+    build_argv "$rd"
+    echo "run:    $id"
+    echo "dir:    $rd"
+    printf 'argv:  '; printf ' %q' "${CODEX_ARGV[@]}"; echo
+    echo "prompt:"; sed 's/^/    /' "$rd/prompt.md"
+    rm -rf "$rd"
+    return
+  fi
+  if $FG; then
+    echo "run: $id  ($rd)"
+    local code=0
+    cmd__exec "$rd" --stream || code=$?
+    echo "status: $(cat "$rd/status")  output: $rd/$(meta_get "$id" output)"
+    return "$code"
+  fi
+  nohup "$0" _exec "$rd" > /dev/null 2>&1 &
+  echo "run:    $id"
+  echo "dir:    $rd"
+  echo "output: $rd/$(meta_get "$id" output)"
+  echo "wait:   codex-run wait $id"
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_review() {
+  parse_opts "$@"
+  [ "${#POSITIONAL[@]}" -eq 2 ] || die "usage: codex-run review <project> <pr> [options]"
+  local pr="${POSITIONAL[1]}" id prompt
+  pr="${pr#\#}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || die "PR must be a number, got '$pr'"
+  resolve_project "${POSITIONAL[0]}"
+  require_repo "$DIR"
+  id="$(new_run_id "$DIR" "pr$pr")"
+  prompt="$(render "$(load_template review)" "slug=$(basename "$DIR")" "dir=$DIR" "repo=$REPO" "pr=$pr" \
+    "rubric_note=$(rubric_note)")"
+  # Pinned so `post` can tell whether the branch moved under the review. A
+  # review reads one specific tree; posting it against a later one submits a
+  # verdict for code nobody looked at.
+  create_run "$id" review "$DIR" review.md "$prompt" \
+    "$(jq -n --argjson pr "$pr" --arg sha "$(pr_head_sha "$REPO" "$pr")" '{pr: $pr, head_sha: $sha}')"
+  dispatch "$id"
+}
+
+# Same defaults preview-diff uses, so the diff file and the page agree.
+default_base() {
+  if git -C "$1" rev-parse --verify -q origin/main >/dev/null; then echo origin/main; else echo HEAD~1; fi
+}
+
+cmd_review_local() {
+  need preview-diff
+  parse_opts "$@"
+  [ "${#POSITIONAL[@]}" -ge 1 ] && [ "${#POSITIONAL[@]}" -le 3 ] \
+    || die "usage: codex-run review-local <project> [base] [head] [-- preview-diff args] [options]"
+  local base head id rd prompt
+  resolve_project "${POSITIONAL[0]}"
+  base="${POSITIONAL[1]:-$(default_base "$DIR")}"
+  head="${POSITIONAL[2]:-HEAD}"
+  REPO="${REPO:-$(repo_from_dir "$DIR" || true)}"
+  id="$(new_run_id "$DIR" "local")"
+  rd="$(run_dir "$id")"
+  git -C "$DIR" diff "$base...$head" > "$rd/change.diff" \
+    || { rm -rf "$rd"; die "git diff $base...$head failed in $DIR"; }
+  [ -s "$rd/change.diff" ] || { rm -rf "$rd"; die "no diff between $base and $head in $DIR"; }
+  # ${arr[@]+...}: bash 3.2 trips `set -u` on an empty array otherwise.
+  preview-diff -C "$DIR" --no-open -o "$rd/preview.html" ${PASSTHRU[@]+"${PASSTHRU[@]}"} "$base...$head" > /dev/null \
+    || { rm -rf "$rd"; die "preview-diff failed"; }
+  prompt="$(render "$(load_template review-local)" "slug=$(basename "$DIR")" "dir=$DIR" "repo=$REPO" \
+    "base=$base" "head=$head" "preview=$rd/preview.html" "diff_file=$rd/change.diff" "rubric_note=$(rubric_note)")"
+  create_run "$id" review-local "$DIR" review.md "$prompt" \
+    "$(jq -n --arg b "$base" --arg h "$head" '{base: $b, head: $h, preview: "preview.html", diff: "change.diff"}')"
+  dispatch "$id"
+}
+
+cmd_post() {
+  parse_opts "$@"
+  [ "${#POSITIONAL[@]}" -eq 1 ] || die "usage: codex-run post <run-id> [options]"
+  local parent="${POSITIONAL[0]}" prd thread pr dir id prompt
+  prd="$(run_dir "$parent")"; [ -f "$prd/meta.json" ] || die "no such run: $parent"
+  [ "$(cat "$prd/status")" = "done" ] || die "run $parent is $(cat "$prd/status"), not done"
+  [ "$(meta_get "$parent" kind)" = review ] || die "run $parent is not a PR review (kind: $(meta_get "$parent" kind))"
+  thread="$(meta_get "$parent" thread_id)"; [ -n "$thread" ] || die "run $parent has no thread id"
+  pr="$(meta_get "$parent" pr)"; dir="$(meta_get "$parent" dir)"
+  [ -n "$REPO" ] || REPO="$(meta_get "$parent" repo)"
+  [ -n "$MODEL" ] || MODEL="$(meta_get "$parent" model)"
+  [ -n "$EFFORT" ] || EFFORT="$(meta_get "$parent" effort)"
+  local reviewed now_at flag downgraded body
+  reviewed="$(meta_get "$parent" head_sha)"
+  now_at="$(pr_head_sha "$REPO" "$pr")"
+  # Only when both are known: an unanswerable probe must not block a post, and
+  # reviews recorded before head_sha existed have nothing to compare.
+  if [ -n "$reviewed" ] && [ -n "$now_at" ] && [ "$reviewed" != "$now_at" ] && ! $FORCE; then
+    die "PR #$pr moved since this review: reviewed ${reviewed:0:7}, now ${now_at:0:7}. Re-review, or pass --force to post it anyway."
+  fi
+
+  IFS=$'\t' read -r flag downgraded <<<"$(review_flag_for "$prd/review.md" "$REPO" "$pr")"
+
+  # The body is assembled here, not described to the turn: `gh pr review` refuses
+  # a blank body on --comment and --request-changes, and "post the file without
+  # its verdict line" is one more instruction to get wrong. Dropping the verdict
+  # is mechanical; so is saying that the flag was downgraded, which has to appear
+  # in the body itself or a request-changes review reads as a passing comment.
+  body="$prd/review.body.md"
+  : > "$body"
+  if [ -n "$downgraded" ]; then
+    printf 'Posted as a comment: GitHub does not allow `%s` on a pull request you authored.\n\n' \
+      "$downgraded" >> "$body"
+  fi
+  sed '1{/^[Vv]erdict:/d;}' "$prd/review.md" >> "$body"
+
+  id="$(new_run_id "$dir" "pr$pr-post")"
+  prompt="$(render "$(load_template post)" "slug=$(basename "$dir")" "dir=$dir" "repo=$REPO" "pr=$pr" "review_flag=$flag" "body_file=$body")"
+  create_run "$id" post "$dir" result.md "$prompt" \
+    "{\"pr\": $pr, \"parent\": \"$parent\", \"resume_thread\": \"$thread\", \"thread_id\": \"$thread\"}"
+  dispatch "$id"
+}
+
+cmd_build() {
+  parse_opts "$@"
+  [ "${#POSITIONAL[@]}" -eq 2 ] || die "usage: codex-run build <project> <issue> [options]"
+  local issue="${POSITIONAL[1]}" id prompt
+  issue="${issue#\#}"
+  [[ "$issue" =~ ^[0-9]+$ ]] || die "issue must be a number, got '$issue'"
+  resolve_project "${POSITIONAL[0]}"
+  require_repo "$DIR"
+  id="$(new_run_id "$DIR" "issue$issue")"
+  prompt="$(render "$(load_template build)" "slug=$(basename "$DIR")" "dir=$DIR" "repo=$REPO" "issue=$issue")"
+  create_run "$id" build "$DIR" result.md "$prompt" "{\"issue\": $issue}"
+  dispatch "$id"
+}
+
+cmd_task() {
+  parse_opts "$@"
+  [ "${#POSITIONAL[@]}" -eq 2 ] || die "usage: codex-run task <project> \"<prompt>\" [options]"
+  local id prompt
+  resolve_project "${POSITIONAL[0]}"
+  REPO="${REPO:-$(repo_from_dir "$DIR" || true)}"
+  id="$(new_run_id "$DIR" task)"
+  prompt="$(render "$(load_template task)" "slug=$(basename "$DIR")" "dir=$DIR" "repo=$REPO" "prompt=${POSITIONAL[1]}")"
+  create_run "$id" task "$DIR" result.md "$prompt"
+  dispatch "$id"
+}
+
+cmd_resume() {
+  parse_opts "$@"
+  [ "${#POSITIONAL[@]}" -eq 2 ] || die "usage: codex-run resume <run-id> \"<prompt>\" [options]"
+  local parent="${POSITIONAL[0]}" prd thread dir id
+  prd="$(run_dir "$parent")"; [ -f "$prd/meta.json" ] || die "no such run: $parent"
+  thread="$(meta_get "$parent" thread_id)"; [ -n "$thread" ] || die "run $parent has no thread id"
+  dir="$(meta_get "$parent" dir)"
+  [ -n "$REPO" ] || REPO="$(meta_get "$parent" repo)"
+  [ -n "$MODEL" ] || MODEL="$(meta_get "$parent" model)"
+  [ -n "$EFFORT" ] || EFFORT="$(meta_get "$parent" effort)"
+  id="$(new_run_id "$dir" resume)"
+  create_run "$id" resume "$dir" result.md "${POSITIONAL[1]}" \
+    "{\"parent\": \"$parent\", \"resume_thread\": \"$thread\", \"thread_id\": \"$thread\"}"
+  dispatch "$id"
+}
+
+cmd_wait() {
+  parse_opts "$@"
+  [ "${#POSITIONAL[@]}" -eq 1 ] || die "usage: codex-run wait <run-id> [--timeout <s>]"
+  local id="${POSITIONAL[0]}" rd deadline status
+  rd="$(run_dir "$id")"; [ -f "$rd/status" ] || die "no such run: $id"
+  deadline=$(( $(date +%s) + TIMEOUT ))
+  while :; do
+    status="$(cat "$rd/status")"
+    case "$status" in
+      "done") echo "done: $rd/$(meta_get "$id" output)"; return 0 ;;
+      "failed") echo "failed (exit $(meta_get "$id" exit_code)): see $rd/stderr.log" >&2; return 1 ;;
+    esac
+    [ "$(date +%s)" -lt "$deadline" ] || { echo "timeout after ${TIMEOUT}s; run is still $status" >&2; return 124; }
+    sleep "${CODEX_RUN_POLL_SECONDS:-5}"
+  done
+}
+
+cmd_ls() {
+  [ -d "$CODEX_RUN_HOME" ] || { echo "no runs yet"; return; }
+  printf '%-44s %-8s %-13s %-32s %s\n' RUN STATUS KIND TARGET STARTED
+  local d
+  for d in "$CODEX_RUN_HOME"/*/; do
+    [ -f "$d/meta.json" ] || continue
+    jq -r '[.id, .status, .kind,
+            ((.repo // "") + (if .pr then "#" + (.pr|tostring)
+                              elif .issue then " issue " + (.issue|tostring)
+                              elif .base then " " + .base + "..." + .head
+                              else "" end)),
+            (.started_at // "-")] | @tsv' "$d/meta.json"
+  done | sort | tail -n 30 | awk -F'\t' '{printf "%-44s %-8s %-13s %-32s %s\n", $1, $2, $3, $4, $5}'
+}
+
+cmd_show() {
+  local id="${1:?usage: codex-run show <run-id>}" rd out
+  rd="$(run_dir "$id")"; [ -f "$rd/meta.json" ] || die "no such run: $id"
+  jq . "$rd/meta.json"
+  out="$rd/$(meta_get "$id" output)"
+  if [ -s "$out" ]; then echo; echo "--- $out"; cat "$out"; fi
+}
+
+cmd_limits() {
+  local json=false; [ "${1:-}" = "--json" ] && json=true
+  [ -d "$CODEX_SESSIONS" ] || die "no Codex sessions dir at $CODEX_SESSIONS"
+  # The newest rollout may not have a token_count yet (turn in flight), so take
+  # the latest rate_limits record across the few most recently written files.
+  # `ls -t` rather than stat: BSD and GNU stat disagree on flags.
+  local rec
+  rec="$(find "$CODEX_SESSIONS" -name 'rollout-*.jsonl' -print0 2>/dev/null \
+    | xargs -0 ls -t 2>/dev/null | awk 'NR<=8' \
+    | while IFS= read -r f; do grep -h '"rate_limits"' "$f" 2>/dev/null | tail -1; done \
+    | jq -s 'map(select(.payload.rate_limits != null)) | sort_by(.timestamp) | last')"
+  [ -n "$rec" ] && [ "$rec" != null ] || die "no rate_limits record found in recent rollouts"
+  if $json; then
+    echo "$rec" | jq '{observed_at: .timestamp, plan: .payload.rate_limits.plan_type,
+      five_hour: .payload.rate_limits.primary, weekly: .payload.rate_limits.secondary,
+      context_window: .payload.info.model_context_window}'
+    return
+  fi
+  echo "$rec" | jq -r '
+    def fmt(w): (w.used_percent|tostring) + "% used, resets " + (w.resets_at | strflocaltime("%a %H:%M"));
+    "plan: " + (.payload.rate_limits.plan_type // "?") +
+    "   5h: " + fmt(.payload.rate_limits.primary) +
+    "   weekly: " + fmt(.payload.rate_limits.secondary) +
+    "   (as of " + (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdate | strflocaltime("%H:%M")) + ")"'
+}
+
+cmd_tui() {
+  need tmux
+  local prompt="${2:-}" base name n=1
+  resolve_project "${1:?usage: codex-run tui <project> [\"prompt\"]}"
+  base="codex-$(basename "$DIR" | tr -c 'A-Za-z0-9_-' '-' | sed 's/-*$//')"
+  name="$base"
+  while tmux has-session -t "=$name" 2>/dev/null; do n=$((n+1)); name="$base-$n"; done
+  tmux new-session -d -s "$name" -c "$DIR"
+  # Interactive codex takes the prompt as a positional; %q keeps it one argument.
+  if [ -n "$prompt" ]; then
+    tmux send-keys -t "$name" "codex $(printf '%q' "$prompt")" Enter
+  else
+    tmux send-keys -t "$name" "codex" Enter
+  fi
+  echo "started tmux session '$name' in $DIR"
+  if [ -t 0 ] && [ -z "${TMUX:-}" ]; then tmux attach-session -t "$name"; fi
+}
+
+# ---------------------------------------------------------------- main
+
+cmd="${1:-}"; shift || true
+# Help and usage errors come before the dependency checks: they are the first
+# things someone hits while finding out what the tool is, usually before they
+# have installed Codex, and "codex is required" answers the wrong question.
+case "$cmd" in
+  -h|--help|help) usage 0 ;;
+  "") usage ;;   # no command at all is a usage error
+  review|review-local|post|build|task|resume|wait|ls|show|limits|tui|init|_exec)
+    case "${1:-}" in -h|--help) usage 0 ;; esac ;;
+  *) echo "codex-run: unknown command '$cmd'" >&2; usage ;;
+esac
+need jq
+need codex
+case "$cmd" in
+  review) cmd_review "$@" ;;
+  review-local) cmd_review_local "$@" ;;
+  post) cmd_post "$@" ;;
+  build) cmd_build "$@" ;;
+  task) cmd_task "$@" ;;
+  resume) cmd_resume "$@" ;;
+  wait) cmd_wait "$@" ;;
+  ls) cmd_ls ;;
+  show) cmd_show "$@" ;;
+  limits) cmd_limits "$@" ;;
+  tui) cmd_tui "$@" ;;
+  init) cmd_init ;;
+  _exec) cmd__exec "$@" ;;
+  *) echo "codex-run: unknown command '$cmd'" >&2; usage ;;
+esac

@@ -1,0 +1,22 @@
+{
+  "name": "@mparrett/htmldiff",
+  "version": "0.1.0",
+  "description": "Compare two web pages as a rendered redline or a source diff. One HTML file, no build step.",
+  "keywords": ["diff", "html", "redline", "visual-diff", "compare"],
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "htmldiff": "cli.mjs"
+  },
+  "scripts": {
+    "prepublishOnly": "echo 'Refusing to publish: still dogfooding. Remove \"private\" and this script when ready.' >&2 && exit 1"
+  },
+  "files": ["cli.mjs", "htmldiff.html", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

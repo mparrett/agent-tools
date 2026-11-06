@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Usage Daily</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+  --claude: #2a78d6; --other: #eb6834; --loop: #1baf7a;
+  --loop-wash: rgba(27,175,122,0.09); --hover-wash: rgba(11,11,11,0.05);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s0: #a8a79f;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --claude: #3987e5; --other: #d95926; --loop: #199e70;
+    --loop-wash: rgba(25,158,112,0.14); --hover-wash: rgba(255,255,255,0.06);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s0: #5f5e5a;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19;
+  --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+  --claude: #3987e5; --other: #d95926; --loop: #199e70;
+  --loop-wash: rgba(25,158,112,0.14); --hover-wash: rgba(255,255,255,0.06);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s0: #5f5e5a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 32px 16px 64px; }
+header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+h1 { font-size: 22px; margin: 0 0 4px; font-weight: 650; letter-spacing: -0.01em; }
+.sub { color: var(--ink-2); margin: 0; max-width: 62ch; }
+.controls { display: flex; gap: 8px; flex-shrink: 0; }
+button.seg { font: inherit; font-size: 13px; color: var(--ink-2); background: var(--surface);
+  border: 1px solid var(--ring); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+button.seg[aria-pressed="true"] { color: var(--ink); font-weight: 600; border-color: var(--axis); }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 24px 0; }
+.tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 14px 16px; }
+.tile .k { color: var(--ink-2); font-size: 12.5px; }
+.tile .v { font-size: 28px; font-weight: 650; letter-spacing: -0.02em; margin: 2px 0; }
+.tile .n { color: var(--muted); font-size: 12px; }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 16px 16px 8px; margin-bottom: 12px; position: relative; }
+.card h2 { font-size: 14px; font-weight: 600; margin: 0; }
+.card .cap { color: var(--ink-2); font-size: 12.5px; margin: 2px 0 6px; }
+.legend { display: flex; gap: 14px; font-size: 12.5px; color: var(--ink-2); margin: 4px 0 2px; flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+svg { display: block; width: 100%; overflow: visible; }
+svg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg .lbl { fill: var(--ink-2); font-size: 11px; }
+svg .lbl-strong { fill: var(--ink); font-weight: 600; font-size: 11.5px; }
+.tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--ring); border-radius: 10px; padding: 8px 10px; font-size: 12.5px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.12); min-width: 190px; opacity: 0; transition: opacity .08s; z-index: 10; }
+.tip .d { font-weight: 600; margin-bottom: 4px; }
+.tip .r { display: flex; justify-content: space-between; gap: 16px; color: var(--ink-2); }
+.tip .r b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.tip .r i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+.tip .m { color: var(--muted); font-size: 11.5px; margin-top: 4px; max-width: 240px; }
+.note { color: var(--ink-2); font-size: 12.5px; margin: 16px 2px; max-width: 80ch; }
+details { margin-top: 16px; }
+summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--ink-2); font-weight: 600; }
+.tablewrap { overflow-x: auto; }
+.sect { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 28px 2px 10px; flex-wrap: wrap; }
+.sect h2 { font-size: 15px; font-weight: 650; margin: 0; }
+details h3 { font-size: 13px; font-weight: 600; margin: 16px 0 0; color: var(--ink-2); }
+@media (max-width: 760px) {
+  .tiles { grid-template-columns: 1fr 1fr; }
+  .grid2 { grid-template-columns: 1fr; }
+  header { flex-direction: column; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Agent usage</h1>
+      <p class="sub" id="sub"></p>
+    </div>
+    <div class="controls" role="group" aria-label="Range">
+      <button class="seg" data-range="21">3 wk</button>
+      <button class="seg" data-range="35">5 wk</button>
+      <button class="seg" data-range="63" aria-pressed="true">9 wk</button>
+      <button class="seg" data-range="all">All</button>
+      <button class="seg" id="theme" title="Toggle theme">◐</button>
+    </div>
+  </header>
+
+  <section class="tiles" id="tiles"></section>
+
+  <div class="card">
+    <h2>Tokens per day</h2>
+    <p class="cap">Shaded region: days with <code>/loop</code> wakeups (ScheduleWakeup / CronCreate calls in session logs).</p>
+    <div class="legend"><span><i style="background:var(--claude)"></i>Claude models</span><span><i style="background:var(--other)"></i>Codex, Gemini &amp; others</span><span class="loop-only"><i style="background:var(--loop-wash);outline:1px solid var(--loop)"></i>/loop active</span></div>
+    <svg id="c-tokens" height="300"></svg>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Cost per day</h2>
+      <p class="cap">USD, ccusage list-price estimate</p>
+      <svg id="c-cost" height="180"></svg>
+    </div>
+    <div class="card">
+      <h2>Tokens per dollar</h2>
+      <p class="cap">Millions of tokens per $1 — 7-day trailing mean</p>
+      <svg id="c-eff" height="180"></svg>
+    </div>
+  </div>
+
+  <div class="card loop-only">
+    <h2>/loop wakeups per day</h2>
+    <p class="cap">Each bar counts scheduled re-entries: one iteration of a looping session</p>
+    <svg id="c-wake" height="130"></svg>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Cache misses</h2>
+      <p class="cap">Input tokens not read from cache (fresh input plus cache writes) — 7-day trailing</p>
+      <svg id="c-cache" height="180"></svg>
+    </div>
+    <div class="card">
+      <h2>Output share</h2>
+      <p class="cap">Output tokens as a share of all tokens — 7-day trailing</p>
+      <svg id="c-out" height="180"></svg>
+    </div>
+  </div>
+
+  <div class="sect bd-only">
+    <h2>Breakdowns</h2>
+    <div class="controls" role="group" aria-label="Breakdown metric">
+      <button class="seg" data-metric="cost" aria-pressed="true">Cost</button>
+      <button class="seg" data-metric="tokens">Tokens</button>
+      <button class="seg" data-metric="requests">Requests</button>
+    </div>
+  </div>
+
+  <div class="card bd-only">
+    <h2>By model</h2>
+    <p class="cap" id="cap-model"></p>
+    <div class="legend" id="lg-model"></div>
+    <svg id="c-model" height="240"></svg>
+  </div>
+
+  <div class="card bd-only">
+    <h2>By project — Claude only</h2>
+    <p class="cap" id="cap-proj"></p>
+    <div class="legend" id="lg-proj"></div>
+    <svg id="c-proj" height="240"></svg>
+  </div>
+
+  <p class="note" id="note"></p>
+
+  <details>
+    <summary>Table view</summary>
+    <div class="tablewrap"><table id="tbl"></table></div>
+    <h3 class="bd-only" id="th-model"></h3>
+    <div class="tablewrap bd-only"><table id="tbl-model"></table></div>
+    <h3 class="bd-only" id="th-proj"></h3>
+    <div class="tablewrap bd-only"><table id="tbl-proj"></table></div>
+  </details>
+</main>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>
+const DATA = __DATA__;
+const LOOP_START = DATA.loopStart;
+const MARKER = DATA.marker;
+
+// ccusage omits zero days; fill them so the time axis is honest.
+const byDate = Object.fromEntries(DATA.rows.map(r => [r.date, r]));
+const all = [];
+for (let t = new Date(DATA.rows[0].date + "T00:00Z"), end = new Date(DATA.rows.at(-1).date + "T00:00Z"); t <= end; t.setUTCDate(t.getUTCDate() + 1)) {
+  const k = t.toISOString().slice(0, 10);
+  all.push(byDate[k] || { date: k, tokens: 0, claude: 0, cost: 0, cacheRead: 0, wakeups: 0, models: [], input: 0, cacheWrite: 0, output: 0, byModel: {}, byProject: {} });
+}
+all.forEach((r, i) => {
+  r.other = r.tokens - r.claude;
+  const w = all.slice(Math.max(0, i - 6), i + 1);
+  const ws = k => w.reduce((s, x) => s + x[k], 0);
+  const c = ws("cost");
+  r.eff = c > 0 ? ws("tokens") / c / 1e6 : null;
+  const inTok = ws("cacheRead") + ws("cacheWrite") + ws("input");
+  r.hit = inTok > 0 ? ws("cacheRead") / inTok * 100 : null;
+  r.miss = r.hit == null ? null : 100 - r.hit;
+  r.outShare = ws("tokens") > 0 ? ws("output") / ws("tokens") * 100 : null;
+});
+
+// Breakdown series are fixed by spend over the last nine weeks, so a range or
+// metric toggle never repaints a model or project with another's color.
+const SLOTS = ["--s1", "--s2", "--s3", "--s4", "--s5"];
+function topSeries(field, n) {
+  const tot = {};
+  all.slice(-63).forEach(r => { for (const [k, v] of Object.entries(r[field] || {})) tot[k] = (tot[k] || 0) + v.cost; });
+  return Object.entries(tot).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k]) => k);
+}
+const BREAKDOWNS = {
+  model: { field: "byModel", keys: topSeries("byModel", 5) },
+  proj: { field: "byProject", keys: topSeries("byProject", 5) },
+};
+let metric = "cost";
+for (const b of Object.values(BREAKDOWNS))
+  b.segs = [...b.keys.map((k, i) => ({ key: k, slot: SLOTS[i] })), { key: "Other", slot: "--s0" }];
+function split(b, r, m) {
+  const out = { Other: 0 };
+  for (const [k, v] of Object.entries(r[b.field] || {})) {
+    const t = b.keys.includes(k) ? k : "Other";
+    out[t] = (out[t] || 0) + v[m];
+  }
+  return out;
+}
+
+const fmtT = n => n >= 1e9 ? (n / 1e9).toFixed(2).replace(/\.?0+$/, "") + "B" : n >= 1e6 ? Math.round(n / 1e6) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "K" : String(n);
+const fmt$ = n => "$" + (n >= 1000 ? (n / 1000).toFixed(1) + "k" : Math.round(n));
+const md = s => new Date(s + "T00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; };
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+function niceMax(v) { const p = 10 ** Math.floor(Math.log10(v || 1)); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; }
+
+// --- headline ---
+const sum = (rs, k) => rs.reduce((s, r) => s + r[k], 0);
+const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 864e5);
+const peak = all.reduce((a, b) => b.tokens > a.tokens ? b : a);
+const second = all.filter(r => r !== peak).reduce((a, b) => !a || b.tokens > a.tokens ? b : a, null);
+const loopDays = LOOP_START ? all.filter(r => r.date >= LOOP_START) : [];
+// Baseline is the three weeks before whichever came first, the model switch or /loop,
+// so neither change leaks into the comparison.
+const cut = [LOOP_START, MARKER && MARKER.date].filter(Boolean).sort()[0];
+const pre = cut ? all.filter(r => r.date < cut && daysBetween(r.date, cut) <= 21 && r.cost > 0) : [];
+const span = rs => `${md(rs[0].date)}–${md(rs.at(-1).date)}`;
+const eff = rs => sum(rs, "tokens") / sum(rs, "cost") / 1e6;
+const avg = (rs, k) => sum(rs, k) / rs.length;
+const last7 = all.slice(-7);
+
+const tiles = [["Busiest day ever", fmtT(peak.tokens), second ? `${md(peak.date)} · runner-up ${fmtT(second.tokens)} (${md(second.date)})` : md(peak.date)]];
+let sub = `ccusage daily totals across agents, ${md(all[0].date)} ${all[0].date.slice(0, 4)} – ${md(all.at(-1).date)} ${all.at(-1).date.slice(0, 4)}.`;
+if (loopDays.length && pre.length) {
+  tiles.push(
+    ["/loop wakeups", sum(loopDays, "wakeups").toLocaleString(), `${md(LOOP_START)} – ${md(all.at(-1).date)}, ${loopDays.length} days`],
+    ["Tokens / day under /loop", fmtT(avg(loopDays, "tokens")), `vs ${fmtT(avg(pre, "tokens"))} avg ${span(pre)}`],
+    ["Tokens per $ under /loop", eff(loopDays).toFixed(1) + "M", `vs ${eff(pre).toFixed(1)}M ${span(pre)}`]);
+  sub += ` Since ${md(LOOP_START)}, days with /loop average ${fmtT(avg(loopDays, "tokens"))} tokens and ${fmt$(avg(loopDays, "cost"))}, against ${fmtT(avg(pre, "tokens"))} and ${fmt$(avg(pre, "cost"))} a day in the three weeks before.`;
+} else {
+  tiles.push(
+    ["Tokens, last 7 days", fmtT(sum(last7, "tokens")), `${span(last7)}`],
+    ["Cost, last 7 days", fmt$(sum(last7, "cost")), "ccusage list-price estimate"],
+    ["Tokens per $, last 7 days", eff(last7).toFixed(1) + "M", "mostly cache reads"]);
+}
+document.getElementById("sub").textContent = sub;
+document.getElementById("tiles").innerHTML = tiles
+  .map(([k, v, n]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="n">${n}</div></div>`).join("");
+
+const notes = [];
+if (MARKER && LOOP_START && daysBetween(MARKER.date, LOOP_START) >= 0 && daysBetween(MARKER.date, LOOP_START) <= 21)
+  notes.push(`Read any tokens-per-dollar change with care: daily work moved to ${MARKER.label} on ${md(MARKER.date)}, ${daysBetween(MARKER.date, LOOP_START)} days before /loop, and a model's pricing moves that ratio on its own.`);
+if (loopDays.length)
+  notes.push(`What /loop adds is <b>volume</b>: ${(sum(loopDays, "cacheRead") / sum(loopDays, "tokens") * 100).toFixed(1)}% of tokens since ${md(LOOP_START)} are cache reads, so each wakeup costs a fraction of the token count it adds.`);
+notes.push(`Wakeups are ScheduleWakeup/CronCreate tool calls in Claude Code session logs, by local date; costs are ccusage list-price estimates. Generated ${DATA.generated}.`);
+document.getElementById("note").innerHTML = notes.join(" ");
+if (!LOOP_START) document.querySelectorAll(".loop-only").forEach(e => e.remove());
+// Breakdowns are opt-in (usage-viz daily --breakdown) because their request counts read every transcript line.
+if (!DATA.breakdown) document.querySelectorAll(".bd-only").forEach(e => e.remove());
+
+// --- charts ---
+let range = 63, hoverIdx = null;
+const charts = [];
+const M = { t: 18, r: 12, b: 22, l: 44 };
+
+function chart(id, opts) {
+  const svg = document.getElementById(id);
+  const c = { svg, ...opts };
+  charts.push(c);
+  return c;
+}
+
+function frame(c, rows) {
+  const svg = c.svg; svg.innerHTML = "";
+  const W = svg.clientWidth, H = +svg.getAttribute("height");
+  const iw = W - M.l - M.r, ih = H - M.t - M.b;
+  const step = iw / rows.length;
+  const x = i => M.l + i * step;
+  const max = niceMax(Math.max(...rows.map(c.top).filter(v => v != null)) * 1.05);
+  const y = v => M.t + ih - (v / max) * ih;
+  const g = el("g", {}, svg);
+  // /loop wash behind everything
+  const li = LOOP_START ? rows.findIndex(r => r.date >= LOOP_START) : -1;
+  if (li >= 0) {
+    el("rect", { x: x(li), y: M.t - 6, width: (rows.length - li) * step, height: ih + 6, fill: css("--loop-wash") }, g);
+    if (c.loopLabel) { const t = el("text", { x: x(li) + 6, y: M.t + 6, class: "lbl" }, g); t.textContent = "/loop"; }
+  }
+  const oi = MARKER ? rows.findIndex(r => r.date >= MARKER.date) : -1;
+  if (oi > 0 && c.opusMark) {
+    el("line", { x1: x(oi), x2: x(oi), y1: M.t - 6, y2: M.t + ih, stroke: css("--axis"), "stroke-dasharray": "3 3" }, g);
+    const t = el("text", { x: x(oi) - 6, y: M.t + 6, "text-anchor": "end", class: "lbl" }, g); t.textContent = MARKER.label + " →";
+  }
+  for (let k = 0; k <= c.ticks; k++) {
+    const v = max * k / c.ticks, yy = y(v);
+    el("line", { x1: M.l, x2: M.l + iw, y1: yy, y2: yy, stroke: k ? css("--grid") : css("--axis") }, g);
+    const t = el("text", { x: M.l - 6, y: yy + 3.5, "text-anchor": "end" }, g); t.textContent = c.fmt(v);
+  }
+  // date ticks: first of month + every Nth Monday depending on density
+  const every = rows.length > 120 ? 30 : rows.length > 50 ? 14 : 7;
+  rows.forEach((r, i) => {
+    const d = new Date(r.date + "T00:00Z");
+    const show = rows.length > 120 ? d.getUTCDate() === 1 : d.getUTCDay() === 1 && Math.round((d - new Date(rows[0].date + "T00:00Z")) / 864e5 / 7) % (every / 7) === 0;
+    if (show) { const t = el("text", { x: x(i) + step / 2, y: H - 6, "text-anchor": "middle" }, g); t.textContent = md(r.date); }
+  });
+  return { g, x, y, step, iw, ih, W, H, max };
+}
+
+function bars(f, rows, segs, gap) {
+  const bw = Math.max(1, f.step - gap), r = Math.min(4, bw / 2);
+  rows.forEach((row, i) => {
+    let base = 0;
+    const visible = segs.filter(s => row[s.key] > 0);
+    visible.forEach((s, j) => {
+      const v = row[s.key]; const y0 = f.y(base), y1 = f.y(base + v);
+      // 2px surface gap between stacked segments
+      const top = y1 + (j > 0 ? 0 : 0), h = Math.max(0, y0 - y1 - (j > 0 ? 2 : 0));
+      const isTop = j === visible.length - 1;
+      const xx = f.x(i) + gap / 2;
+      if (isTop && h > r) {
+        el("path", { d: `M${xx},${top + h}V${top + r}q0,-${r} ${r},-${r}h${bw - 2 * r}q${r},0 ${r},${r}V${top + h}Z`, fill: s.color }, f.g);
+      } else el("rect", { x: xx, y: top, width: bw, height: h, fill: s.color }, f.g);
+      base += v;
+    });
+  });
+}
+
+function line(f, rows, key, color) {
+  let d = "";
+  rows.forEach((r, i) => { if (r[key] == null) return; d += (d ? "L" : "M") + (f.x(i) + f.step / 2) + "," + f.y(r[key]); });
+  el("path", { d, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, f.g);
+}
+
+function hoverLayer(c, f, rows) {
+  const hl = el("rect", { y: M.t - 6, height: f.ih + 6, width: f.step, fill: css("--hover-wash"), opacity: 0, "pointer-events": "none" }, c.svg);
+  c.highlight = i => { if (i == null) return hl.setAttribute("opacity", 0); hl.setAttribute("x", f.x(i)); hl.setAttribute("opacity", 1); if (c.dot) c.dot(i); };
+  const hit = el("rect", { x: M.l, y: 0, width: f.iw, height: f.H, fill: "transparent" }, c.svg);
+  hit.addEventListener("pointermove", e => {
+    const b = c.svg.getBoundingClientRect();
+    const i = Math.max(0, Math.min(rows.length - 1, Math.floor((e.clientX - b.left - M.l) / f.step)));
+    setHover(i, e.clientX, e.clientY, rows, c);
+  });
+  hit.addEventListener("pointerleave", () => setHover(null));
+}
+
+const tip = document.getElementById("tip");
+const fmtM = v => metric === "cost" ? fmt$(v) : metric === "tokens" ? fmtT(v) : Math.round(v).toLocaleString();
+const pct = v => v == null ? "–" : (v < 1 ? v.toFixed(2) : v.toFixed(1)) + "%";
+const dayHead = r => `<div class="d">${new Date(r.date + "T00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}</div>`;
+function breakdownTip(b, r) {
+  const parts = split(b, r, metric);
+  const rows = b.segs.filter(s => parts[s.key] > 0).reverse()
+    .map(s => `<div class="r"><span><i style="background:var(${s.slot})"></i>${s.key}</span><b>${fmtM(parts[s.key])}</b></div>`).join("");
+  const others = Object.keys(r[b.field]).filter(k => !b.keys.includes(k));
+  return dayHead(r) + (rows || `<div class="r"><span>No usage</span></div>`) +
+    (others.length && parts.Other > 0 ? `<div class="m">Other: ${others.slice(0, 5).join(", ")}${others.length > 5 ? " +" + (others.length - 5) : ""}</div>` : "");
+}
+function setHover(i, cx, cy, rows, c) {
+  charts.forEach(c => c.highlight && c.highlight(i));
+  if (i == null) { tip.style.opacity = 0; return; }
+  const r = rows[i];
+  if (c && c.tip) tip.innerHTML = c.tip(r);
+  else tip.innerHTML = `<div class="d">${new Date(r.date + "T00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}</div>` +
+    `<div class="r"><span><i style="background:var(--claude)"></i>Claude</span><b>${fmtT(r.claude)}</b></div>` +
+    `<div class="r"><span><i style="background:var(--other)"></i>Others</span><b>${fmtT(r.other)}</b></div>` +
+    `<div class="r"><span>Total tokens</span><b>${fmtT(r.tokens)}</b></div>` +
+    `<div class="r"><span>Cost</span><b>${fmt$(r.cost)}</b></div>` +
+    `<div class="r"><span>Tokens / $ (7d)</span><b>${r.eff ? r.eff.toFixed(2) + "M" : "–"}</b></div>` +
+    (r.wakeups ? `<div class="r"><span><i style="background:var(--loop)"></i>/loop wakeups</span><b>${r.wakeups}</b></div>` : "") +
+    (r.models.length ? `<div class="m">${r.models.slice(0, 4).join(", ")}${r.models.length > 4 ? " +" + (r.models.length - 4) : ""}</div>` : "");
+  tip.style.opacity = 1;
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = (cx + 16 + tw > innerWidth ? cx - tw - 16 : cx + 16) + "px";
+  tip.style.top = Math.min(innerHeight - th - 8, Math.max(8, cy - th / 2)) + "px";
+}
+
+const cTok = chart("c-tokens", { top: r => r.tokens, ticks: 4, fmt: fmtT, loopLabel: true, opusMark: true });
+const cCost = chart("c-cost", { top: r => r.cost, ticks: 4, fmt: fmt$, opusMark: true });
+const cEff = chart("c-eff", { top: r => r.eff, ticks: 5, fmt: v => v.toFixed(1) + "M", opusMark: true });
+const cWake = chart("c-wake", { top: r => r.wakeups, ticks: 2, fmt: v => Math.round(v) });
+const cCache = chart("c-cache", { top: r => r.miss, ticks: 4, fmt: v => pct(v), opusMark: true,
+  tip: r => dayHead(r) + `<div class="r"><span>Miss rate (7d)</span><b>${pct(r.miss)}</b></div><div class="r"><span>Hit rate (7d)</span><b>${pct(r.hit)}</b></div><div class="r"><span>Cache reads</span><b>${fmtT(r.cacheRead)}</b></div><div class="r"><span>Cache writes</span><b>${fmtT(r.cacheWrite)}</b></div><div class="r"><span>Uncached input</span><b>${fmtT(r.input)}</b></div>` });
+const cOut = chart("c-out", { top: r => r.outShare, ticks: 4, fmt: v => pct(v), opusMark: true,
+  tip: r => dayHead(r) + `<div class="r"><span>Output share (7d)</span><b>${pct(r.outShare)}</b></div><div class="r"><span>Output tokens</span><b>${fmtT(r.output)}</b></div><div class="r"><span>Output per $</span><b>${r.cost ? fmtT(r.output / r.cost) : "–"}</b></div>` });
+const cModel = chart("c-model", { top: r => Object.values(r.byModel).reduce((s, v) => s + v[metric], 0), ticks: 4, fmt: v => fmtM(v), opusMark: true,
+  tip: r => breakdownTip(BREAKDOWNS.model, r) });
+const cProj = chart("c-proj", { top: r => Object.values(r.byProject).reduce((s, v) => s + v[metric], 0), ticks: 4, fmt: v => fmtM(v),
+  tip: r => breakdownTip(BREAKDOWNS.proj, r) });
+
+function lineChart(c, rows, key) {
+  const f = frame(c, rows);
+  line(f, rows, key, css("--claude"));
+  const dot = el("circle", { r: 4, fill: css("--claude"), stroke: css("--surface"), "stroke-width": 2, opacity: 0, "pointer-events": "none" }, c.svg);
+  c.dot = i => { const r = rows[i]; if (r[key] == null) return dot.setAttribute("opacity", 0); dot.setAttribute("cx", f.x(i) + f.step / 2); dot.setAttribute("cy", f.y(r[key])); dot.setAttribute("opacity", 1); };
+  hoverLayer(c, f, rows);
+  const hl = c.highlight; c.highlight = i => { hl(i); if (i == null) dot.setAttribute("opacity", 0); };
+}
+
+const metricNoun = { cost: "USD, ccusage list-price estimate", tokens: "Tokens, including cache reads", requests: "Model requests, counted from session logs" };
+function breakdownChart(c, b, rows, gap, id) {
+  const data = rows.map(r => ({ date: r.date, ...split(b, r, metric) }));
+  const f = frame(c, rows);
+  bars(f, data, b.segs.map(s => ({ key: s.key, color: css(s.slot) })), gap);
+  hoverLayer(c, f, rows);
+  document.getElementById("lg-" + id).innerHTML = b.segs.map(s => `<span><i style="background:var(${s.slot})"></i>${s.key}</span>`).join("");
+  document.getElementById("th-" + id).textContent = (id === "model" ? "By model" : "By project") + " — " + metricNoun[metric];
+  document.getElementById("tbl-" + id).innerHTML = "<tr><th>Date</th>" + b.segs.map(s => `<th>${s.key}</th>`).join("") + "</tr>" +
+    data.slice().reverse().map(r => `<tr><td>${r.date}</td>` + b.segs.map(s => `<td>${r[s.key] ? fmtM(r[s.key]) : ""}</td>`).join("") + "</tr>").join("");
+}
+
+function render() {
+  const rows = range === "all" ? all : all.slice(-range);
+  const gap = rows.length > 120 ? 1 : 2;
+
+  let f = frame(cTok, rows);
+  bars(f, rows, [{ key: "claude", color: css("--claude") }, { key: "other", color: css("--other") }], gap);
+  const pi = rows.indexOf(peak);
+  if (pi >= 0) { const t = el("text", { x: f.x(pi) + f.step / 2, y: f.y(peak.tokens) - 6, "text-anchor": "end", class: "lbl-strong" }, f.g); t.textContent = fmtT(peak.tokens) + " "; }
+  const si = rows.indexOf(second);
+  if (si >= 0) { const t = el("text", { x: f.x(si) + f.step / 2, y: f.y(second.tokens) - 6, "text-anchor": "middle", class: "lbl" }, f.g); t.textContent = fmtT(second.tokens); }
+  hoverLayer(cTok, f, rows);
+
+  f = frame(cCost, rows);
+  bars(f, rows, [{ key: "cost", color: css("--claude") }], gap);
+  hoverLayer(cCost, f, rows);
+
+  f = frame(cEff, rows);
+  line(f, rows, "eff", css("--claude"));
+  const last = rows.at(-1);
+  if (last.eff) { el("circle", { cx: f.x(rows.length - 1) + f.step / 2, cy: f.y(last.eff), r: 4, fill: css("--claude"), stroke: css("--surface"), "stroke-width": 2 }, f.g);
+    const t = el("text", { x: f.x(rows.length - 1) + f.step / 2 - 8, y: f.y(last.eff) - 8, "text-anchor": "end", class: "lbl-strong" }, f.g); t.textContent = last.eff.toFixed(1) + "M"; }
+  const effFrame = f;
+  const dot = el("circle", { r: 4, fill: css("--claude"), stroke: css("--surface"), "stroke-width": 2, opacity: 0, "pointer-events": "none" }, cEff.svg);
+  cEff.dot = i => { const r = rows[i]; if (!r.eff) return dot.setAttribute("opacity", 0); dot.setAttribute("cx", effFrame.x(i) + effFrame.step / 2); dot.setAttribute("cy", effFrame.y(r.eff)); dot.setAttribute("opacity", 1); };
+  hoverLayer(cEff, f, rows);
+  const effHl = cEff.highlight; cEff.highlight = i => { effHl(i); if (i == null) dot.setAttribute("opacity", 0); };
+
+  if (cWake.svg) {
+    f = frame(cWake, rows);
+    bars(f, rows, [{ key: "wakeups", color: css("--loop") }], gap);
+    // loop aqua is under 3:1 on light, so bars of 5+ carry their value as text
+    let lastLbl = null;
+    rows.forEach((r, i) => {
+      if (r.wakeups < 5) return;
+      const x = f.x(i) + f.step / 2, y = f.y(r.wakeups) - 4;
+      // adjacent tall bars would print on top of each other; keep the first
+      if (lastLbl && x - lastLbl.x < 26 && Math.abs(y - lastLbl.y) < 12) return;
+      el("text", { x, y, "text-anchor": "middle", class: "lbl" }, f.g).textContent = r.wakeups;
+      lastLbl = { x, y };
+    });
+    hoverLayer(cWake, f, rows);
+  }
+
+  lineChart(cCache, rows, "miss");
+  lineChart(cOut, rows, "outShare");
+  if (cModel.svg) {
+    breakdownChart(cModel, BREAKDOWNS.model, rows, gap, "model");
+    breakdownChart(cProj, BREAKDOWNS.proj, rows, gap, "proj");
+    document.getElementById("cap-model").textContent = metricNoun[metric] + ". All agents; the five models with the most spend in the last nine weeks, the rest under Other.";
+    document.getElementById("cap-proj").textContent = metricNoun[metric] + ". Grouped by the directory each session started in, with worktrees and subdirectories folded into their repo.";
+  }
+
+  document.getElementById("tbl").innerHTML = "<tr><th>Date</th><th>Claude</th><th>Others</th><th>Total</th><th>Cost</th><th>Tok/$ (7d)</th><th>Cache hit (7d)</th><th>Output (7d)</th><th>/loop wakeups</th></tr>" +
+    rows.slice().reverse().map(r => `<tr><td>${r.date}</td><td>${fmtT(r.claude)}</td><td>${fmtT(r.other)}</td><td>${fmtT(r.tokens)}</td><td>${fmt$(r.cost)}</td><td>${r.eff ? r.eff.toFixed(2) + "M" : "–"}</td><td>${pct(r.hit)}</td><td>${pct(r.outShare)}</td><td>${r.wakeups || ""}</td></tr>`).join("");
+}
+
+document.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("[data-range]").forEach(x => x.setAttribute("aria-pressed", x === b));
+  range = b.dataset.range === "all" ? "all" : +b.dataset.range; render();
+}));
+document.querySelectorAll("[data-metric]").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("[data-metric]").forEach(x => x.setAttribute("aria-pressed", x === b));
+  metric = b.dataset.metric; render();
+}));
+document.getElementById("theme").addEventListener("click", () => {
+  const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.dataset.theme = dark ? "light" : "dark"; render();
+});
+addEventListener("resize", render);
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,981 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PR dashboard</title>
+<meta name="description" content="Heads-up dashboard of open pull requests grouped by workstream, with a prioritized review queue.">
+<style>
+  /* ---- light theme (default) ---- */
+  :root{
+    color-scheme:light;
+    --ink:#141a24; --muted:#5b6675; --faint:#8a94a3; --line:#d3dae3;
+    --bg:#f5f7fa; --card:#ffffff; --card2:#fcfdff; --stripe:#fafbfc;
+    --ok:#15803d; --ok-bg:#e9f6ec; --ok-line:#8fd0a3;
+    --wait:#b45309; --wait-bg:#fdf4e6; --wait-line:#eec98a;
+    --active:#1d4ed8; --active-bg:#eaf0fe; --active-line:#9db8f6;
+    --merged:#6b21a8; --merged-bg:#f4ecfb;
+    --defer:#475569; --defer-bg:#eef1f5;
+    --block:#b91c1c; --block-bg:#fdecec; --block-line:#f0a6a6;
+  }
+  /* ---- dark theme: applied when OS is dark (unless forced light), or forced dark ---- */
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){ color-scheme:dark;
+      --ink:#e6e9ee; --muted:#9aa4b2; --faint:#6b7686; --line:#2b333f;
+      --bg:#0e1218; --card:#161b22; --card2:#1a2029; --stripe:#141a22;
+      --ok:#56d98a; --ok-bg:#11291b; --ok-line:#255f3c;
+      --wait:#e3b341; --wait-bg:#2a2411; --wait-line:#5c4a1f;
+      --active:#7ea2ff; --active-bg:#16233f; --active-line:#2f4b8f;
+      --merged:#c99df0; --merged-bg:#251a33;
+      --defer:#9aa4b2; --defer-bg:#1c222b;
+      --block:#f87171; --block-bg:#2c1414; --block-line:#6f2b2b;
+    }
+  }
+  :root[data-theme="dark"]{ color-scheme:dark;
+    --ink:#e6e9ee; --muted:#9aa4b2; --faint:#6b7686; --line:#2b333f;
+    --bg:#0e1218; --card:#161b22; --card2:#1a2029; --stripe:#141a22;
+    --ok:#56d98a; --ok-bg:#11291b; --ok-line:#255f3c;
+    --wait:#e3b341; --wait-bg:#2a2411; --wait-line:#5c4a1f;
+    --active:#7ea2ff; --active-bg:#16233f; --active-line:#2f4b8f;
+    --merged:#c99df0; --merged-bg:#251a33;
+    --defer:#9aa4b2; --defer-bg:#1c222b;
+    --block:#f87171; --block-bg:#2c1414; --block-line:#6f2b2b;
+  }
+
+  *{box-sizing:border-box;}
+  /* Even padding. The old 34px top was clearance for the two chips that used to
+     pin to the corners; with nothing pinned it was just a band of empty page
+     above the title. */
+  body{margin:0;padding:22px;background:var(--bg);color:var(--ink);
+       font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}
+  .wrap{max-width:1000px;margin:0 auto;}
+  h1{font-size:21px;margin:0 0 3px;letter-spacing:-.01em;}
+  .sub{color:var(--muted);margin:0 0 18px;font-size:13px;}
+  mono,.mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+             font-variant-numeric:tabular-nums;}
+  a{color:inherit;text-decoration:none;}
+  a:hover{text-decoration:underline;}
+
+  /* theme switch — collapsed to the current mode, expanding downward on tap.
+     Three permanent buttons cost chrome at every width for a control you touch
+     about once. It sits in .meta-row rather than pinned to a corner: two pinned
+     chips need the page to reserve a band for them, and that band is empty at
+     every width where they don't overlap anything. */
+  .theme{position:relative;display:inline-flex;flex-direction:column;
+         gap:1px;padding:2px;background:var(--card);border:1px solid var(--line);
+         border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.06);margin-left:auto;}
+  .theme button{appearance:none;border:0;background:transparent;color:var(--muted);
+         font:600 11px/1 -apple-system,BlinkMacSystemFont,sans-serif;padding:5px 8px;
+         border-radius:6px;cursor:pointer;letter-spacing:.02em;text-align:left;width:100%;}
+  .theme button[aria-pressed="true"]{background:var(--active-bg);color:var(--active);}
+  .theme-cur{display:inline-flex;align-items:center;justify-content:space-between;gap:6px;}
+  .theme-cur::after{content:"▾";font-size:8px;line-height:1;}
+  .theme[data-open="true"] .theme-cur::after{content:"▴";}
+  /* Absolute rather than in-flow, so expanding overlays the page instead of
+     shoving the queue down a row and back. */
+  .theme-menu{display:none;flex-direction:column;gap:1px;min-width:100%;
+              position:absolute;top:100%;right:0;margin-top:3px;padding:2px;
+              background:var(--card);border:1px solid var(--line);border-radius:8px;
+              box-shadow:0 4px 14px rgba(0,0,0,.16);z-index:20;}
+  .theme[data-open="true"] .theme-menu{display:flex;}
+  @media print{.theme{display:none;}}
+
+  /* generated-at badge — the board's own age, so it survives being left open
+     across a break. In .meta-row with the rest of the header chrome. */
+  .generated{display:inline-flex;align-items:center;padding:6px 10px;font-size:11px;
+         color:var(--muted);background:var(--card);border:1px solid var(--line);
+         border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.06);
+         font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+         font-variant-numeric:tabular-nums;}
+  .generated:empty{display:none;}
+  @media print{.generated{display:none;}}
+
+  /* One header row at every width: the status key, the board's age, and the
+     theme switch. Each is a control or a fact you consult, not content. */
+  /* Top-aligned, not centred: the legend grows downward when opened, and
+     centring would drag the other two chips down its middle. Top alignment only
+     reads as alignment if the three are the same height closed — they're built
+     from different elements (a summary, a div, a button in a flex column), so
+     their padding alone left the switch 4px short of its neighbours. */
+  :root{--chip-h:31px;}
+  .meta-row{display:flex;align-items:flex-start;flex-wrap:wrap;gap:8px;margin:0 0 18px;}
+  .legend-box > summary,.generated,.theme{min-height:var(--chip-h);}
+  .theme{justify-content:center;}
+
+  /* The legend folds behind its summary — seven rows of key ahead of the queue
+     is a lot of screen for a reference you read once, on any display.
+     Its panel drops below the summary the way the theme menu does: in the flow
+     it widened its flex item and bumped the stamp and the switch onto a second
+     line, so opening the key rearranged the row it lives in. */
+  .legend-box{margin:0;position:relative;}
+  .legend-box > summary{display:inline-flex;align-items:center;gap:6px;width:max-content;
+                        list-style:none;cursor:pointer;padding:5px 11px;font-size:12px;
+                        color:var(--muted);background:var(--card);
+                        border:1px solid var(--line);border-radius:999px;}
+  .legend-box > summary::-webkit-details-marker{display:none;}
+  .legend-box > summary::after{content:"▾";font-size:9px;line-height:1;}
+  .legend-box[open] > summary::after{content:"▴";}
+  .legend{display:flex;gap:10px 14px;flex-wrap:wrap;margin:0;font-size:12px;align-items:center;
+          position:absolute;top:100%;left:0;z-index:20;margin-top:6px;padding:10px 12px;
+          width:max-content;max-width:min(560px,calc(100vw - 44px));
+          background:var(--card);border:1px solid var(--line);border-radius:10px;
+          box-shadow:0 4px 14px rgba(0,0,0,.16);}
+  .legend span{display:inline-flex;align-items:center;gap:6px;color:var(--muted);}
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:700;
+        letter-spacing:.02em;white-space:nowrap;}
+  .p-ok{background:var(--ok-bg);color:var(--ok);}
+  .p-wait{background:var(--wait-bg);color:var(--wait);}
+  .p-active{background:var(--active-bg);color:var(--active);}
+  .p-merged{background:var(--merged-bg);color:var(--merged);}
+  .p-defer{background:var(--defer-bg);color:var(--defer);}
+  .p-block{background:var(--block-bg);color:var(--block);}
+  /* draft — a fact from the API, not a judgment like the filled pills, so it
+     reads as an outline. Deliberately not grey-filled: `deferred` is a call the
+     author of the board made about priority, `draft` is the PR's own state, and
+     a PR can be both. Inset ring rather than a border so it doesn't grow 2px
+     taller than the pill it sits next to. */
+  .p-draft{background:transparent;color:var(--muted);box-shadow:inset 0 0 0 1px var(--line);}
+
+  /* author attribution — shares the pill's shape so it reads as part of the
+     same system, but stays uncolored: identity, not status. Never compete
+     with the status pill for attention. */
+  .author{display:inline-block;margin-top:4px;padding:1px 8px;border-radius:999px;
+        font-size:10px;font-weight:600;letter-spacing:.02em;color:var(--faint);
+        background:var(--stripe);border:1px solid var(--line);white-space:nowrap;
+        font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;}
+
+  /* last-touch line — plain text, not a badge, one notch quieter than
+     .author: an activity note, not an identity marker. Only appears when
+     it's actually informative (see lastTouchLine in the script below). */
+  .touch{display:block;width:max-content;margin-top:3px;font-size:10px;color:var(--faint);}
+
+  /* review signals — facts off the API like draft, so outlined, not filled.
+     Always present on an open PR. Green: approved on head.
+     Amber: no approval yet, an approval that predates the head, or open
+     threads the author has not answered. Blue: open threads all answered, reviewer next. Grey:
+     no open threads, or "?" when not measured. */
+  .sigs{display:flex;flex-wrap:wrap;gap:4px;margin-top:3px;}
+  .sig{display:inline-block;padding:0 7px;border-radius:999px;font-size:10px;font-weight:600;
+       white-space:nowrap;box-shadow:inset 0 0 0 1px var(--line);color:var(--faint);}
+  .sig-ok{color:var(--ok);box-shadow:inset 0 0 0 1px var(--ok-line);}
+  .sig-wait{color:var(--wait);box-shadow:inset 0 0 0 1px var(--wait-line);}
+  .sig-active{color:var(--active);box-shadow:inset 0 0 0 1px var(--active-line);}
+  .sig-block{color:var(--block);box-shadow:inset 0 0 0 1px var(--block-line);}
+  a.sig{text-decoration:none;}
+  a.sig:hover{text-decoration:underline;}
+
+  /* review queue */
+  .queue{border:1px solid var(--line);border-radius:12px;background:var(--card);overflow:hidden;
+         margin:0 0 26px;box-shadow:0 1px 2px rgba(20,26,36,.05);}
+  .queue h2{margin:0;padding:11px 15px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;
+            color:var(--muted);border-bottom:1px solid var(--line);background:var(--stripe);}
+  .queue h2{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;}
+  .queue h2 .qscope{text-transform:none;letter-spacing:0;font-weight:600;color:var(--faint);
+                    font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;}
+  /* Two lines per row. Line 1 is the scan line — rank, PR, status, approval,
+     threads, last touch — in columns shared across rows (subgrid), so reading
+     down one column answers one question for the whole queue. Line 2 is the
+     reasoning, full width and quieter: read once a row has caught your eye. */
+  .queue{display:grid;grid-template-columns:auto auto auto auto auto auto auto auto 1fr auto;column-gap:14px;}
+  .queue > h2{grid-column:1/-1;}
+  .qhead,.qrow{grid-column:1/-1;display:grid;grid-template-columns:subgrid;row-gap:3px;
+               align-items:center;padding:9px 15px;border-top:1px solid var(--line);}
+  .qhead{padding-top:6px;padding-bottom:6px;border-top:none;font-size:10px;font-weight:700;
+         text-transform:uppercase;letter-spacing:.06em;color:var(--faint);}
+  .qrow .rank{grid-row:1;grid-column:1;font-weight:800;color:var(--faint);font-size:12px;min-width:16px;}
+  .qrow .ref{grid-row:1;grid-column:2;font-weight:700;}
+  .qrow .act{grid-row:1;grid-column:3;}
+  .qrow .sigcell{display:contents;}
+  .qrow .lbl-long{display:none;}
+  .qrow .merge{grid-row:1;grid-column:4;}
+  .qrow .revs{grid-row:1;grid-column:5;}
+  .qrow .appr{grid-row:1;grid-column:6;}
+  .qrow .thr{grid-row:1;grid-column:7;}
+  .qrow .cmts{grid-row:1;grid-column:8;}
+  .qrow .who{grid-row:1;grid-column:10;justify-self:end;display:flex;flex-direction:column;
+             align-items:flex-end;gap:2px;}
+  .qrow .who .author,.qrow .who .touch{margin-top:0;}
+  .qrow .why{grid-row:2;grid-column:2/-1;color:var(--muted);font-size:13px;}
+  .qrow .why b{color:var(--ink);font-weight:600;}
+
+  .rail{text-align:center;font-weight:800;color:var(--muted);letter-spacing:.08em;font-size:11px;
+        text-transform:uppercase;padding:5px;}
+  .conn{width:2px;height:16px;background:var(--line);margin:0 auto;}
+
+  /* tabs — one per kind of question: what needs me now, how the work is
+     shaped, which issues are covered, what shipped. A tab with nothing in it
+     is not drawn. */
+  .tabs{display:flex;gap:4px;margin:0 0 14px;border-bottom:1px solid var(--line);flex-wrap:wrap;}
+  .tabs button{font:inherit;font-size:13px;font-weight:600;color:var(--muted);background:none;
+               border:none;border-bottom:2px solid transparent;padding:7px 12px;margin-bottom:-1px;cursor:pointer;}
+  .tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--active);}
+  .tabs button .n{font-weight:500;color:var(--faint);margin-left:5px;font-size:11.5px;}
+  .pane[hidden]{display:none;}
+
+  /* since last scan — what moved, one row per PR, before the queue. */
+  .changes{border:1px solid var(--line);border-radius:12px;background:var(--card);margin:0 0 16px;
+           overflow:hidden;font-size:13px;}
+  .changes h2{margin:0;padding:9px 15px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;
+              color:var(--muted);background:var(--stripe);border-bottom:1px solid var(--line);}
+  .changes h2 .when{text-transform:none;letter-spacing:0;font-weight:500;color:var(--faint);margin-left:6px;}
+  .changes .crow{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:baseline;
+                 padding:6px 15px;border-top:1px solid var(--line);}
+  .changes .crow:first-of-type{border-top:none;}
+  .changes .crow .ref{font-weight:700;}
+  .changes .crow .what{display:flex;flex-wrap:wrap;gap:4px;}
+  .changes .quiet{padding:9px 15px;color:var(--muted);}
+
+  /* reviewed ticks (localStorage): a looked-at row dims until the PR moves. */
+  .qrow .rank{display:inline-flex;align-items:center;gap:6px;}
+  .qrow .rank input{margin:0;cursor:pointer;accent-color:var(--active);}
+  .qrow.seen > :not(.rank){opacity:.5;}
+  .qrow .seen-note{font-size:10px;color:var(--faint);}
+  .qrow .seen-note.moved{color:var(--wait);font-weight:600;}
+
+  .closes{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;font-size:11.5px;color:var(--muted);}
+  .closes a{color:inherit;}
+  .hoist-by{font-size:11px;color:var(--faint);}
+
+  .lanes{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;margin-top:2px;}
+  @media(max-width:720px){.lanes{grid-template-columns:1fr;}}
+  .lane{border:1px solid var(--line);border-radius:12px;background:var(--card);overflow:hidden;
+        box-shadow:0 1px 2px rgba(20,26,36,.05);}
+  .lane.span{grid-column:1/-1;}
+  .lane.active{border-color:var(--active-line);box-shadow:0 0 0 3px var(--active-bg);}
+  .lane.block{border-color:var(--block-line);}
+  .lane-head{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;
+             justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;}
+  .lane-head-left{display:inline-flex;align-items:baseline;gap:8px;flex-wrap:wrap;}
+  .lane-head .t{font-weight:750;font-size:13.5px;}
+  .lane-head .b{font-size:11.5px;color:var(--faint);}
+  .lane-head-left .author{margin-top:0;}
+  .lane.active .lane-head{background:var(--active-bg);}
+  .lane.defer .lane-head{background:var(--defer-bg);}
+
+  .slice{display:grid;grid-template-columns:auto 1fr auto;gap:11px;align-items:baseline;
+         padding:9px 14px;border-top:1px solid var(--line);}
+  .slice:first-of-type{border-top:none;}
+  .slice .pr{font-weight:700;color:var(--ink);}
+  .slice .br{color:var(--muted);font-size:12px;}
+  .slice .desc{color:var(--ink);}
+  .slice .desc small{display:block;color:var(--muted);font-size:11.5px;margin-top:1px;}
+  .slice .desc .author{display:block;width:max-content;margin-top:5px;}
+  .slice .st{justify-self:end;}
+  .stacknote{padding:6px 14px;font-size:11px;color:var(--faint);background:var(--stripe);
+             border-top:1px dashed var(--line);}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:10px;padding:12px 14px;}
+  .card{border:1px solid var(--line);border-radius:9px;padding:9px 11px;background:var(--card2);}
+  .card .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:3px;}
+  .card .pr{font-weight:700;}
+  .card .br{color:var(--muted);font-size:11.5px;}
+  .card .d{font-size:12.5px;}
+  .card .author{display:block;width:max-content;margin-top:6px;}
+  .sec{margin:26px 0 8px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.07em;
+       color:var(--muted);display:flex;align-items:center;gap:10px;}
+  .sec::after{content:"";flex:1;height:1px;background:var(--line);}
+  .foot{margin-top:24px;padding:14px 16px;background:var(--card);border:1px solid var(--line);border-radius:12px;
+        font-size:12.5px;color:var(--muted);}
+  .foot b{color:var(--ink);}
+  .foot ul{margin:8px 0 0;padding-left:18px;}
+  .foot li{margin:3px 0;}
+
+  /* ---- narrow viewports ---------------------------------------------------
+     The layouts above are column counts, and a phone can't honor them. The
+     queue's five auto-sized columns left the prose ~60px wide — six characters
+     a line, turning one board into a several-thousand-pixel scroll — and pushed
+     the status pill past .queue's overflow:hidden, so it was clipped rather
+     than wrapped. The two fixed corner chips collide with each other long
+     before the viewport gets this small.
+
+     Reflow instead of shrinking: identifier and status keep the first line,
+     prose takes the full width underneath. */
+  /* 720px, not 640: `.lanes` already drops to one column here, and between the
+     two the board kept five auto-sized tracks with far less width to spread
+     them over -- so the queue's prose column was narrower in that band than on
+     the phone this reflow exists to fix. One breakpoint, not two. */
+  /* The scan line's width depends on what is in it -- refs, author badges, a
+     long thread chip -- so no fixed breakpoint is right for every board. The
+     renderer measures instead: when the line overflows, .queue gets .stacked,
+     which drops the shared tracks and the column labels, keeps identity and
+     status on line 1, and gives the signals their own line, in full wording
+     since there is no header to name them. */
+  .queue.stacked{display:block;}
+  .queue.stacked .qhead{display:none;}
+  .queue.stacked .qrow{grid-template-columns:auto 1fr auto;gap:3px 10px;}
+  .queue.stacked .qrow .act{grid-column:3;justify-self:end;}
+  .queue.stacked .qrow .sigcell{display:flex;flex-wrap:wrap;gap:4px;grid-row:2;grid-column:2/-1;}
+  .queue.stacked .qrow .lbl-short{display:none;}
+  .queue.stacked .qrow .lbl-long{display:inline;}
+  .queue.stacked .qrow .why{grid-row:3;grid-column:2/-1;}
+  .queue.stacked .qrow .who{grid-row:4;grid-column:2/-1;justify-self:start;flex-direction:row;
+                            align-items:center;flex-wrap:wrap;gap:4px 8px;}
+
+  @media(max-width:720px){
+    body{padding:16px 12px;}
+
+    /* "Generated" is a label for a chip that is self-evidently a timestamp, and
+       the stamp is the widest thing in the row. Dropping the word and taking the
+       chip down a size buys ~13px of slack at 375px — enough that the row isn't
+       one font metric away from wrapping, which is how the last attempt failed.
+       Below ~340px it wraps to two lines and that's the right answer. */
+    .gen-label{display:none;}
+    .generated{padding:5px 8px;font-size:10px;}
+
+
+
+    .slice{grid-template-columns:auto 1fr;gap:3px 10px;}
+    .slice .st{grid-column:2;justify-self:start;}
+
+    .grid{grid-template-columns:1fr;}
+
+    /* Refs and branch names are long unbreakable tokens; break them rather
+       than let one widen the row past the screen. */
+    .ref,.slice .br,.card .br{overflow-wrap:anywhere;}
+  }
+</style>
+</head>
+<body>
+<div class="generated" id="generated"></div>
+<div class="theme" id="theme" data-open="false">
+  <button class="theme-cur" id="theme-cur" aria-expanded="false" aria-controls="theme-menu">System</button>
+  <div class="theme-menu" id="theme-menu" role="group" aria-label="Color theme">
+    <button data-mode="light" aria-pressed="false">Light</button>
+    <button data-mode="dark" aria-pressed="false">Dark</button>
+    <button data-mode="system" aria-pressed="false">System</button>
+  </div>
+</div>
+<div class="wrap" id="root"></div>
+
+<!-- ============================================================
+  DATA ISLAND — the pr-dashboard skill replaces the contents of
+  this <script> with the run's JSON model. Schema is documented in
+  SKILL.md. Everything below is a fixed renderer; do not edit it
+  per run — only swap the JSON.
+============================================================ -->
+<script id="dash-data" type="application/json">
+{
+  "title": "PR dashboard — sample",
+  "subtitle": "Replace this data island. See SKILL.md for the model schema.",
+  "generatedAt": "2026-07-23 14:32:07 PDT",
+  "legend": true,
+  "queue": [
+    { "rank": 1, "ref": "repo#000", "author": "octocat", "action": "review",
+      "why": "This is the sample model — run collect.sh and rebuild.",
+      "lastTouch": { "kind": "review:changes_requested", "by": "hubot", "at": "2026-07-23T13:00:00Z" } }
+  ],
+  "sections": [
+    {
+      "repo": "owner/repo",
+      "base": "main 0000000",
+      "lanes": [
+        { "title": "Example stack", "meta": "off main", "accent": "active", "kind": "stack",
+          "items": [
+            { "pr": "#2", "branch": "feat/b", "desc": "second slice", "sub": "↳ on #1", "status": "review", "author": "octocat" },
+            { "pr": "#1", "branch": "feat/a", "desc": "base slice", "status": "approved", "author": "hubot" }
+          ],
+          "note": "bottom merges first — different authors, so each card keeps its own badge" },
+        { "title": "One author's cleanup", "kind": "grid", "span": true,
+          "items": [
+            { "pr": "#9", "branch": "fix/x", "desc": "a one-off", "status": "review", "author": "hubot",
+              "lastTouch": { "kind": "commit", "by": "hubot", "at": "2026-07-23T12:00:00Z" } },
+            { "pr": "#10", "branch": "fix/y", "desc": "another one-off", "status": "review", "author": "hubot",
+              "lastTouch": { "kind": "comment", "by": "octocat", "at": "2026-07-23T13:30:00Z" } }
+          ],
+          "note": "same author on every item — hoisted to the lane title instead of repeated per card. #9's own routine push stays quiet; #10 shows octocat's comment since that's someone other than the author" }
+      ]
+    }
+  ],
+  "footnotes": [ "One-line takeaways go here." ]
+}
+</script>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- theme switch: light | dark | system (persisted) ----
+  // Collapsed to the current mode and expanded on demand. That makes it the one
+  // control on the page with open/closed state, so it also owns the dismissal
+  // rules a disclosure needs: choosing closes it, and so does Escape or a click
+  // anywhere else. A popup you can only close by re-tapping its trigger is the
+  // usual way this goes wrong.
+  var THEME_KEY = "pr-dashboard-theme";
+  var themeBox = document.getElementById("theme");
+  var themeCur = document.getElementById("theme-cur");
+  var THEME_LABEL = { light: "Light", dark: "Dark", system: "System" };
+  function setThemeOpen(open) {
+    themeBox.setAttribute("data-open", String(open));
+    themeCur.setAttribute("aria-expanded", String(open));
+  }
+  function applyTheme(mode) {
+    var r = document.documentElement;
+    if (mode === "system") r.removeAttribute("data-theme");
+    else r.setAttribute("data-theme", mode);
+    var btns = themeBox.querySelectorAll("button[data-mode]");
+    for (var i = 0; i < btns.length; i++)
+      btns[i].setAttribute("aria-pressed", String(btns[i].dataset.mode === mode));
+    themeCur.textContent = THEME_LABEL[mode] || mode;   // ::after marker is unaffected
+  }
+  var saved = "system";
+  try { saved = localStorage.getItem(THEME_KEY) || "system"; } catch (e) {}
+  applyTheme(saved);
+  themeBox.addEventListener("click", function (e) {
+    var b = e.target.closest("button"); if (!b) return;
+    if (b === themeCur) { setThemeOpen(themeBox.getAttribute("data-open") !== "true"); return; }
+    var mode = b.dataset.mode;
+    try { localStorage.setItem(THEME_KEY, mode); } catch (e) {}
+    applyTheme(mode);
+    setThemeOpen(false);
+  });
+  // Both disclosures drop a panel over the page, so both dismiss the same way.
+  // The legend is a <details>, which only knows how to close via its own summary
+  // — left alone, its panel would sit over the queue while you scrolled past it.
+  function closePanels(e) {
+    if (!themeBox.contains(e.target)) setThemeOpen(false);
+    var legend = document.querySelector(".legend-box[open]");
+    if (legend && !legend.contains(e.target)) legend.open = false;
+  }
+  document.addEventListener("click", closePanels);
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    if (themeBox.getAttribute("data-open") === "true") {
+      setThemeOpen(false);
+      themeCur.focus();
+    }
+    var legend = document.querySelector(".legend-box[open]");
+    if (legend) {
+      legend.open = false;
+      legend.querySelector("summary").focus();
+    }
+  });
+
+  // ---- render ----
+  var PILL = { active:"p-active", approved:"p-ok", review:"p-wait",
+               merged:"p-merged", deferred:"p-defer", blocked:"p-block" };
+  var LABEL = { active:"active", approved:"approved", review:"in review",
+                merged:"merged", deferred:"deferred", blocked:"blocked" };
+
+  function el(tag, cls, html) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (html != null) n.innerHTML = html;
+    return n;
+  }
+  function esc(s){ return String(s==null?"":s).replace(/[&<>]/g, function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]; }); }
+  function pill(status){
+    var cls = PILL[status] || "p-wait", lab = LABEL[status] || status || "review";
+    return '<span class="pill '+cls+'">'+esc(lab)+'</span>';
+  }
+  // `draft` is a fact off the API, not one of the judgment statuses, so it gets
+  // its own pill *alongside* status rather than replacing it — a draft can just
+  // as easily be parked, blocked, or approved, and folding it into `status`
+  // would silently drop whichever signal lost the coin flip.
+  function draftPill(it){
+    return (it && it.draft) ? '<span class="pill p-draft">draft</span> ' : "";
+  }
+
+  // ---- lastTouch: who most recently did something, and how long ago ----
+  // Computed against the real clock at page load (not baked in at generation
+  // time like generatedAt), so opening a dashboard hours after collect.sh ran
+  // still shows a true "3h ago". It's a load-time snapshot, not a live ticker —
+  // the text doesn't refresh while the tab sits open.
+  var TOUCH_VERB = {
+    "comment": "commented", "commit": "pushed", "force-push": "force-pushed",
+    "review:approved": "approved", "review:changes_requested": "requested changes",
+    "review:commented": "reviewed", "review:dismissed": "dismissed a review"
+  };
+  function timeAgo(iso) {
+    var then = iso ? new Date(iso).getTime() : NaN;
+    if (isNaN(then)) return "";
+    var s = Math.max(0, (Date.now() - then) / 1000);
+    if (s < 90) return "just now";
+    var m = s / 60; if (m < 90) return Math.round(m) + "m ago";
+    var h = m / 60; if (h < 36) return Math.round(h) + "h ago";
+    var d = h / 24; if (d < 21) return Math.round(d) + "d ago";
+    return Math.round(d / 7) + "w ago";
+  }
+  // A routine "author pushed another commit on their own PR" is the default
+  // state of anything active — not news. Suppress only that one case; every
+  // other combination (someone else touched it, a comment, a review, a
+  // force-push) is exactly the signal this exists to surface.
+  function lastTouchLine(it) {
+    var lt = it && it.lastTouch;
+    if (!lt || !lt.at) return "";
+    if (lt.kind === "commit" && lt.by === it.author) return "";
+    var verb = TOUCH_VERB[lt.kind] || lt.kind;
+    var who = (lt.by && lt.by !== it.author) ? esc(lt.by) + " " : "";
+    var when = timeAgo(lt.at);
+    return who + verb + (when ? " " + when : "");
+  }
+
+  // ---- review signals: approvals vs the current head, unresolved threads ----
+  // reviewDecision stays APPROVED after a push and says nothing about open
+  // threads, so these come from collect.sh's `approvals` / `threads`. Every
+  // state gets a chip, zero included: on a board that changes hourly, a
+  // missing chip can't be told apart from a missing measurement. An explicit
+  // null means collect.sh tried and could not measure; only an absent key
+  // (an older model, or a merged PR) renders nothing.
+  // `short` drops the noun for the queue, whose column header supplies it
+  // ("Approval: none"); lanes have no header, so they keep the full wording.
+  function chip(cls, text, title, href) {
+    var tag = href ? "a" : "span";
+    return '<' + tag + ' class="sig' + (cls ? " " + cls : "") + '"' +
+      (href ? ' href="' + esc(href) + '"' : "") +
+      (title ? ' title="' + esc(title) + '"' : "") + '>' + text + '</' + tag + '>';
+  }
+  // A missing approval is owed (amber) only once a nudge is due: while the
+  // newest review request is younger than nudgeAfterHours, nobody is late yet.
+  function nudgeHours() { return (data && data.nudgeAfterHours) || 48; }
+  function approvalChip(a, short, it) {
+    if (a === undefined) return "";
+    if (a === null) return chip("", short ? "?" : "approvals ?", "not measured");
+    var head = a.atHead || [], stale = a.stale || [];
+    var who = head.concat(stale.map(function (s) { return s + " (stale)"; })).join(", ");
+    if (head.length)
+      return chip("sig-ok", "✓ " + (head.length > 1 ? head.length + " " : "") +
+        (short ? "on head" : (head.length > 1 ? "approvals" : "approved") + " on head"), who) +
+        (stale.length && !short ? chip("sig-wait", "+" + stale.length + " stale", who) : "");
+    if (stale.length)
+      return chip("sig-wait", short ? "predates head" :
+        (stale.length > 1 ? stale.length + " approvals predate" : "approval predates") + " head", who);
+    // Amber, the colour of "in review": a merge needs at least one approval,
+    // so its absence is something still owed, not a neutral zero.
+    var asked = it && it.reviewers && it.reviewers.lastRequestedAt;
+    var age = asked ? (Date.now() - new Date(asked).getTime()) / 3600000 : NaN;
+    if (age < nudgeHours())
+      return chip("", short ? "none" : "no approval on head",
+        "review requested " + timeAgo(asked) + "; nudge due after " + nudgeHours() + "h");
+    return chip("sig-wait", short ? "none" : "no approval on head",
+      asked ? "review requested " + timeAgo(asked) + "; nudge due" : "");
+  }
+  // Open threads split on who spoke last (collect.sh's `replied`): amber while
+  // any wait on the PR author, blue once the author has answered them all and
+  // the reviewer owes the next move. Linked, since the next step is reading them.
+  function threadChip(t, short, href) {
+    if (t === undefined) return "";
+    if (t === null) return chip("", short ? "?" : "threads ?", "not measured");
+    // Grey, not green: no threads means nothing is under discussion, not that
+    // anything was resolved. Colour is kept for threads that need someone.
+    if (!(t.unresolved > 0)) return chip("", short ? "none" : "no open threads");
+    // Short form leaves "outdated" to the title: the column has to stay narrow.
+    var outdated = t.outdated && !short ? " · " + t.outdated + " outdated" : "";
+    var tip = t.outdated ? t.outdated + " outdated (anchor lines changed since)" : "";
+    var noun = t.unresolved + " open thread" + (t.unresolved > 1 ? "s" : "");
+    if (t.replied == null)
+      return chip("sig-wait", (short ? t.unresolved + " open" : noun) + outdated, tip, href);
+    var waiting = t.unresolved - t.replied;
+    var split = [waiting ? waiting + " unanswered" : "", t.replied ? t.replied + " replied" : ""]
+      .filter(Boolean).join(" · ");
+    return chip(waiting ? "sig-wait" : "sig-active", (short ? split : noun + ": " + split) + outdated,
+      "unanswered: the PR author has not replied last · replied: the author has, the reviewer is next" +
+      (tip ? " · " + tip : ""), href);
+  }
+  // Reviewers: pending requests plus everyone who has reviewed. "0/2 reviewed"
+  // reads as progress; "none" when nobody is on it at all.
+  function reviewersChip(r, short) {
+    if (r === undefined) return "";
+    if (r === null) return chip("", short ? "?" : "reviewers ?", "not measured");
+    var all = r.requested.concat(r.reviewed.filter(function (x) { return r.requested.indexOf(x) < 0; }));
+    if (!all.length) return chip("", short ? "none" : "no reviewers");
+    var title = r.reviewed.map(function (x) { return x + " (reviewed)"; })
+      .concat(r.requested.map(function (x) { return x + " (requested)"; })).join(", ");
+    return chip("", r.reviewed.length + "/" + all.length + " reviewed", title);
+  }
+  // Merge: collect.sh's mergeReady checklist, reduced to one chip. The first
+  // failing check names the chip; hover lists every check that isn't a pass.
+  var MERGE_CHECK = { draft: "draft", ci: "CI", approval: "no approval", changes: "changes requested",
+                      conflicts: "conflicts", threads: "open threads", stack: "stacked" };
+  function mergeChip(m, short) {
+    if (m === undefined) return "";
+    if (m === null) return chip("", "?", "not measured");
+    var open = (m.checks || []).filter(function (c) { return c.state !== "pass"; });
+    var title = open.map(function (c) {
+      return (c.state === "fail" ? "✗ " : c.state === "warn" ? "! " : "? ") + c.check + (c.note ? ": " + c.note : "");
+    }).join("\n");
+    var fails = open.filter(function (c) { return c.level === "block" && c.state === "fail"; });
+    var warns = open.filter(function (c) { return c.state === "warn"; });
+    if (m.verdict === "ready")
+      return chip("sig-ok", "✓ ready" + (warns.length ? " · " + warns.length + " warning" + (warns.length > 1 ? "s" : "") : ""), title);
+    if (m.verdict === "unknown") return chip("", short ? "?" : "merge ?", title);
+    // A fixed short name per check keeps the column a predictable width; the
+    // note ("changes requested by a, b") can be any length, so it goes in the title.
+    var name = MERGE_CHECK[fails[0].check] || fails[0].check;
+    if (fails[0].check === "approval" && /predates/.test(fails[0].note || "")) name = "stale approval";
+    return chip("sig-block", "✗ " + name + (fails.length > 1 ? " +" + (fails.length - 1) : ""), title);
+  }
+  function commentsChip(n, short) {
+    if (n === undefined) return "";
+    if (n === null) return chip("", short ? "?" : "comments ?", "not measured");
+    // Zero reads "none" in every column, so one word means "nothing here".
+    if (!n) return chip("", short ? "none" : "no comments");
+    return chip("", short ? String(n) : n + " comment" + (n === 1 ? "" : "s"),
+      "conversation plus inline review comments");
+  }
+  function reviewSignals(it) {
+    if (!it) return "";
+    var out = approvalChip(it.approvals, false, it) + threadChip(it.threads, false, it.url);
+    return out ? '<span class="sigs">' + out + '</span>' : "";
+  }
+
+  // ---- closes: the issues a PR would close, linked ----
+  function issueUrl(prUrl, n) {
+    return prUrl ? String(prUrl).replace(/\/pull\/\d+.*$/, "/issues/" + n) : null;
+  }
+  function closesHtml(it) {
+    var ns = (it && it.closes) || [];
+    if (!ns.length) return "";
+    return '<span class="closes">closes ' + ns.map(function (n) {
+      var u = issueUrl(it.url, n);
+      return u ? '<a href="' + esc(u) + '">#' + esc(n) + '</a>' : "#" + esc(n);
+    }).join(", ") + '</span>';
+  }
+
+  // ---- reviewed ticks: per-viewer, in localStorage, keyed by PR url ----
+  // Storage can be missing or throw (private window, blocked site data), and
+  // the board must render the same without it.
+  function store(op, k, v) {
+    try {
+      if (op === "get") return window.localStorage.getItem(k);
+      if (op === "set") window.localStorage.setItem(k, v);
+      if (op === "del") window.localStorage.removeItem(k);
+    } catch (e) {}
+    return null;
+  }
+  function seenKey(it) { return "prdash:seen:" + (it.url || it.ref); }
+
+  var data;
+  try { data = JSON.parse(document.getElementById("dash-data").textContent); }
+  catch (e) { document.getElementById("root").textContent = "Bad data island: " + e; return; }
+
+  // The word is a separate element so a phone can drop it: a chip reading
+  // "2026-08-12 23:21:51 PDT" is self-evidently a timestamp, and the label is
+  // the difference between this row fitting on one line and not.
+  if (data.generatedAt)
+    document.getElementById("generated").innerHTML =
+      '<span class="gen-label">Generated&nbsp;</span>' + esc(data.generatedAt);
+
+  var root = document.getElementById("root");
+  root.appendChild(el("h1", null, esc(data.title || "PR dashboard")));
+  if (data.subtitle) root.appendChild(el("p", "sub", esc(data.subtitle)));
+
+  // One header row, same at every width: status key, board age, theme switch.
+  // Both chips move here from the body rather than pinning to a corner — no
+  // breakpoint decides where they live, so there is no width at which the page
+  // reserves an empty band for them. Built even with `legend:false`, since the
+  // other two still need somewhere to sit.
+  var metaRow = el("div", "meta-row");
+  if (data.legend !== false) {
+    // Seven rows of key ahead of the queue is a lot of screen for a reference
+    // you read once — folded behind its summary, at any width.
+    metaRow.appendChild(el("details", "legend-box",
+      '<summary>Status key</summary>' +
+      '<div class="legend">' +
+      '<span>'+pill("active")+' driving now</span>' +
+      '<span>'+pill("approved")+' ready to merge</span>' +
+      '<span>'+pill("review")+' awaiting review</span>' +
+      '<span>'+pill("blocked")+' needs author action</span>' +
+      '<span>'+pill("merged")+' landed</span>' +
+      '<span>'+pill("deferred")+' parked</span>' +
+      '<span>'+draftPill({draft:true})+' not offered for review</span>' +
+      '<span><span class="sig sig-ok">✓ approved on head</span> approval covers the latest push</span>' +
+      '<span><span class="sig sig-wait">approval predates head</span> approved, then pushed again</span>' +
+      '<span><span class="sig sig-wait">1 unanswered</span> open thread, author has not replied</span>' +
+      '<span><span class="sig sig-active">1 replied</span> open thread, author replied, reviewer is next</span>' +
+      '<span><span class="sig">?</span> not measured</span>' +
+      '<span><span class="sig sig-block">✗ no approval +1</span> merge blocked: first reason, hover for all</span>' +
+      '</div>'));
+  }
+  metaRow.appendChild(document.getElementById("generated"));
+  metaRow.appendChild(document.getElementById("theme"));
+  root.appendChild(metaRow);
+
+  // ---- tabs ----
+  // Lanes sort into tabs by what they answer: an "issues" lane is coverage,
+  // a lane whose every item merged is the recap, anything else is a workstream.
+  function paneOf(lane) {
+    if (lane.kind === "issues") return "issues";
+    var items = lane.items || [];
+    if (items.length && items.every(function (it) { return it.status === "merged"; })) return "shipped";
+    return "work";
+  }
+  var TABS = [["now", "Now"], ["work", "Workstreams"], ["issues", "Issues"], ["shipped", "Shipped"]];
+  var counts = { now: (data.queue || []).length, work: 0, issues: 0, shipped: 0 };
+  (data.sections || []).forEach(function (sec) {
+    (sec.lanes || []).forEach(function (lane) { counts[paneOf(lane)] += (lane.items || []).length; });
+  });
+  var tabBar = el("div", "tabs"); tabBar.setAttribute("role", "tablist");
+  var panes = {};
+  root.appendChild(tabBar);
+  TABS.forEach(function (t) {
+    if (t[0] !== "now" && !counts[t[0]]) return;
+    var b = el("button", null, esc(t[1]) + (counts[t[0]] ? '<span class="n">' + counts[t[0]] + '</span>' : ""));
+    b.setAttribute("role", "tab"); b.dataset.tab = t[0];
+    tabBar.appendChild(b);
+    panes[t[0]] = el("div", "pane"); panes[t[0]].dataset.pane = t[0];
+    root.appendChild(panes[t[0]]);
+  });
+  function show(name, remember) {
+    if (!panes[name]) name = "now";
+    Object.keys(panes).forEach(function (k) { panes[k].hidden = k !== name; });
+    [].forEach.call(tabBar.children, function (b) { b.setAttribute("aria-selected", String(b.dataset.tab === name)); });
+    if (remember) store("set", "prdash:tab", name);
+    if (name === "now" && window.__fitQueue) window.__fitQueue();
+  }
+  tabBar.addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-tab]");
+    if (b) { show(b.dataset.tab, true); history.replaceState(null, "", "#tab=" + b.dataset.tab); }
+  });
+
+  // ---- since last scan (render.py's `changes`) ----
+  // Three explicit states: first scan, nothing moved, and the list. A board
+  // rendered without render.py has no `changes` and shows nothing here.
+  var ch = data.changes;
+  if (ch) {
+    var cbox = el("div", "changes");
+    var when = ch.since ? timeAgo(ch.since) : "";
+    if (ch.first) {
+      cbox.appendChild(el("h2", null, "Since last scan"));
+      cbox.appendChild(el("div", "quiet", "First scan of this board: baseline saved. What moves shows here next time."));
+    } else if (!ch.items || !ch.items.length) {
+      cbox.appendChild(el("h2", null, 'Since last scan<span class="when">' + esc(when) + '</span>'));
+      cbox.appendChild(el("div", "quiet", "Nothing moved."));
+    } else {
+      cbox.appendChild(el("h2", null, 'Since last scan<span class="when">' + esc(when) +
+        " · " + ch.items.length + " change" + (ch.items.length > 1 ? "s" : "") + '</span>'));
+      var order = [], byRef = {};
+      ch.items.forEach(function (c) {
+        if (!byRef[c.ref]) { byRef[c.ref] = []; order.push(c.ref); }
+        byRef[c.ref].push(c);
+      });
+      var repos = order.map(function (r) { return r.split("#")[0]; });
+      var oneRepo = repos.every(function (r) { return r === repos[0]; });
+      var TONE = { good: "sig-ok", bad: "sig-wait", info: "" };
+      order.forEach(function (r) {
+        var cs = byRef[r], row = el("div", "crow");
+        var label = oneRepo ? "#" + r.split("#")[1] : r;
+        row.appendChild(el("span", "ref mono", cs[0].url ? '<a href="' + esc(cs[0].url) + '">' + esc(label) + '</a>' : esc(label)));
+        row.appendChild(el("span", "what", cs.map(function (c) { return chip(TONE[c.tone] || "", esc(c.text)); }).join("")));
+        cbox.appendChild(row);
+      });
+    }
+    panes.now.appendChild(cbox);
+  }
+
+  // ---- review queue ----
+  if (data.queue && data.queue.length) {
+    var q = el("div", "queue");
+    // A repo or author shared by every row says nothing per row; say it once in
+    // the header, the way a uniform lane author is hoisted below.
+    var same = function (xs) { return xs.length > 1 && xs.every(function (x) { return x && x === xs[0]; }) ? xs[0] : null; };
+    var qRepo = same(data.queue.map(function (it) { return String(it.ref || "").split("#")[0]; }));
+    var qAuthor = same(data.queue.map(function (it) { return it.author; }));
+    var scope = [qRepo, qAuthor].filter(Boolean).map(esc).join(" · ");
+    q.appendChild(el("h2", null, "<span>Review queue — do these in order</span>" +
+      (scope ? '<span class="qscope">' + scope + '</span>' : "")));
+    q.appendChild(el("div", "qhead",
+      "<span></span><span>PR</span><span>Status</span><span>Merge</span><span>Reviewers</span><span>Approval</span>" +
+      "<span>Threads</span><span>Comments</span><span></span><span>Last touch</span>"));
+    data.queue.forEach(function (item, i) {
+      var row = el("div", "qrow");
+      var rank = el("span", "rank");
+      var tick = document.createElement("input");
+      tick.type = "checkbox"; tick.title = "Looked at this";
+      rank.appendChild(tick);
+      rank.appendChild(document.createTextNode(item.rank != null ? item.rank : (i + 1)));
+      row.appendChild(rank);
+      var label = qRepo ? String(item.ref).slice(qRepo.length) : item.ref;
+      var ref = el("span", "ref mono");
+      ref.innerHTML = item.url ? '<a href="'+esc(item.url)+'">'+esc(label)+'</a>' : esc(label);
+      row.appendChild(ref);
+      row.appendChild(el("span", "act",
+        draftPill(item) + (item.action ? pill(item.action) : "")));
+      // Short labels where the column header names the signal; the phone
+      // layout hides the header, so CSS swaps in the full wording there.
+      var both = function (f, v) {
+        var arg = f === approvalChip ? item : item.url;
+        return '<span class="lbl-short">' + f(v, true, arg) + '</span>' +
+               '<span class="lbl-long">' + f(v, false, arg) + '</span>';
+      };
+      row.appendChild(el("span", "sigcell",
+        '<span class="merge">' + both(mergeChip, item.mergeReady) + '</span>' +
+        '<span class="revs">' + both(reviewersChip, item.reviewers) + '</span>' +
+        '<span class="appr">' + both(approvalChip, item.approvals) + '</span>' +
+        '<span class="thr">' + both(threadChip, item.threads) + '</span>' +
+        '<span class="cmts">' + both(commentsChip, item.comments) + '</span>'));
+      var who = el("span", "who");
+      if (!qAuthor && item.author) who.appendChild(el("span", "author", esc(item.author)));
+      // lastTouchLine hides a routine self-push, which suits a card; here the
+      // column would then read blank, so say it.
+      var qTouch = lastTouchLine(item) ||
+        (item.lastTouch ? "pushed " + timeAgo(item.lastTouch.at) : "—");
+      who.appendChild(el("span", "touch", qTouch));
+      var seenNote = el("span", "seen-note");
+      who.appendChild(seenNote);
+      row.appendChild(who);
+      var cl = closesHtml(item);
+      // --waiting-on boards: why this PR is the viewer's move, ahead of the prose.
+      var wait = (item.waitingOn || []).map(function (w) { return chip("sig-active", "your move: " + esc(w)); }).join("");
+      row.appendChild(el("span", "why", wait + (wait ? " " : "") + (cl ? cl + " · " : "") + esc(item.why)));
+      // A tick dims the row until the PR moves: activity after the tick
+      // brings it back at full strength, marked, without un-ticking it.
+      var paintSeen = function () {
+        var at = store("get", seenKey(item));
+        tick.checked = !!at;
+        var moved = at && item.lastTouch && item.lastTouch.at && new Date(item.lastTouch.at) > new Date(at);
+        row.classList.toggle("seen", !!at && !moved);
+        seenNote.className = "seen-note" + (moved ? " moved" : "");
+        seenNote.textContent = !at ? "" : moved ? "changed since you looked" : "looked " + timeAgo(at);
+      };
+      tick.addEventListener("change", function () {
+        if (tick.checked) store("set", seenKey(item), new Date().toISOString());
+        else store("del", seenKey(item));
+        paintSeen();
+      });
+      paintSeen();
+      q.appendChild(row);
+    });
+    panes.now.appendChild(q);
+    // Stack the queue when its scan line won't fit (see .queue.stacked).
+    // Measured only while visible: a hidden pane reports zero widths.
+    var fitQueue = function () {
+      if (panes.now.hidden) return;
+      q.classList.remove("stacked");
+      if (q.scrollWidth > q.clientWidth + 1) q.classList.add("stacked");
+    };
+    window.__fitQueue = fitQueue;
+    window.addEventListener("resize", fitQueue);
+  }
+
+  // ---- sections (one per repo), split across the lane tabs ----
+  ["work", "issues", "shipped"].forEach(function (pane) {
+  if (!panes[pane]) return;
+  var target = panes[pane];
+  (data.sections || []).forEach(function (sec) {
+    var mine = (sec.lanes || []).filter(function (l) { return paneOf(l) === pane; });
+    if (!mine.length) return;
+    if (sec.heading) target.appendChild(el("div", "sec", esc(sec.heading)));
+    if (sec.base || sec.repo) {
+      target.appendChild(el("div", "rail",
+        esc(sec.repo || "") + (sec.base ? ' · <span class="mono">'+esc(sec.base)+'</span>' : "")));
+      target.appendChild(el("div", "conn"));
+    }
+    var lanes = el("div", "lanes");
+    mine.forEach(function (lane) {
+      var cls = "lane";
+      if (lane.span) cls += " span";
+      if (lane.accent && lane.accent !== "normal") cls += " " + lane.accent;
+      var L = el("div", cls);
+
+      // Hoist a shared author to the lane header when every item in a
+      // stack/grid lane comes from the same person, instead of repeating an
+      // identical badge on every card (an "issues" lane has no author).
+      var hoistAuthor = null;
+      if (lane.kind !== "issues" && lane.items && lane.items.length >= 2) {
+        var laneAuthors = lane.items.map(function (it) { return it.author; }).filter(Boolean);
+        if (laneAuthors.length === lane.items.length &&
+            laneAuthors.every(function (a) { return a === laneAuthors[0]; })) {
+          hoistAuthor = laneAuthors[0];
+        }
+      }
+
+      var head = el("div", "lane-head");
+      var headLeft = el("div", "lane-head-left");
+      headLeft.appendChild(el("span", "t", esc(lane.title || "")));
+      if (hoistAuthor) {
+        headLeft.appendChild(el("span", "hoist-by", "by"));
+        headLeft.appendChild(el("span", "author", esc(hoistAuthor)));
+      }
+      head.appendChild(headLeft);
+      if (lane.meta) head.appendChild(el("span", "b", esc(lane.meta)));
+      L.appendChild(head);
+
+      if (lane.kind === "grid") {
+        var g = el("div", "grid");
+        (lane.items || []).forEach(function (it) {
+          var c = el("div", "card");
+          var top = el("div", "top");
+          var pr = el("span", "pr mono");
+          pr.innerHTML = it.url ? '<a href="'+esc(it.url)+'">'+esc(it.pr)+'</a>' : esc(it.pr);
+          top.appendChild(pr);
+          top.appendChild(el("span", null, draftPill(it) + pill(it.status)));
+          c.appendChild(top);
+          c.appendChild(el("div", "br mono", esc(it.branch || "")));
+          c.appendChild(el("div", "d", esc(it.desc || "")));
+          if (closesHtml(it)) c.appendChild(el("div", null, closesHtml(it)));
+          if (it.author && !hoistAuthor) c.appendChild(el("div", "author", esc(it.author)));
+          var cTouch = lastTouchLine(it);
+          if (cTouch) c.appendChild(el("div", "touch", cTouch));
+          var cSigs = reviewSignals(it);
+          if (cSigs) c.insertAdjacentHTML("beforeend", cSigs);
+          g.appendChild(c);
+        });
+        L.appendChild(g);
+      } else if (lane.kind === "issues") {
+        // Coverage rows: issue -> the PR covering it (in-flight / merged) or "unclaimed".
+        (lane.items || []).forEach(function (it) {
+          var s = el("div", "slice");
+          var iss = el("span", "pr mono");
+          iss.innerHTML = it.url ? '<a href="'+esc(it.url)+'">'+esc(it.issue)+'</a>' : esc(it.issue);
+          s.appendChild(iss);
+          var d = el("span", "desc");
+          d.innerHTML = esc(it.title || "") + (it.sub ? ' <small>'+esc(it.sub)+'</small>' : '');
+          s.appendChild(d);
+          var st = el("span", "st");
+          if (it.pr) {
+            var ps = it.prStatus || (it.prState === "merged" ? "merged" : "review");
+            // A draft still counts as coverage (the work exists), but the row
+            // shouldn't read as "landing soon" — so mark it rather than drop it.
+            st.innerHTML = draftPill({draft: it.prDraft}) + pill(ps) +
+              ' <span class="mono" style="font-size:11px;color:var(--muted)">→ '+esc(it.pr)+'</span>';
+          } else {
+            st.innerHTML = '<span class="pill p-defer">unclaimed</span>';
+          }
+          s.appendChild(st);
+          L.appendChild(s);
+        });
+      } else {
+        (lane.items || []).forEach(function (it) {
+          var s = el("div", "slice");
+          var pr = el("span", "pr mono");
+          pr.innerHTML = it.url ? '<a href="'+esc(it.url)+'">'+esc(it.pr)+'</a>' : esc(it.pr);
+          s.appendChild(pr);
+          var d = el("span", "desc");
+          var sTouch = lastTouchLine(it);
+          d.innerHTML = '<span class="mono br">'+esc(it.branch||"")+'</span>' +
+                        (it.sub ? ' <small>'+esc(it.sub)+'</small>' : '') +
+                        '<br>'+esc(it.desc||"") +
+                        (it.note ? ' <small>'+esc(it.note)+'</small>' : '') +
+                        (closesHtml(it) ? ' ' + closesHtml(it) : '') +
+                        (it.author && !hoistAuthor ? '<span class="author">'+esc(it.author)+'</span>' : '') +
+                        (sTouch ? '<span class="touch">'+sTouch+'</span>' : '') +
+                        reviewSignals(it);
+          s.appendChild(d);
+          var st = el("span", "st"); st.innerHTML = draftPill(it) + pill(it.status);
+          s.appendChild(st);
+          L.appendChild(s);
+        });
+      }
+      if (lane.note) L.appendChild(el("div", "stacknote", esc(lane.note)));
+      lanes.appendChild(L);
+    });
+    target.appendChild(lanes);
+  });
+  });
+
+  // ---- footnotes ----
+  if (data.footnotes && data.footnotes.length) {
+    var f = el("div", "foot");
+    f.appendChild(el("b", null, "Reading it:"));
+    var ul = el("ul");
+    data.footnotes.forEach(function (n) { ul.appendChild(el("li", null, esc(n))); });
+    f.appendChild(ul);
+    panes.now.appendChild(f);
+  }
+
+  var fromHash = (location.hash.match(/tab=(\w+)/) || [])[1];
+  show(fromHash || store("get", "prdash:tab") || "now", false);
+})();
+</script>
+</body>
+</html>

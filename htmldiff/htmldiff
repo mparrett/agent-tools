@@ -1,0 +1,236 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Open htmldiff.html in the browser with two files or two URLs loaded.
+
+The page is the tool; this gets both sides into it without pasting. It copies
+the page to a temp file with the two documents injected into the head, then
+hands that to the platform opener. The copy is a plain file:// document — no
+server is started and nothing is uploaded.
+
+Fetching is here rather than in the page because the page cannot do it: a
+cross-origin GET from a file:// document is blocked, and no amount of
+client-side code gets around that. So this fetches to temp files and seeds the
+page from them. That does mean `htmldiff <url>` makes a request from your
+machine, with your IP — the page itself still never touches the network.
+
+    htmldiff                                    # open empty
+    htmldiff old.html new.html                  # two files
+    htmldiff https://ex.com/a https://ex.com/b  # two URLs, fetched first
+    htmldiff old.html https://ex.com/b          # one of each
+    htmldiff -k https://staging.internal/ https://www.ex.com/  # skip TLS checks
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import ssl
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlsplit
+
+PAGE = Path(__file__).resolve().parent / "htmldiff.html"
+
+# python-urllib's default user agent is refused or served a stub by a lot of
+# sites, which reads as "the page changed" when it hasn't.
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36 htmldiff"
+)
+DEFAULT_TIMEOUT = 20.0
+DEFAULT_MAX_BYTES = 8 * 1024 * 1024
+
+RE_META_CHARSET = re.compile(rb"""<meta[^>]+charset=["']?\s*([\w-]+)""", re.I)
+
+
+@dataclass
+class Source:
+    """One side of the diff, and where it came from."""
+
+    text: str
+    label: str | None = None  # the URL, when it was fetched
+
+
+def is_url(value: str) -> bool:
+    return urlsplit(value).scheme in ("http", "https")
+
+
+def decode(body: bytes, declared: str | None) -> str:
+    """Content-Type charset wins, then a <meta charset> in the first 2 KB."""
+    if not declared:
+        found = RE_META_CHARSET.search(body[:2048])
+        declared = found.group(1).decode("ascii", "replace") if found else None
+    for charset in (declared, "utf-8"):
+        if not charset:
+            continue
+        try:
+            return body.decode(charset, errors="replace")
+        except LookupError:
+            continue
+    return body.decode("utf-8", errors="replace")
+
+
+def fetch(url: str, *, headers: dict[str, str], timeout: float, max_bytes: int, insecure: bool):
+    """GET a URL. Returns (text, final_url) — final after any redirects."""
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    context = ssl._create_unverified_context() if insecure else None
+    with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+        # Read one byte past the cap so a truncated body is detectable rather
+        # than silently diffed as if the page ended there.
+        body = response.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            raise SystemExit(
+                f"{url}: response exceeds {max_bytes} bytes; raise --max-bytes to fetch it"
+            )
+        text = decode(body, response.headers.get_content_charset())
+        return text, response.geturl()
+
+
+def load(value: str, args, parser) -> Source:
+    if not is_url(value):
+        path = Path(value)
+        if not path.is_file():
+            if urlsplit(value).scheme:
+                parser.error(f"only http and https URLs can be fetched: {value}")
+            parser.error(f"no such file: {value}")
+        return Source(path.read_text(encoding="utf-8", errors="replace"))
+
+    headers = {"User-Agent": args.user_agent, "Accept": "text/html,*/*"}
+    for header in args.header:
+        name, _, body = header.partition(":")
+        if not body:
+            parser.error(f"headers are 'Name: value': {header}")
+        headers[name.strip()] = body.strip()
+
+    try:
+        text, final = fetch(
+            value,
+            headers=headers,
+            timeout=args.timeout,
+            max_bytes=args.max_bytes,
+            insecure=args.insecure,
+        )
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f"{value}: HTTP {exc.code} {exc.reason}") from exc
+    except (urllib.error.URLError, ssl.SSLError, OSError) as exc:
+        raise SystemExit(f"{value}: {exc}") from exc
+
+    return Source(text, label=final)
+
+
+def keep(sources: list[Source]) -> None:
+    """Write fetched bodies to temp files, so what was diffed stays inspectable."""
+    fetched = [s for s in sources if s.label]
+    if not fetched:
+        return
+    directory = Path(tempfile.mkdtemp(prefix="htmldiff-"))
+    for source, name in zip(sources, ("original.html", "changed.html")):
+        if source.label is None:
+            continue
+        path = directory / name
+        path.write_text(source.text, encoding="utf-8")
+        size = len(source.text.encode("utf-8"))
+        print(f"fetched {source.label} → {path} ({size:,} bytes)", file=sys.stderr)
+
+
+def build(page: str, old: Source | None, new: Source | None) -> str:
+    if old is None and new is None:
+        return page
+    preload = {
+        "a": old.text if old else "",
+        "b": new.text if new else "",
+        "aLabel": old.label if old else None,
+        "bLabel": new.label if new else None,
+    }
+    # json.dumps escapes quotes and backslashes, but nothing the *HTML* parser
+    # reacts to — and the inputs are HTML, so this matters here.
+    #
+    # Escaping only "</" closes the "</script>" hole and opens its sibling: the
+    # tokenizer enters script-data-double-escaped state at "<!--" and leaves it
+    # at the next "</script>", which the escape has just hidden. An input with
+    # "<!--" and no "-->" before the page's next <script> then swallows the rest
+    # of the document, and the tab renders blank with no diagnostic.
+    #
+    # Escaping the "<" itself is the version with no sibling: no "<" reaches
+    # the tokenizer at all, so no state it recognizes can be entered. Both JSON
+    # and JS read the unicode escape below back as "<", and json.dumps only
+    # ever emits a bare "<" inside a string value, so replacing every one
+    # is safe.
+    encoded = json.dumps(preload).replace("<", "\\u003c")
+    tag = f"<script>window.__htmldiffPreload = {encoded};</script>"
+    if "</head>" not in page:
+        raise SystemExit("htmldiff.html has no </head> to inject into")
+    return page.replace("</head>", tag + "\n</head>", 1)
+
+
+def open_in_browser(path: Path) -> None:
+    opener = {"darwin": ["open"], "win32": ["cmd", "/c", "start", ""]}.get(
+        sys.platform, ["xdg-open"]
+    )
+    try:
+        subprocess.run([*opener, str(path)], check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"could not open a browser ({exc}); the page is at {path}", file=sys.stderr)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Open the htmldiff page with two files or two URLs loaded.",
+        epilog="A positional argument is fetched if it is an http(s) URL, read as a file otherwise.",
+    )
+    parser.add_argument("old", nargs="?", help="file or URL for the Original side")
+    parser.add_argument("new", nargs="?", help="file or URL for the Changed side")
+    parser.add_argument("-o", "--output", type=Path, help="write the page here instead of a temp file")
+    parser.add_argument("--no-open", action="store_true", help="write the page but don't open it")
+
+    fetching = parser.add_argument_group("fetching")
+    fetching.add_argument(
+        "-H", "--header", action="append", default=[], metavar="'Name: value'",
+        help="extra request header; repeatable (use for cookies or auth)",
+    )
+    fetching.add_argument("--user-agent", default=DEFAULT_USER_AGENT, help="override the User-Agent")
+    fetching.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, metavar="SECONDS")
+    fetching.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES, metavar="N")
+    fetching.add_argument(
+        "-k", "--insecure", action="store_true",
+        help="skip TLS certificate checks (for staging hosts with self-signed certs)",
+    )
+    args = parser.parse_args()
+
+    if args.new is not None and args.old is None:
+        parser.error("give both sides or neither")
+
+    sources = [load(value, args, parser) for value in (args.old, args.new) if value is not None]
+    keep(sources)
+    old, new = (sources + [None, None])[:2]
+
+    page = build(PAGE.read_text(encoding="utf-8"), old, new)
+
+    if args.output:
+        out = args.output
+    else:
+        handle = tempfile.NamedTemporaryFile(
+            prefix="htmldiff-", suffix=".html", delete=False, mode="w", encoding="utf-8"
+        )
+        handle.close()
+        out = Path(handle.name)
+    out.write_text(page, encoding="utf-8")
+
+    if args.no_open:
+        print(out)
+    else:
+        open_in_browser(out)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

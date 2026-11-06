@@ -1,0 +1,2065 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>htmldiff — redline two web pages</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Redline palette. Deletions are oxblood, insertions are ink blue — the
+   editorial proofing convention that <ins>/<del> come from, and unlike the
+   git-standard red/green it survives deuteranopia.
+   --------------------------------------------------------------------------- */
+:root {
+  --paper:   #fbfbfd;
+  --surface: #ffffff;
+  --sunk:    #f3f4f8;
+  --ink:     #14161c;
+  --ink-2:   #5a6070;
+  --ink-3:   #8d93a3;
+  --rule:    #e3e5ec;
+  --rule-2:  #cfd3de;
+
+  --del:     #b01b33;
+  --del-bg:  #fdeaed;
+  --del-bg-2:#f9ccd4;
+  --ins:     #1550c4;
+  --ins-bg:  #e8eefc;
+  --ins-bg-2:#cadcf9;
+
+  --focus:   #1550c4;
+  --shadow:  0 1px 2px rgba(20, 22, 28, .05), 0 8px 24px -12px rgba(20, 22, 28, .18);
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  --pad: 20px;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --paper:   #0f1116;
+  --surface: #161923;
+  --sunk:    #12141b;
+  --ink:     #e6e8ef;
+  --ink-2:   #9aa1b5;
+  --ink-3:   #6b7288;
+  --rule:    #262b38;
+  --rule-2:  #363d4e;
+
+  --del:     #ff7d92;
+  --del-bg:  #26131a;
+  --del-bg-2:#55202e;
+  --ins:     #86adff;
+  --ins-bg:  #131b2e;
+  --ins-bg-2:#1e3563;
+
+  --focus:   #86adff;
+  --shadow:  0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 14px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- chrome type: the mono voice used for every label the tool speaks in --- */
+.label {
+  font: 600 10px/1 var(--mono);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* --------------------------------- header -------------------------------- */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 var(--pad);
+  height: 52px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface);
+  flex: none;
+}
+.wordmark {
+  font: 700 15px/1 var(--mono);
+  letter-spacing: -.02em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.wordmark em { font-style: normal; color: var(--ins); }
+.tagline {
+  color: var(--ink-3);
+  font-size: 12px;
+  padding-left: 14px;
+  border-left: 1px solid var(--rule);
+  white-space: nowrap;
+}
+.bar .spacer { flex: 1; }
+
+/* -------------------------------- controls ------------------------------- */
+button {
+  font: 500 12px/1 var(--sans);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule-2);
+  border-radius: 6px;
+  padding: 7px 11px;
+  cursor: pointer;
+}
+button:hover { background: var(--sunk); }
+button:active { transform: translateY(.5px); }
+button.primary {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+  font-weight: 600;
+  padding: 9px 18px;
+}
+button.primary:hover { opacity: .88; background: var(--ink); }
+button.ghost { border-color: transparent; background: transparent; color: var(--ink-2); }
+button.ghost:hover { background: var(--sunk); color: var(--ink); }
+button[aria-pressed="true"] { background: var(--sunk); border-color: var(--rule-2); color: var(--ink); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+kbd {
+  font: 500 10px/1 var(--mono);
+  color: var(--ink-3);
+  border: 1px solid var(--rule-2);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 3px 5px;
+}
+
+.segmented { display: inline-flex; border: 1px solid var(--rule-2); border-radius: 6px; overflow: hidden; }
+.segmented button { border: 0; border-radius: 0; padding: 7px 12px; background: transparent; }
+.segmented button + button { border-left: 1px solid var(--rule-2); }
+.segmented button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+
+.check { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.check input { accent-color: var(--focus); margin: 0; }
+
+/* ------------------------------- input stage ------------------------------ */
+main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+.stage { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.stage[hidden] { display: none; }
+
+.panes { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--rule); flex: 1; min-height: 220px; }
+.pane { background: var(--surface); display: flex; flex-direction: column; min-width: 0; }
+.pane-head { display: flex; align-items: center; gap: 10px; padding: 12px var(--pad) 8px; }
+.pane-head .tiny { padding: 3px 7px; font-size: 11px; }
+.tiny { padding: 3px 7px; font-size: 11px; }
+
+/* URL bar — only present when served by the CLI, which supplies the proxy */
+.pane-url { display: flex; gap: 6px; padding: 0 var(--pad) 10px; }
+.pane-url[hidden] { display: none; }
+.pane-url input {
+  flex: 1;
+  min-width: 0;
+  font: 11px/1 var(--mono);
+  padding: 6px 8px;
+  border: 1px solid var(--rule-2);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+}
+.pane-url input:disabled { opacity: .6; }
+.pane.busy .pane-url input { border-color: var(--focus); }
+.pane-url .err { color: var(--del); font: 11px/1.8 var(--mono); }
+.pane-head .side { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.pane.old .side { background: var(--del); }
+.pane.new .side { background: var(--ins); }
+.pane-head .stat { margin-left: auto; font: 500 11px/1 var(--mono); color: var(--ink-3); }
+.pane textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 180px;
+  resize: none;
+  border: 0;
+  padding: 4px var(--pad) 14px;
+  background: transparent;
+  color: var(--ink);
+  font: 12px/1.65 var(--mono);
+  tab-size: 2;
+}
+.pane textarea:focus { outline: 0; }
+.pane textarea::placeholder { color: var(--ink-3); }
+.pane.drop-target { background: var(--ins-bg); }
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px var(--pad);
+  border-top: 1px solid var(--rule);
+  background: var(--surface);
+}
+.toolbar .spacer { flex: 1; }
+.toolbar .opts { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.failed { color: var(--del); font: 11px/1.4 var(--mono); max-width: 46ch; }
+.failed[hidden] { display: none; }
+.toolbar input[type="text"] {
+  font: 11px/1 var(--mono);
+  padding: 6px 8px;
+  width: 190px;
+  border: 1px solid var(--rule-2);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+}
+.toolbar input[type="text"]:invalid { border-color: var(--del); }
+
+/* --------------------------------- results -------------------------------- */
+.results { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.results[hidden] { display: none; }
+
+.results-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px var(--pad);
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface);
+  flex: none;
+}
+.results-bar .spacer { flex: 1; }
+.tally { display: flex; align-items: baseline; gap: 8px; font: 500 12px/1 var(--mono); }
+.tally .n-ins { color: var(--ins); }
+.tally .n-del { color: var(--del); }
+.tally .n-same { color: var(--ink-3); }
+/* where the two sides were fetched from, when the CLI supplied URLs */
+.origins {
+  font: 500 11px/1.4 var(--mono);
+  color: var(--ink-3);
+  max-width: 42ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.origins b { color: var(--ink-2); font-weight: 500; }
+.nav { display: flex; align-items: center; gap: 4px; }
+.nav .counter { font: 500 11px/1 var(--mono); color: var(--ink-2); min-width: 58px; text-align: center; }
+
+.viewport { flex: 1; min-height: 0; display: flex; }
+.scroller { flex: 1; min-width: 0; overflow: auto; position: relative; background: var(--surface); }
+
+/* rendered view */
+#view-rendered { padding: 0; }
+#frame { width: 100%; border: 0; display: block; background: #fff; }
+:root[data-theme="dark"] #frame { background: #fff; }
+
+/* source views */
+table.src { width: 100%; border-collapse: collapse; font: 12px/1.6 var(--mono); }
+table.src td { padding: 0 10px; vertical-align: top; white-space: pre-wrap; word-break: break-word; }
+table.src td.gutter {
+  width: 1%;
+  padding: 0 10px;
+  text-align: right;
+  color: var(--ink-3);
+  background: var(--sunk);
+  border-right: 1px solid var(--rule);
+  user-select: none;
+  white-space: nowrap;
+  font-size: 11px;
+}
+table.src td.text { width: 50%; }
+table.src.unified td.text { width: auto; }
+table.src td.sign { width: 1%; padding: 0 6px 0 8px; user-select: none; color: var(--ink-3); }
+table.src tr.del td.text, table.src td.text.del { background: var(--del-bg); }
+table.src tr.ins td.text, table.src td.text.ins { background: var(--ins-bg); }
+table.src td.text.del { color: var(--ink); }
+table.src tr.del td.sign { color: var(--del); }
+table.src tr.ins td.sign { color: var(--ins); }
+table.src td.blank { background: var(--sunk); }
+/* an empty line still needs a line box, or the row collapses to nothing */
+table.src td.text:empty::after { content: "\00a0"; }
+table.src td.text ins, table.src td.text del { text-decoration: none; border-radius: 2px; padding: 1px 0; }
+table.src td.text del { background: var(--del-bg-2); }
+table.src td.text ins { background: var(--ins-bg-2); }
+table.src tr.skip td {
+  background: var(--sunk);
+  color: var(--ink-3);
+  font: 500 11px/2.4 var(--mono);
+  text-align: center;
+  cursor: pointer;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+table.src tr.skip td:hover { color: var(--ink); }
+table.src tr.is-current td.text { box-shadow: inset 2px 0 0 var(--focus); }
+
+.nowrap table.src td { white-space: pre; }
+.nowrap .scroller { overflow: auto; }
+
+/* ---- signature: the change spine. A seismograph of the whole document —
+   deletions strike left of the axis, insertions right, positioned where they
+   fall. Doubles as a scrollbar you can read. ---- */
+.spine {
+  flex: none;
+  width: 34px;
+  position: relative;
+  background: var(--sunk);
+  border-left: 1px solid var(--rule);
+  cursor: pointer;
+}
+.spine::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--rule-2);
+}
+.spine .tick { position: absolute; height: 2px; min-height: 2px; border-radius: 1px; }
+.spine .tick.del { right: 50%; background: var(--del); }
+.spine .tick.ins { left: 50%; background: var(--ins); }
+.spine .tick.is-current { outline: 1px solid var(--ink); outline-offset: 1px; }
+.spine .window {
+  position: absolute;
+  left: 0; right: 0;
+  border: 1px solid var(--rule-2);
+  background: rgba(128, 138, 160, .14);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.empty { padding: 60px var(--pad); text-align: center; color: var(--ink-3); }
+
+/* --------------------------------- footer -------------------------------- */
+.foot {
+  flex: none;
+  padding: 8px var(--pad);
+  border-top: 1px solid var(--rule);
+  background: var(--surface);
+  color: var(--ink-3);
+  font-size: 11px;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .panes { grid-template-columns: 1fr; }
+  .tagline { display: none; }
+  table.src.split td.text { font-size: 11px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .scroller { scroll-behavior: smooth; }
+}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <span class="wordmark">html<em>diff</em></span>
+  <span class="tagline">redline two web pages</span>
+  <span class="spacer"></span>
+  <button class="ghost" id="theme" title="Toggle theme">Theme</button>
+</header>
+
+<main>
+  <!-- ------------------------------ inputs ------------------------------ -->
+  <section class="stage" id="stage">
+    <div class="panes">
+      <div class="pane old" id="pane-a">
+        <div class="pane-head">
+          <span class="side"></span>
+          <span class="label">Original</span>
+          <button class="ghost tiny" data-open="a">Open file</button>
+          <span class="stat" id="stat-a">empty</span>
+        </div>
+        <div class="pane-url" hidden>
+          <input type="url" id="url-a" spellcheck="false" placeholder="https://… press Enter to fetch">
+          <button class="ghost tiny" data-fetch="a">Fetch</button>
+        </div>
+        <textarea id="a" spellcheck="false" placeholder="Paste the original HTML, or drop a file here"></textarea>
+      </div>
+      <div class="pane new" id="pane-b">
+        <div class="pane-head">
+          <span class="side"></span>
+          <span class="label">Changed</span>
+          <button class="ghost tiny" data-open="b">Open file</button>
+          <span class="stat" id="stat-b">empty</span>
+        </div>
+        <div class="pane-url" hidden>
+          <input type="url" id="url-b" spellcheck="false" placeholder="https://… press Enter to fetch">
+          <button class="ghost tiny" data-fetch="b">Fetch</button>
+        </div>
+        <textarea id="b" spellcheck="false" placeholder="Paste the changed HTML, or drop a file here"></textarea>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <button class="primary" id="run">Find differences</button>
+      <kbd>⌘</kbd><kbd>↵</kbd>
+      <span class="failed" id="failed" hidden></span>
+      <button class="ghost" id="swap" title="Swap sides">Swap</button>
+      <button class="ghost" id="sample">Load sample</button>
+      <button class="ghost" id="clear">Clear</button>
+      <span class="spacer"></span>
+      <div class="opts">
+        <label class="check"><input type="checkbox" id="opt-ws"> Ignore whitespace</label>
+        <label class="check"><input type="checkbox" id="opt-case"> Ignore case</label>
+        <label class="check" title="Text matching this regex diffs as one unit instead of word by word — e.g. a whole date">
+          <span class="label">Group</span>
+          <input type="text" id="opt-group" placeholder="regex, e.g. \d{1,2} \w+ \d{4}" spellcheck="false">
+        </label>
+      </div>
+    </div>
+  </section>
+
+  <!-- ------------------------------ results ----------------------------- -->
+  <section class="results" id="results" hidden>
+    <div class="results-bar">
+      <button class="ghost" id="edit">← Edit inputs</button>
+      <div class="tally" id="tally"></div>
+      <span class="origins" id="origins" hidden></span>
+      <span class="spacer"></span>
+      <div class="segmented" role="group" aria-label="View">
+        <button data-view="rendered" aria-pressed="true">Rendered</button>
+        <button data-view="split" aria-pressed="false">Side by side</button>
+        <button data-view="unified" aria-pressed="false">Unified</button>
+      </div>
+      <div class="nav">
+        <button class="ghost" id="prev" title="Previous change (p)">↑</button>
+        <span class="counter" id="counter">—</span>
+        <button class="ghost" id="next" title="Next change (n)">↓</button>
+      </div>
+      <label class="check" id="wrap-wrap"><input type="checkbox" id="opt-wrap" checked> Wrap</label>
+      <label class="check" id="ext-wrap"><input type="checkbox" id="opt-ext"> Load remote assets</label>
+      <button class="ghost" id="refetch" hidden title="Fetch both URLs again and re-diff (r)">Refresh</button>
+      <button class="ghost" id="download">Save report</button>
+    </div>
+
+    <div class="viewport">
+      <div class="scroller" id="scroller">
+        <div id="view-rendered"><iframe id="frame" sandbox="allow-same-origin" title="Rendered diff"></iframe></div>
+        <div id="view-split" hidden></div>
+        <div id="view-unified" hidden></div>
+      </div>
+      <aside class="spine" id="spine" title="Change spine — click to jump"></aside>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <span id="privacy">Nothing leaves this page — no network, no storage beyond your browser.</span>
+  <span class="spacer" style="flex:1"></span>
+  <span id="timing"></span>
+</footer>
+
+<script>
+"use strict";
+
+/* ===========================================================================
+   1. htmldiff — a port of htmldiff.net (Rohland/htmldiff.net), itself a port
+   of myobie/htmldiff. Word-level diff that understands HTML tags, so the
+   output is markup you can render, with changes wrapped in <ins>/<del>.
+
+   Kept faithful to the C# so the upstream spec suite still passes, with two
+   deliberate departures, both marked DEPARTURE below.
+   =========================================================================== */
+
+const RE_OPENING_TAG = /^\s*<[^>]+>\s*$/;
+const RE_CLOSING_TAG = /^\s*<\/[^>]+>\s*$/;
+const RE_TAG_WORD    = /<[^\s>]+/;
+const RE_WHITESPACE  = /^(\s|&nbsp;)+$/;
+const RE_TAG_NAME    = /<\/?([^\s/>]+)[^>]*>/;
+
+// DEPARTURE: upstream compiles its word-character class in ECMAScript mode, so
+// \w is ASCII and "café" tokenizes as "caf" + "é" — every accented word reads
+// as a change. Unicode letters count as word characters here, minus the CJK
+// blocks, which upstream splits per character and which genuinely do diff
+// better that way (no spaces to tokenize on).
+const RE_WORD_CHAR = /[\p{L}\p{N}\p{M}_#@]/u;
+const RE_CJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f]/u;
+
+const SPECIAL_CASE_WORD_TAGS = ["<img"];
+const RE_SPECIAL_OPEN = /<(strong|b|i|em|big|small|u|sub|sup|strike|s|span)[>\s]+/i;
+const SPECIAL_CLOSING = new Set([
+  "</strong>", "</em>", "</b>", "</i>", "</big>", "</small>",
+  "</u>", "</sub>", "</sup>", "</strike>", "</s>", "</span>",
+]);
+
+// A `<` only opens a tag when a name character follows, as real HTML parsers require.
+// Treating every `<` as a tag start swallows the rest of the text node into one token
+// on ordinary prose like "5 < 10": that token then satisfies RE_OPENING_TAG, normalize
+// reduces it to `</p>` on both sides, the matcher calls the region equal, and every
+// change after the `<` is reported as no change at all.
+const RE_TAG_NAME_START = /[A-Za-z!/?]/;
+const isStartOfTag    = (c, next) => c === "<" && RE_TAG_NAME_START.test(next || "");
+const isEndOfTag      = (c) => c === ">";
+const isStartOfEntity = (c) => c === "&";
+const isEndOfEntity   = (c) => c === ";";
+const isWhitespaceChar = (c) => /\s/.test(c);
+const isWhitespaceWord = (s) => RE_WHITESPACE.test(s);
+const isWordChar = (c) => RE_WORD_CHAR.test(c) && !RE_CJK.test(c);
+
+function isTag(item) {
+  if (item != null && SPECIAL_CASE_WORD_TAGS.some((t) => item.startsWith(t))) return false;
+  return RE_OPENING_TAG.test(item) || RE_CLOSING_TAG.test(item);
+}
+
+function stripTagAttributes(word) {
+  const m = RE_TAG_WORD.exec(word);
+  return (m ? m[0] : "") + (word.endsWith("/>") ? "/>" : ">");
+}
+
+const stripAnyAttributes = (word) => (isTag(word) ? stripTagAttributes(word) : word);
+
+function getTagName(word) {
+  if (word == null) return "";
+  const m = RE_TAG_NAME.exec(word);
+  return m ? m[1].toLowerCase() : "";
+}
+
+const wrapText = (text, tagName, cssClass) =>
+  `<${tagName} class='${cssClass}'>${text}</${tagName}>`;
+
+/* --- tokenizer: text into words, tags, entities and whitespace runs -------- */
+
+function findBlocks(text, blockExpressions) {
+  const blocks = new Map();
+  for (const re of blockExpressions) {
+    const g = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+    for (const m of text.matchAll(g)) {
+      if (m[0].length === 0) continue;
+      // Upstream throws on overlapping block expressions. A regex typed into a
+      // text field overlaps constantly, so first match wins instead.
+      if (!blocks.has(m.index)) blocks.set(m.index, m.index + m[0].length);
+    }
+  }
+  return blocks;
+}
+
+function convertHtmlToWords(text, blockExpressions) {
+  const blockLocations = findBlocks(text, blockExpressions || []);
+  const blockCheckRequired = blockLocations.size > 0;
+
+  let mode = "char";
+  let globbingUntil = -1;
+  let isGrouping = false;
+  let currentWord = [];
+  const words = [];
+
+  const flush = () => {
+    if (currentWord.length) {
+      words.push(currentWord.join(""));
+      currentWord = [];
+    }
+  };
+
+  const globbing = (index, c) => {
+    if (!blockCheckRequired) return false;
+    if (index === globbingUntil) {
+      globbingUntil = -1;
+      isGrouping = false;
+      flush();
+    }
+    if (blockLocations.has(index)) {
+      isGrouping = true;
+      globbingUntil = blockLocations.get(index);
+    }
+    if (isGrouping) {
+      currentWord.push(c);
+      mode = "char";
+      return true;
+    }
+    return false;
+  };
+
+  // Step by code point, not by UTF-16 unit. Indexing by unit splits an astral
+  // character in half; each lone surrogate then fails isWordChar (\p{L} doesn't match
+  // an unpaired half), so the halves become separate words and a change boundary can
+  // land inside one character — the redline renders U+FFFD where the emoji was.
+  // `index` stays a UTF-16 offset because findBlocks keys on match indices from this
+  // same string.
+  for (let index = 0; index < text.length; ) {
+    const c = String.fromCodePoint(text.codePointAt(index));
+    const step = c.length;
+    const next = text[index + step];
+    if (globbing(index, c)) { index += step; continue; }
+
+    if (mode === "char") {
+      if (isStartOfTag(c, next)) { flush(); currentWord.push("<"); mode = "tag"; }
+      else if (isStartOfEntity(c)) { flush(); currentWord.push(c); mode = "entity"; }
+      else if (isWhitespaceChar(c)) { flush(); currentWord.push(c); mode = "ws"; }
+      else if (isWordChar(c) && (currentWord.length === 0 || isWordChar(currentWord[currentWord.length - 1]))) {
+        currentWord.push(c);
+      } else { flush(); currentWord.push(c); }
+
+    } else if (mode === "tag") {
+      currentWord.push(c);
+      if (isEndOfTag(c)) { flush(); mode = "char"; }
+
+    } else if (mode === "ws") {
+      if (isStartOfTag(c, next)) { flush(); currentWord.push(c); mode = "tag"; }
+      else if (isStartOfEntity(c)) { flush(); currentWord.push(c); mode = "entity"; }
+      else if (isWhitespaceChar(c)) { currentWord.push(c); }
+      else { flush(); currentWord.push(c); mode = "char"; }
+
+    } else if (mode === "entity") {
+      if (isStartOfTag(c, next)) { flush(); currentWord.push(c); mode = "tag"; }
+      else if (isWhitespaceChar(c)) { flush(); currentWord.push(c); mode = "ws"; }
+      else if (isEndOfEntity(c)) {
+        let switchToNextMode = true;
+        if (currentWord.length) {
+          currentWord.push(c);
+          words.push(currentWord.join(""));
+          // join a trailing &nbsp; onto the whitespace run before it
+          if (words.length > 2 &&
+              isWhitespaceWord(words[words.length - 2]) &&
+              isWhitespaceWord(words[words.length - 1])) {
+            const w1 = words[words.length - 2];
+            const w2 = words[words.length - 1];
+            words.splice(words.length - 2, 2);
+            currentWord = (w1 + w2).split("");
+            mode = "ws";
+            switchToNextMode = false;
+          }
+        }
+        if (switchToNextMode) { currentWord = []; mode = "char"; }
+      }
+      else if (isWordChar(c)) { currentWord.push(c); }
+      else { flush(); currentWord.push(c); mode = "char"; }
+    }
+    index += step;
+  }
+  flush();
+  return words;
+}
+
+/* --- longest matching block, by binary search on the run length ----------- */
+
+/* What findMatch has to produce is the longest run of words the two sides
+   share. The previous shape bucketed every block-of-N by key and, for each old
+   word, walked that key's whole bucket — so on markup that repeats
+   structurally (tables, listings, nav) buckets grew with the document and the
+   scan ran O(words x repeats). One price changed in a product table measured
+   0.7s at 70 KB and 39.7s at 561 KB, synchronous on the main thread.
+
+   `repeatingWordsAccuracy` was meant to bound that by dropping keys that
+   repeat too often, but its guard (`at.length > newWords.length * 1`) could
+   not fire: a bucket can never hold more entries than there are words. Making
+   it fire is not the fix. Measured on a 2,000-row table, dropping repeated
+   keys makes identical rows diff as one giant replace — 44,000 words marked
+   changed where 2 changed — and on varied rows it is 11x *slower* still,
+   because every dropped key sends `find` down the blockSize ladder and
+   `collect` fragments into more passes. The option is gone rather than fixed,
+   so nobody re-derives that dead end from the leftover knob.
+
+   "Is there a shared run of length L" is monotone in L, so binary search it:
+   about log2(words) probes, each hashing every window of that length once.
+   That is O(words log words) with no dependence on how often anything
+   repeats. */
+
+const HASH_BASE = 0x9e3779b1 | 0; // odd, so it has an inverse modulo 2^32
+
+/** Inverse of an odd `a` modulo 2^32, by Newton iteration — the rolling hash
+ *  divides out the word leaving the window, and this is what it multiplies by
+ *  instead. Four rounds take 3 correct bits to well past 32. */
+function inverseModulo32(a) {
+  let x = a;
+  for (let round = 0; round < 4; round++) x = Math.imul(x, (2 - Math.imul(a, x)) | 0) | 0;
+  return x | 0;
+}
+
+const HASH_BASE_INVERSE = inverseModulo32(HASH_BASE);
+
+/** Hash of every `length`-word window of `ids`, rolled rather than recomputed
+ *  (recomputing each window would put the length back in the cost). */
+function windowHashes(ids, length) {
+  const windows = ids.length - length + 1;
+  const hashes = new Int32Array(windows);
+
+  let top = 1; // HASH_BASE^(length-1), the weight of the newest word
+  for (let k = 1; k < length; k++) top = Math.imul(top, HASH_BASE);
+
+  let hash = 0;
+  let power = 1;
+  for (let k = 0; k < length; k++) {
+    hash = (hash + Math.imul(ids[k], power)) | 0;
+    power = Math.imul(power, HASH_BASE);
+  }
+  hashes[0] = hash;
+
+  for (let i = 1; i < windows; i++) {
+    hash = Math.imul((hash - ids[i - 1]) | 0, HASH_BASE_INVERSE);
+    hash = (hash + Math.imul(ids[i + length - 1], top)) | 0;
+    hashes[i] = hash;
+  }
+  return hashes;
+}
+
+/** The earliest run of exactly `length` words shared by `a` and `b`, or null.
+ *  Earliest in `a`, then earliest in `b` — the order the previous scan settled
+ *  ties in, kept so an ambiguous diff renders the same as it always has.
+ *
+ *  `probeBudget` bounds total verification work. HASH_BASE is a fixed public
+ *  constant, so a crafted input can force many windows onto the same hash
+ *  without sharing content — the equality check below still returns an exact
+ *  answer, but verifying every collision reopens the O(words x repeats)
+ *  blowup this rewrite exists to close (a quadratic match phase). Once the budget
+ *  runs out, findRun reports "not found" for this length rather than
+ *  finishing the scan; findMatch's binary search then narrows to a shorter
+ *  length it can verify within budget, so any run this returns is always a
+ *  real, fully-verified match — just possibly shorter than optimal under an
+ *  adversarial collision. */
+function findRun(a, b, length, probeBudget) {
+  if (length <= 0 || length > a.length || length > b.length) return null;
+
+  const inB = new Map();
+  const hashesB = windowHashes(b, length);
+  for (let j = hashesB.length - 1; j >= 0; j--) {
+    const at = inB.get(hashesB[j]);
+    if (at) at.push(j);
+    else inB.set(hashesB[j], [j]);
+  }
+
+  const hashesA = windowHashes(a, length);
+  let budget = probeBudget;
+  for (let i = 0; i < hashesA.length; i++) {
+    const at = inB.get(hashesA[i]);
+    if (!at) continue;
+    // Descending above so this reads ascending, giving the earliest j.
+    for (let index = at.length - 1; index >= 0; index--) {
+      const j = at[index];
+      // Two windows can share a hash without sharing content. Comparing keeps
+      // the answer exact instead of merely probable.
+      let k = 0;
+      while (k < length && a[i + k] === b[j + k]) k++;
+      if (k === length) return { startInA: i, startInB: j, size: length };
+      // A mismatch still costs up to `k` comparisons; charge them so a run
+      // of near-miss collisions can't hide under a cheap-looking probe count.
+      budget -= k || 1;
+      if (budget <= 0) return null;
+    }
+  }
+  return null;
+}
+
+function findMatch(oldWords, newWords, startInOld, endInOld, startInNew, endInNew, opts) {
+  const normalize = (word) => {
+    let w = stripAnyAttributes(word);
+    if (opts.ignoreWhitespace && isWhitespaceWord(w)) return " ";
+    if (opts.ignoreCase) w = w.toLowerCase();
+    return w;
+  };
+
+  // Number the normalized words so the hash and the comparison both work on
+  // integers. It also drops the old key scheme's habit of joining a block with
+  // "", which collided "ab"+"c" with "a"+"bc".
+  const numbers = new Map();
+  const idOf = (word) => {
+    let id = numbers.get(word);
+    if (id === undefined) numbers.set(word, (id = numbers.size + 1));
+    return id;
+  };
+  const a = new Int32Array(endInOld - startInOld);
+  for (let i = startInOld; i < endInOld; i++) a[i - startInOld] = idOf(normalize(oldWords[i]));
+  const b = new Int32Array(endInNew - startInNew);
+  for (let j = startInNew; j < endInNew; j++) b[j - startInNew] = idOf(normalize(newWords[j]));
+
+  // Bounds every findRun call below to work linear in this call's input, so
+  // the floor probe, the ladder above it, and the whole binary search stay
+  // within a constant number of budgets — see findRun's docstring.
+  const probeBudget = Math.max(4096, 64 * (a.length + b.length));
+
+  // Probe the floor first: `find` walks blockSize down when nothing matches,
+  // and this keeps each rung of that ladder to a single pass.
+  let best = findRun(a, b, opts.blockSize, probeBudget);
+  if (!best) return null;
+
+  let low = opts.blockSize + 1;
+  let high = Math.min(a.length, b.length);
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const run = findRun(a, b, middle, probeBudget);
+    if (run) {
+      best = run;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  const bestInOld = startInOld + best.startInA;
+  const bestInNew = startInNew + best.startInB;
+  return { startInOld: bestInOld, startInNew: bestInNew, size: best.size,
+           endInOld: bestInOld + best.size, endInNew: bestInNew + best.size };
+}
+
+function htmlDiff(oldText, newText, options) {
+  const opt = Object.assign({
+    ignoreWhitespace: false,
+    ignoreCase: false,
+    orphanMatchThreshold: 0,
+    blockExpressions: [],
+  }, options);
+
+  if (oldText === newText) return newText;
+
+  const oldWords = convertHtmlToWords(oldText, opt.blockExpressions);
+  const newWords = convertHtmlToWords(newText, opt.blockExpressions);
+  const matchGranularity = Math.min(4, Math.min(oldWords.length, newWords.length));
+
+  const find = (a0, a1, b0, b1) => {
+    // Big texts usually hold a match longer than the maximum granularity; if
+    // this one doesn't, walk the block size down until something matches.
+    for (let size = matchGranularity; size > 0; size--) {
+      const m = findMatch(oldWords, newWords, a0, a1, b0, b1, {
+        blockSize: size,
+        ignoreWhitespace: opt.ignoreWhitespace,
+        ignoreCase: opt.ignoreCase,
+      });
+      if (m) return m;
+    }
+    return null;
+  };
+
+  // This was a right-leaning recursion whose depth equalled the number of
+  // change sites exactly — 400 changes, 400 frames — the third instance of the
+  // pattern already unwound in `insertTag` and `alignRun`. The bucket scan
+  // above used to become prohibitive before the depth could reach a
+  // RangeError, so it was only ever latent; it does not need to be again.
+  //
+  // An explicit stack, popped in reverse, keeps `matches` in document order:
+  // everything left of a match, then the match, then everything right of it.
+  const matches = [];
+  const pending = [{ a0: 0, a1: oldWords.length, b0: 0, b1: newWords.length }];
+  while (pending.length) {
+    const work = pending.pop();
+    if (work.match) { matches.push(work.match); continue; }
+
+    const m = find(work.a0, work.a1, work.b0, work.b1);
+    if (!m) continue;
+    if (m.endInOld < work.a1 && m.endInNew < work.b1)
+      pending.push({ a0: m.endInOld, a1: work.a1, b0: m.endInNew, b1: work.b1 });
+    pending.push({ match: m });
+    if (work.a0 < m.startInOld && work.b0 < m.startInNew)
+      pending.push({ a0: work.a0, a1: m.startInOld, b0: work.b0, b1: m.startInNew });
+  }
+
+  matches.push({ startInOld: oldWords.length, startInNew: newWords.length, size: 0,
+                 endInOld: oldWords.length, endInNew: newWords.length });
+
+  const kept = removeOrphans(matches, oldWords, newWords, opt.orphanMatchThreshold);
+
+  const operations = [];
+  let positionInOld = 0, positionInNew = 0;
+  for (const match of kept) {
+    const atOld = positionInOld === match.startInOld;
+    const atNew = positionInNew === match.startInNew;
+    let action = null;
+    if (!atOld && !atNew) action = "replace";
+    else if (atOld && !atNew) action = "insert";
+    else if (!atOld) action = "delete";
+
+    if (action) {
+      operations.push({ action, startInOld: positionInOld, endInOld: match.startInOld,
+                        startInNew: positionInNew, endInNew: match.startInNew });
+    }
+    if (match.size !== 0) {
+      operations.push({ action: "equal", startInOld: match.startInOld, endInOld: match.endInOld,
+                        startInNew: match.startInNew, endInNew: match.endInNew });
+    }
+    positionInOld = match.endInOld;
+    positionInNew = match.endInNew;
+  }
+
+  const out = [];
+  const stack = [];
+  for (const op of operations) {
+    if (op.action === "equal") {
+      out.push(newWords.slice(op.startInNew, op.endInNew).join(""));
+    } else if (op.action === "delete") {
+      insertTag(out, "del", "diffdel", oldWords.slice(op.startInOld, op.endInOld), stack);
+    } else if (op.action === "insert") {
+      insertTag(out, "ins", "diffins", newWords.slice(op.startInNew, op.endInNew), stack);
+    } else if (op.action === "replace") {
+      insertTag(out, "del", "diffmod", oldWords.slice(op.startInOld, op.endInOld), stack);
+      insertTag(out, "ins", "diffmod", newWords.slice(op.startInNew, op.endInNew), stack);
+    }
+  }
+  return out.join("");
+}
+
+/* A match with a gap on both sides that is tiny relative to those gaps is an
+   accident of two unrelated texts sharing a word. Folding it into the
+   surrounding change reads better than three fragments. */
+function removeOrphans(matches, oldWords, newWords, orphanMatchThreshold) {
+  const kept = [];
+  let prev = null, curr = null;
+  const sum = (words, from, to) => {
+    let n = 0;
+    for (let i = from; i < to; i++) n += words[i].length;
+    return n;
+  };
+
+  for (const next of matches) {
+    if (curr === null) {
+      prev = { startInOld: 0, startInNew: 0, size: 0, endInOld: 0, endInNew: 0 };
+      curr = next;
+      continue;
+    }
+    const touchesLeft  = prev.endInOld === curr.startInOld && prev.endInNew === curr.startInNew;
+    const touchesRight = curr.endInOld === next.startInOld && curr.endInNew === next.startInNew;
+    if (touchesLeft || touchesRight) {
+      kept.push(curr);
+      prev = curr; curr = next;
+      continue;
+    }
+    const oldDistance = sum(oldWords, prev.endInOld, next.startInOld);
+    const newDistance = sum(newWords, prev.endInNew, next.startInNew);
+    const currLength  = sum(newWords, curr.startInNew, curr.endInNew);
+    if (currLength > Math.max(oldDistance, newDistance) * orphanMatchThreshold) kept.push(curr);
+    prev = curr; curr = next;
+  }
+  if (curr !== null) kept.push(curr); // the last match is always vital
+  return kept;
+}
+
+/* Wrapping a run of words in one <ins>/<del> would nest it across tags and
+   produce invalid markup, so the run is split at every tag boundary and each
+   text stretch wrapped on its own. Formatting tags (<b>, <span>, …) get the
+   extra treatment of marking their *content* as changed rather than
+   duplicating the tag. */
+function insertTag(out, tag, cssClass, words, stack) {
+  while (true) {
+    if (words.length === 0) break;
+
+    const untilFirstTag = extractConsecutiveWords(words, (w) => !isTag(w));
+    if (untilFirstTag.length > 0) out.push(wrapText(untilFirstTag.join(""), tag, cssClass));
+    if (words.length === 0) break;
+
+    // What's left starts with a tag but may hold non-tags further on.
+    const firstNonTag = words.findIndex((w) => !isTag(w));
+    const lastTagInBlock = firstNonTag === -1 ? words.length - 1 : firstNonTag - 1;
+
+    let injection = "";
+    let injectionIsBefore = false;
+
+    if (RE_SPECIAL_OPEN.test(words[0])) {
+      stack.push(words[0]);
+      injection = "<ins class='mod'>";
+      if (tag === "del") {
+        words.shift();
+        while (words.length && RE_SPECIAL_OPEN.test(words[0])) words.shift();
+      }
+    } else if (SPECIAL_CLOSING.has(words[0].toLowerCase())) {
+      const openingTag = stack.length ? stack.pop() : null;
+      if (openingTag !== null && getTagName(openingTag) === getTagName(words[lastTagInBlock])) {
+        injection = "</ins>";
+        injectionIsBefore = true;
+      } else if (openingTag !== null) {
+        stack.push(openingTag); // mismatched pair — put it back
+      }
+      if (tag === "del") {
+        words.shift();
+        while (words.length && SPECIAL_CLOSING.has(words[0].toLowerCase())) words.shift();
+      }
+    }
+
+    if (words.length === 0 && injection.length === 0) break;
+
+    const tags = extractConsecutiveWords(words, isTag).join("");
+    out.push(injectionIsBefore ? injection + tags : tags + injection);
+
+    // Anything left starts with a non-tag, which is exactly what the top of
+    // this loop handles. Upstream self-calls here; that recursion overflowed
+    // the stack at a few thousand elements in one change block (deleting a
+    // whole document does it), and the loop is equivalent.
+  }
+}
+
+function extractConsecutiveWords(words, condition) {
+  let firstFailure = null;
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    if (i === 0 && word === " ") words[i] = "&nbsp;";
+    if (!condition(word)) { firstFailure = i; break; }
+  }
+  return firstFailure !== null ? words.splice(0, firstFailure) : words.splice(0, words.length);
+}
+
+/* ===========================================================================
+   2. Line and token diff for the source views. Patience diff — anchor on lines
+   that appear exactly once on each side, recurse between the anchors, and fall
+   back to Myers on the small leftovers. Patience keeps a moved brace from
+   pairing with an unrelated brace fifty lines away.
+   =========================================================================== */
+
+/* Myers keeps a V snapshot per edit-distance step, so its cost is
+   O(D × (N+M)) words — driven by the *span*, not by the area. Budgeting on
+   N×M alone lets a skewed shape through: 25000 lines against a 10-line error
+   page is 250k cells but allocates ~2.9 GB of snapshots, which kills the tab.
+   Bound both. At a 2000-line span the snapshots peak near
+   2000 × 2000 × 8 B ≈ 32 MB, and anchoring means real documents rarely reach
+   here at all — beyond it, the two blocks are emitted as a wholesale replace,
+   which is the right answer for text with nothing in common anyway. */
+const MYERS_MAX_AREA = 250_000; // N×M cells
+const MYERS_MAX_SPAN = 2_000; // N+M lines
+
+function sequenceDiff(A, B) {
+  const out = [];
+  recurse(0, A.length, 0, B.length);
+  return coalesce(out);
+
+  function recurse(a0, a1, b0, b1) {
+    let pre = 0;
+    while (a0 + pre < a1 && b0 + pre < b1 && A[a0 + pre] === B[b0 + pre]) pre++;
+    let suf = 0;
+    while (a1 - suf - 1 >= a0 + pre && b1 - suf - 1 >= b0 + pre && A[a1 - suf - 1] === B[b1 - suf - 1]) suf++;
+
+    if (pre) out.push({ type: "equal", a0, a1: a0 + pre, b0, b1: b0 + pre });
+    const ma0 = a0 + pre, ma1 = a1 - suf, mb0 = b0 + pre, mb1 = b1 - suf;
+    if (ma0 < ma1 || mb0 < mb1) middle(ma0, ma1, mb0, mb1);
+    if (suf) out.push({ type: "equal", a0: a1 - suf, a1, b0: b1 - suf, b1 });
+  }
+
+  function middle(a0, a1, b0, b1) {
+    if (a0 === a1) { out.push({ type: "insert", a0, a1, b0, b1 }); return; }
+    if (b0 === b1) { out.push({ type: "delete", a0, a1, b0, b1 }); return; }
+
+    const anchors = uniqueAnchors(a0, a1, b0, b1);
+    if (anchors.length === 0) {
+      const area = (a1 - a0) * (b1 - b0);
+      const span = a1 - a0 + b1 - b0;
+      if (area <= MYERS_MAX_AREA && span <= MYERS_MAX_SPAN) myers(a0, a1, b0, b1);
+      else {
+        out.push({ type: "delete", a0, a1, b0: b0, b1: b0 });
+        out.push({ type: "insert", a0: a1, a1, b0, b1 });
+      }
+      return;
+    }
+
+    let ca = a0, cb = b0;
+    for (const [ia, ib] of anchors) {
+      if (ia < ca || ib < cb) continue;
+      recurse(ca, ia, cb, ib);
+      let n = 0;
+      while (ia + n < a1 && ib + n < b1 && A[ia + n] === B[ib + n]) n++;
+      out.push({ type: "equal", a0: ia, a1: ia + n, b0: ib, b1: ib + n });
+      ca = ia + n; cb = ib + n;
+    }
+    recurse(ca, a1, cb, b1);
+  }
+
+  // lines occurring exactly once on each side, longest increasing subsequence
+  function uniqueAnchors(a0, a1, b0, b1) {
+    const inA = new Map(), inB = new Map();
+    for (let i = a0; i < a1; i++) inA.set(A[i], (inA.get(A[i]) || 0) + 1);
+    for (let j = b0; j < b1; j++) inB.set(B[j], (inB.get(B[j]) || 0) + 1);
+
+    const bIndex = new Map();
+    for (let j = b0; j < b1; j++) if (inB.get(B[j]) === 1) bIndex.set(B[j], j);
+
+    const pairs = [];
+    for (let i = a0; i < a1; i++) {
+      if (inA.get(A[i]) !== 1) continue;
+      const j = bIndex.get(A[i]);
+      if (j !== undefined) pairs.push([i, j]);
+    }
+    if (pairs.length === 0) return [];
+
+    // patience sort over the b-indices: the pile tops are a longest increasing
+    // subsequence once you walk the back-pointers from the last pile
+    const piles = [], back = new Array(pairs.length).fill(-1);
+    for (let k = 0; k < pairs.length; k++) {
+      const j = pairs[k][1];
+      let lo = 0, hi = piles.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (pairs[piles[mid]][1] < j) lo = mid + 1; else hi = mid;
+      }
+      if (lo > 0) back[k] = piles[lo - 1];
+      piles[lo] = k;
+    }
+    const chain = [];
+    for (let k = piles[piles.length - 1]; k !== -1 && k !== undefined; k = back[k]) chain.push(pairs[k]);
+    return chain.reverse();
+  }
+
+  function myers(a0, a1, b0, b1) {
+    const n = a1 - a0, m = b1 - b0, max = n + m;
+    const v = new Int32Array(2 * max + 2);
+    const trace = [];
+    let found = -1;
+
+    outer:
+    for (let d = 0; d <= max; d++) {
+      trace.push(v.slice());
+      for (let k = -d; k <= d; k += 2) {
+        let x;
+        if (k === -d || (k !== d && v[max + k - 1] < v[max + k + 1])) x = v[max + k + 1];
+        else x = v[max + k - 1] + 1;
+        let y = x - k;
+        while (x < n && y < m && A[a0 + x] === B[b0 + y]) { x++; y++; }
+        v[max + k] = x;
+        if (x >= n && y >= m) { found = d; break outer; }
+      }
+    }
+    if (found < 0) {
+      out.push({ type: "delete", a0, a1, b0, b1: b0 });
+      out.push({ type: "insert", a0: a1, a1, b0, b1 });
+      return;
+    }
+
+    const steps = [];
+    let x = n, y = m;
+    for (let d = found; d > 0; d--) {
+      const vp = trace[d];
+      const k = x - y;
+      let prevK;
+      if (k === -d || (k !== d && vp[max + k - 1] < vp[max + k + 1])) prevK = k + 1;
+      else prevK = k - 1;
+      const prevX = vp[max + prevK];
+      const prevY = prevX - prevK;
+      while (x > prevX && y > prevY) { steps.push(["equal", --x, --y]); }
+      if (x > prevX) steps.push(["delete", --x, y]);
+      else if (y > prevY) steps.push(["insert", x, --y]);
+    }
+    while (x > 0 && y > 0) steps.push(["equal", --x, --y]);
+
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const [type, sx, sy] = steps[i];
+      if (type === "equal") out.push({ type: "equal", a0: a0 + sx, a1: a0 + sx + 1, b0: b0 + sy, b1: b0 + sy + 1 });
+      else if (type === "delete") out.push({ type: "delete", a0: a0 + sx, a1: a0 + sx + 1, b0: b0 + sy, b1: b0 + sy });
+      else out.push({ type: "insert", a0: a0 + sx, a1: a0 + sx, b0: b0 + sy, b1: b0 + sy + 1 });
+    }
+  }
+
+  function coalesce(ops) {
+    const merged = [];
+    for (const op of ops) {
+      if (op.a0 === op.a1 && op.b0 === op.b1) continue;
+      const last = merged[merged.length - 1];
+      if (last && last.type === op.type && last.a1 === op.a0 && last.b1 === op.b0) {
+        last.a1 = op.a1; last.b1 = op.b1;
+      } else merged.push(Object.assign({}, op));
+    }
+    return merged;
+  }
+}
+
+/* ===========================================================================
+   3. Source-view model: line diff, with delete/insert runs paired into
+   modified lines so the two sides line up and can be highlighted word by word.
+   =========================================================================== */
+
+const RE_TOKEN = /[\p{L}\p{N}_]+|\s+|[^\p{L}\p{N}_\s]/gu;
+
+const escapeHtml = (s) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function normalizeLine(line, opts) {
+  let s = line;
+  if (opts.ignoreWhitespace) s = s.replace(/\s+/g, " ").trim();
+  if (opts.ignoreCase) s = s.toLowerCase();
+  return s;
+}
+
+/* Whitespace is excluded: two lines of unrelated prose share a space between
+   every word, which on its own scores well past the pairing threshold. */
+function similarity(a, b) {
+  if (!a && !b) return 1;
+  const meaningful = (s) => (s.match(RE_TOKEN) || []).filter((t) => !/^\s+$/.test(t));
+  const ta = meaningful(a), tb = meaningful(b);
+  if (!ta.length || !tb.length) return 0;
+  const pool = new Map();
+  for (const t of ta) pool.set(t, (pool.get(t) || 0) + 1);
+  let shared = 0;
+  for (const t of tb) {
+    const n = pool.get(t);
+    if (n) { shared++; pool.set(t, n - 1); }
+  }
+  return (2 * shared) / (ta.length + tb.length);
+}
+
+/* Two lines that are 30% alike are an edit of one line; below that they are an
+   unrelated delete and insert that happen to sit next to each other. */
+const PAIR_THRESHOLD = 0.3;
+
+/* Aligning a run of deletes against a run of inserts costs a similarity call
+   per cell. Past this many cells, fall back to pairing k-th with k-th. */
+const PAIR_SEARCH_BUDGET = 2500;
+
+/* Pairing the k-th delete with the k-th insert is wrong as soon as one side
+   gains or loses a line: deleting a <li> shunts every later pair off by one,
+   and the rows read as two unrelated edits. Anchor on the most similar pair in
+   the run instead, then recurse either side of it — the same shape difflib
+   uses, for the same reason. */
+function alignRun(dels, inss, emit) {
+  // An explicit stack, not recursion: when the best pair keeps landing at the
+  // start of the range — a reformatted file, where every line differs and the
+  // k-th fallback picks the first pair every time — the depth equals the run
+  // length, and a few thousand changed lines overflowed.
+  const work = [{ a0: 0, a1: dels.length, b0: 0, b1: inss.length }];
+
+  while (work.length) {
+    const item = work.pop();
+    if (item.pair) { emit(item.pair[0], item.pair[1]); continue; }
+
+    const { a0, a1, b0, b1 } = item;
+    if (a0 >= a1 && b0 >= b1) continue;
+    if (a0 >= a1) { for (let j = b0; j < b1; j++) emit(null, inss[j]); continue; }
+    if (b0 >= b1) { for (let i = a0; i < a1; i++) emit(dels[i], null); continue; }
+
+    let best = null;
+    if ((a1 - a0) * (b1 - b0) <= PAIR_SEARCH_BUDGET) {
+      let bestScore = PAIR_THRESHOLD;
+      for (let i = a0; i < a1; i++) {
+        for (let j = b0; j < b1; j++) {
+          const score = similarity(dels[i].text, inss[j].text);
+          if (score > bestScore) { bestScore = score; best = [i, j]; }
+        }
+      }
+    } else {
+      for (let k = 0; k < Math.min(a1 - a0, b1 - b0); k++) {
+        if (similarity(dels[a0 + k].text, inss[b0 + k].text) >= PAIR_THRESHOLD) {
+          best = [a0 + k, b0 + k];
+          break;
+        }
+      }
+    }
+
+    if (!best) {
+      for (let i = a0; i < a1; i++) emit(dels[i], null);
+      for (let j = b0; j < b1; j++) emit(null, inss[j]);
+      continue;
+    }
+
+    // Pushed in reverse so they come off as left, pair, right — the order the
+    // rows have to be emitted in.
+    const [i, j] = best;
+    work.push({ a0: i + 1, a1, b0: j + 1, b1 });
+    work.push({ pair: [dels[i], inss[j]] });
+    work.push({ a0, a1: i, b0, b1: j });
+  }
+}
+
+function buildRows(oldText, newText, opts) {
+  const A = oldText.split("\n");
+  const B = newText.split("\n");
+  const keyA = A.map((l) => normalizeLine(l, opts));
+  const keyB = B.map((l) => normalizeLine(l, opts));
+  const ops = sequenceDiff(keyA, keyB);
+
+  const rows = [];
+  const stats = { ins: 0, del: 0, mod: 0 };
+
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i];
+    if (op.type === "equal") {
+      for (let k = 0; k < op.a1 - op.a0; k++) {
+        rows.push({ kind: "equal", ln: op.a0 + k + 1, rn: op.b0 + k + 1, left: A[op.a0 + k], right: B[op.b0 + k] });
+      }
+      continue;
+    }
+
+    // Collect a delete run and any insert run that immediately follows it.
+    const del = op.type === "delete" ? op : null;
+    let ins = op.type === "insert" ? op : null;
+    if (del && ops[i + 1] && ops[i + 1].type === "insert") { ins = ops[i + 1]; i++; }
+
+    const dels = [];
+    if (del) for (let k = del.a0; k < del.a1; k++) dels.push({ n: k + 1, text: A[k] });
+    const inss = [];
+    if (ins) for (let k = ins.b0; k < ins.b1; k++) inss.push({ n: k + 1, text: B[k] });
+
+    alignRun(dels, inss, (left, right) => {
+      if (left && right) {
+        const [leftHtml, rightHtml] = inlineHighlight(left.text, right.text);
+        rows.push({ kind: "mod", ln: left.n, rn: right.n,
+                    left: left.text, right: right.text, leftHtml, rightHtml });
+        stats.mod++;
+      } else if (left) {
+        rows.push({ kind: "del", ln: left.n, rn: null, left: left.text, right: null });
+        stats.del++;
+      } else {
+        rows.push({ kind: "ins", ln: null, rn: right.n, left: null, right: right.text });
+        stats.ins++;
+      }
+    });
+  }
+  return { rows, stats };
+}
+
+function inlineHighlight(left, right) {
+  const ta = left.match(RE_TOKEN) || [];
+  const tb = right.match(RE_TOKEN) || [];
+  const ops = sequenceDiff(ta, tb);
+  let lh = "", rh = "";
+  for (const op of ops) {
+    const a = escapeHtml(ta.slice(op.a0, op.a1).join(""));
+    const b = escapeHtml(tb.slice(op.b0, op.b1).join(""));
+    if (op.type === "equal") { lh += a; rh += b; }
+    else if (op.type === "delete") { lh += `<del>${a}</del>`; }
+    else if (op.type === "insert") { rh += `<ins>${b}</ins>`; }
+  }
+  return [lh, rh];
+}
+
+/* ===========================================================================
+   4. UI
+   =========================================================================== */
+
+const $ = (sel) => document.querySelector(sel);
+const els = {
+  a: $("#a"), b: $("#b"),
+  statA: $("#stat-a"), statB: $("#stat-b"),
+  stage: $("#stage"), results: $("#results"),
+  scroller: $("#scroller"), spine: $("#spine"),
+  frame: $("#frame"), split: $("#view-split"), unified: $("#view-unified"),
+  rendered: $("#view-rendered"), origins: $("#origins"), failed: $("#failed"),
+  tally: $("#tally"), counter: $("#counter"), timing: $("#timing"),
+  group: $("#opt-group"),
+};
+
+let state = {
+  view: "rendered", anchors: [], current: -1, diffHtml: "", rows: null,
+  baseUrl: null,
+  labels: { a: null, b: null }, // where each side came from, when it was fetched
+  measured: false, // have the change marks been counted for the current view?
+};
+
+/* --- persistence: inputs and preferences survive a reload ---------------- */
+const store = {
+  get(key, fallback) {
+    try { const v = localStorage.getItem("htmldiff:" + key); return v === null ? fallback : v; }
+    catch { return fallback; }
+  },
+  set(key, value) { try { localStorage.setItem("htmldiff:" + key, value); } catch { /* private mode */ } },
+};
+
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  store.set("theme", theme);
+}
+setTheme(store.get("theme",
+  window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+$("#theme").addEventListener("click", () =>
+  setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+
+/* --- input plumbing ------------------------------------------------------ */
+
+function describe(text) {
+  if (!text) return "empty";
+  const bytes = new Blob([text]).size;
+  const size = bytes < 1024 ? bytes + " B" : (bytes / 1024).toFixed(1) + " KB";
+  return `${text.split("\n").length} lines · ${size}`;
+}
+
+function refreshStats() {
+  els.statA.textContent = describe(els.a.value);
+  els.statB.textContent = describe(els.b.value);
+  store.set("a", els.a.value);
+  store.set("b", els.b.value);
+}
+
+for (const id of ["a", "b"]) {
+  els[id].value = store.get(id, "");
+  els[id].addEventListener("input", refreshStats);
+}
+for (const [id, key, redoes] of [["opt-ws", "ws", true], ["opt-case", "case", true],
+                                 ["opt-wrap", "wrap", false], ["opt-ext", "ext", true]]) {
+  const el = $("#" + id);
+  const saved = store.get(key, null);
+  if (saved !== null) el.checked = saved === "1";
+  el.addEventListener("change", () => {
+    store.set(key, el.checked ? "1" : "0");
+    if (redoes) rerun();
+  });
+}
+els.group.value = store.get("group", "");
+els.group.addEventListener("input", () => store.set("group", els.group.value));
+els.group.addEventListener("change", rerun);
+refreshStats();
+
+document.querySelectorAll("[data-open]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".html,.htm,.xhtml,.svg,.md,.txt,text/*";
+    input.addEventListener("change", async () => {
+      const file = input.files[0];
+      if (file) { els[btn.dataset.open].value = await file.text(); refreshStats(); }
+    });
+    input.click();
+  });
+});
+
+for (const [paneId, key] of [["pane-a", "a"], ["pane-b", "b"]]) {
+  const pane = $("#" + paneId);
+  pane.addEventListener("dragover", (e) => { e.preventDefault(); pane.classList.add("drop-target"); });
+  pane.addEventListener("dragleave", () => pane.classList.remove("drop-target"));
+  pane.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    pane.classList.remove("drop-target");
+    const file = e.dataTransfer.files[0];
+    if (file) { els[key].value = await file.text(); refreshStats(); }
+  });
+}
+
+$("#swap").addEventListener("click", () => {
+  [els.a.value, els.b.value] = [els.b.value, els.a.value];
+  refreshStats();
+  if (!els.results.hidden) run();
+});
+
+$("#clear").addEventListener("click", () => {
+  els.a.value = ""; els.b.value = "";
+  refreshStats();
+  showStage();
+  els.a.focus();
+});
+
+$("#edit").addEventListener("click", showStage);
+
+function showStage() {
+  els.results.hidden = true;
+  els.stage.hidden = false;
+  els.timing.textContent = "";
+}
+
+/* --- options ------------------------------------------------------------- */
+
+function currentOptions() {
+  const expressions = [];
+  const source = els.group.value.trim();
+  els.group.setCustomValidity("");
+  if (source) {
+    try { expressions.push(new RegExp(source, "g")); }
+    catch (err) { els.group.setCustomValidity(err.message); }
+  }
+  return {
+    ignoreWhitespace: $("#opt-ws").checked,
+    ignoreCase: $("#opt-case").checked,
+    blockExpressions: expressions,
+  };
+}
+
+/* --- run ----------------------------------------------------------------- */
+
+function run() {
+  const oldText = els.a.value;
+  const newText = els.b.value;
+  if (!oldText && !newText) { els.a.focus(); return; }
+
+  // A diff that throws used to look identical to a diff that did nothing:
+  // the button clicked, the results stayed hidden, no message anywhere. The
+  // guard starts at the options so a bad group expression lands here too.
+  els.failed.hidden = true;
+  let elapsed;
+  try {
+    const opts = currentOptions();
+    const started = performance.now();
+    state.diffHtml = htmlDiff(oldText, newText, opts);
+    state.rows = buildRows(oldText, newText, opts);
+    elapsed = performance.now() - started;
+  } catch (error) {
+    els.failed.textContent = `Could not diff these: ${error.message || error}`;
+    // The message lives in the input stage, so a re-run started from the
+    // results screen — "Load remote assets", or Refresh in served mode —
+    // would otherwise write it somewhere hidden and leave the previous diff
+    // on screen looking current. Come back to the inputs, where the message
+    // is, and where there is something to change.
+    showStage();
+    els.failed.hidden = false;
+    return;
+  }
+  els.timing.textContent = `diffed in ${elapsed < 1 ? "<1" : Math.round(elapsed)} ms`;
+
+  const s = state.rows.stats;
+  const unchanged = state.rows.rows.length - s.ins - s.del - s.mod;
+  els.tally.innerHTML =
+    `<span class="n-ins">+${s.ins + s.mod}</span>` +
+    `<span class="n-del">−${s.del + s.mod}</span>` +
+    `<span class="n-same">lines · ${unchanged} unchanged</span>`;
+
+  showOrigins(state.labels.a, state.labels.b);
+  state.baseUrl = state.labels.b || state.labels.a || null;
+  $("#refetch").hidden = !(state.labels.a || state.labels.b);
+
+  els.stage.hidden = true;
+  els.results.hidden = false;
+  renderView();
+}
+
+function rerun() {
+  if (!els.results.hidden) run();
+}
+
+$("#run").addEventListener("click", run);
+$("#sample").addEventListener("click", () => {
+  els.a.value = SAMPLE_OLD;
+  els.b.value = SAMPLE_NEW;
+  refreshStats();
+  run();
+});
+
+/* --- views --------------------------------------------------------------- */
+
+document.querySelectorAll("[data-view]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.view = btn.dataset.view;
+    document.querySelectorAll("[data-view]").forEach((b) =>
+      b.setAttribute("aria-pressed", String(b === btn)));
+    renderView();
+  });
+});
+
+$("#opt-wrap").addEventListener("change", () => {
+  document.body.classList.toggle("nowrap", !$("#opt-wrap").checked);
+  measureAnchors();
+});
+document.body.classList.toggle("nowrap", !$("#opt-wrap").checked);
+
+function renderView() {
+  state.measured = false;
+  els.rendered.hidden = state.view !== "rendered";
+  els.split.hidden = state.view !== "split";
+  els.unified.hidden = state.view !== "unified";
+  $("#wrap-wrap").style.display = state.view === "rendered" ? "none" : "";
+  $("#ext-wrap").style.display = state.view === "rendered" ? "" : "none";
+
+  if (state.view === "rendered") renderFrame();
+  else if (state.view === "split") renderSplit();
+  else renderUnified();
+
+  els.scroller.scrollTop = 0;
+  state.current = -1;
+  updateCounter();
+}
+
+/* Rendered marks live inside the frame and are measurable only after it
+   loads; the source views measure synchronously. `measured` is what lets the
+   counter tell "none" apart from "not yet". */
+
+/* Rendered: the diff markup in a sandboxed frame. No allow-scripts, so nothing
+   in the pasted page executes; a CSP inside the frame keeps it from reaching
+   the network either, unless the reader opts in. */
+function renderFrame() {
+  const allowRemote = $("#opt-ext").checked;
+  const csp = allowRemote
+    ? "default-src 'none'; img-src * data: blob:; style-src * 'unsafe-inline'; font-src *;"
+    : "default-src 'none'; img-src data:; style-src 'unsafe-inline';";
+
+  // Relative asset paths in a fetched page have nothing to resolve against
+  // inside a srcdoc frame, so without this "Load remote assets" would appear
+  // to do nothing on exactly the pages it exists for.
+  const base = state.baseUrl
+    ? `<base href="${state.baseUrl.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}">`
+    : "";
+
+  els.frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">${base}
+<style>${FRAME_CSS}</style></head><body>${state.diffHtml}</body></html>`;
+
+  els.frame.addEventListener("load", function once() {
+    els.frame.removeEventListener("load", once);
+    fitFrame();
+    measureAnchors();
+  });
+}
+
+function fitFrame() {
+  try {
+    const doc = els.frame.contentDocument;
+    if (!doc) return;
+    els.frame.style.height = "0px";
+    els.frame.style.height = doc.documentElement.scrollHeight + "px";
+  } catch { /* opaque origin — leave the default height */ }
+}
+
+function renderSplit() {
+  const { rows } = state.rows;
+  const out = ['<table class="src split"><colgroup><col><col><col><col></colgroup><tbody>'];
+  forEachRow(rows, (row, index) => {
+    if (row.skip) {
+      out.push(`<tr class="skip" data-key="${row.key}"><td colspan="4">` +
+               `${row.to - row.from} unchanged lines — click to expand</td></tr>`);
+      return;
+    }
+    const leftBody = row.leftHtml !== undefined ? row.leftHtml
+      : row.left === null ? "" : escapeHtml(row.left);
+    const rightBody = row.rightHtml !== undefined ? row.rightHtml
+      : row.right === null ? "" : escapeHtml(row.right);
+    const leftClass = row.kind === "del" || row.kind === "mod" ? " del" : "";
+    const rightClass = row.kind === "ins" || row.kind === "mod" ? " ins" : "";
+    out.push(
+      `<tr data-row="${index}" class="${row.kind}">` +
+      `<td class="gutter">${row.ln ?? ""}</td>` +
+      `<td class="text${row.left === null ? " blank" : leftClass}">${leftBody}</td>` +
+      `<td class="gutter">${row.rn ?? ""}</td>` +
+      `<td class="text${row.right === null ? " blank" : rightClass}">${rightBody}</td></tr>`);
+  });
+  out.push("</tbody></table>");
+  els.split.innerHTML = out.join("");
+  wireExpanders(els.split);
+  measureAnchors();
+}
+
+function renderUnified() {
+  const { rows } = state.rows;
+  const out = ['<table class="src unified"><tbody>'];
+  forEachRow(rows, (row, index) => {
+    if (row.skip) {
+      out.push(`<tr class="skip" data-key="${row.key}"><td colspan="4">` +
+               `${row.to - row.from} unchanged lines — click to expand</td></tr>`);
+      return;
+    }
+    const line = (kind, ln, rn, sign, body, cls) =>
+      `<tr data-row="${index}" class="${kind}">` +
+      `<td class="gutter">${ln ?? ""}</td><td class="gutter">${rn ?? ""}</td>` +
+      `<td class="sign">${sign}</td><td class="text ${cls}">${body}</td></tr>`;
+
+    if (row.kind === "equal") {
+      out.push(line("equal", row.ln, row.rn, "", escapeHtml(row.left), ""));
+    } else if (row.kind === "mod") {
+      out.push(line("del", row.ln, "", "−", row.leftHtml, "del"));
+      out.push(line("ins", "", row.rn, "+", row.rightHtml, "ins"));
+    } else if (row.kind === "del") {
+      out.push(line("del", row.ln, "", "−", escapeHtml(row.left), "del"));
+    } else {
+      out.push(line("ins", "", row.rn, "+", escapeHtml(row.right), "ins"));
+    }
+  });
+  out.push("</tbody></table>");
+  els.unified.innerHTML = out.join("");
+  wireExpanders(els.unified);
+  measureAnchors();
+}
+
+/* Long stretches of unchanged lines collapse to a bar. Three lines of context
+   on each side of a change stay visible, as in a unified patch. */
+const CONTEXT = 3;
+const expanded = new Set();
+
+function forEachRow(rows, emit) {
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i].kind !== "equal") { emit(rows[i], i); i++; continue; }
+    let j = i;
+    while (j < rows.length && rows[j].kind === "equal") j++;
+    const runStart = i, runEnd = j;
+    const head = runStart === 0 ? 0 : CONTEXT;
+    const tail = runEnd === rows.length ? 0 : CONTEXT;
+
+    if (runEnd - runStart <= head + tail + 2 || expanded.has(runStart)) {
+      for (let k = runStart; k < runEnd; k++) emit(rows[k], k);
+    } else {
+      for (let k = runStart; k < runStart + head; k++) emit(rows[k], k);
+      emit({ skip: true, from: runStart + head, to: runEnd - tail, key: runStart }, runStart);
+      for (let k = runEnd - tail; k < runEnd; k++) emit(rows[k], k);
+    }
+    i = j;
+  }
+}
+
+function wireExpanders(root) {
+  root.querySelectorAll("tr.skip").forEach((tr) => {
+    tr.addEventListener("click", () => {
+      expanded.add(Number(tr.dataset.key));
+      if (state.view === "split") renderSplit(); else renderUnified();
+    });
+  });
+}
+
+/* --- the change spine ---------------------------------------------------- */
+
+function measureAnchors() {
+  const anchors = [];
+  const height = els.scroller.scrollHeight || 1;
+
+  if (state.view === "rendered") {
+    const doc = els.frame.contentDocument;
+    if (doc) {
+      const top = els.frame.offsetTop;
+      doc.querySelectorAll("ins, del").forEach((node) => {
+        const rect = node.getBoundingClientRect();
+        const y = rect.top + (doc.documentElement.scrollTop || 0);
+        anchors.push({
+          top: top + y,
+          height: Math.max(rect.height, 2),
+          side: node.tagName === "DEL" ? "del" : "ins",
+          node,
+        });
+      });
+    }
+  } else {
+    const root = state.view === "split" ? els.split : els.unified;
+    root.querySelectorAll("tr.del, tr.ins, tr.mod").forEach((tr) => {
+      anchors.push({
+        top: tr.offsetTop,
+        height: Math.max(tr.offsetHeight, 2),
+        side: tr.classList.contains("ins") ? "ins" : "del",
+        node: tr,
+      });
+    });
+  }
+
+  // Neighbouring marks are one change to a reader; merge them so the counter
+  // says "3 of 12" and not "3 of 400".
+  state.anchors = [];
+  for (const a of anchors) {
+    const last = state.anchors[state.anchors.length - 1];
+    if (last && a.top - (last.top + last.height) < 6) {
+      last.height = Math.max(last.height, a.top + a.height - last.top);
+      last.nodes.push(a.node);
+      if (last.side !== a.side) last.side = "mod";
+    } else {
+      state.anchors.push({ top: a.top, height: a.height, side: a.side, nodes: [a.node] });
+    }
+  }
+
+  state.measured = true;
+  drawSpine(height);
+  updateCounter();
+}
+
+function drawSpine(height) {
+  const spineHeight = els.spine.clientHeight || 1;
+  const scale = spineHeight / height;
+  const parts = [];
+  state.anchors.forEach((a, i) => {
+    const sides = a.side === "mod" ? ["del", "ins"] : [a.side];
+    for (const side of sides) {
+      parts.push(`<div class="tick ${side}" data-anchor="${i}" style="top:${(a.top * scale).toFixed(1)}px;` +
+                 `height:${Math.max(2, a.height * scale).toFixed(1)}px;width:14px"></div>`);
+    }
+  });
+  parts.push('<div class="window" id="spine-window"></div>');
+  els.spine.innerHTML = parts.join("");
+  updateSpineWindow();
+}
+
+function updateSpineWindow() {
+  const win = $("#spine-window");
+  if (!win) return;
+  const total = els.scroller.scrollHeight || 1;
+  const spineHeight = els.spine.clientHeight || 1;
+  const scale = spineHeight / total;
+  win.style.top = (els.scroller.scrollTop * scale).toFixed(1) + "px";
+  win.style.height = Math.max(6, els.scroller.clientHeight * scale).toFixed(1) + "px";
+}
+
+els.scroller.addEventListener("scroll", updateSpineWindow, { passive: true });
+window.addEventListener("resize", () => { if (!els.results.hidden) measureAnchors(); });
+
+els.spine.addEventListener("click", (e) => {
+  const tick = e.target.closest(".tick");
+  if (tick) { goTo(Number(tick.dataset.anchor)); return; }
+  const rect = els.spine.getBoundingClientRect();
+  const fraction = (e.clientY - rect.top) / rect.height;
+  els.scroller.scrollTop = fraction * els.scroller.scrollHeight - els.scroller.clientHeight / 2;
+});
+
+/* --- navigation ---------------------------------------------------------- */
+
+function goTo(index) {
+  if (!state.anchors.length) return;
+  const count = state.anchors.length;
+  state.current = ((index % count) + count) % count;
+  const anchor = state.anchors[state.current];
+
+  els.scroller.scrollTop = anchor.top - els.scroller.clientHeight / 2 + anchor.height / 2;
+  highlightCurrent();
+  updateCounter();
+}
+
+function highlightCurrent() {
+  document.querySelectorAll("tr.is-current").forEach((el) => el.classList.remove("is-current"));
+  const doc = els.frame.contentDocument;
+  if (doc) doc.querySelectorAll(".hd-current").forEach((el) => el.classList.remove("hd-current"));
+  els.spine.querySelectorAll(".tick.is-current").forEach((el) => el.classList.remove("is-current"));
+
+  const anchor = state.anchors[state.current];
+  if (!anchor) return;
+  for (const node of anchor.nodes) {
+    node.classList.add(state.view === "rendered" ? "hd-current" : "is-current");
+  }
+  els.spine.querySelectorAll(`.tick[data-anchor="${state.current}"]`)
+    .forEach((el) => el.classList.add("is-current"));
+}
+
+function updateCounter() {
+  // In the rendered view the marks can only be counted once the frame has
+  // loaded, so until then there is no answer — and saying "no changes" in the
+  // meantime flashes the one reading a reader would act on.
+  if (!state.measured) { els.counter.textContent = "…"; return; }
+  const count = state.anchors.length;
+  els.counter.textContent = count === 0 ? "no changes"
+    : state.current < 0 ? `${count} change${count === 1 ? "" : "s"}`
+    : `${state.current + 1} / ${count}`;
+}
+
+$("#next").addEventListener("click", () => goTo(state.current + 1));
+$("#prev").addEventListener("click", () => goTo(state.current - 1));
+
+document.addEventListener("keydown", (e) => {
+  const typing = /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); return; }
+  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (els.results.hidden) return;
+  if (e.key === "n" || e.key === "j") { e.preventDefault(); goTo(state.current + 1); }
+  else if (e.key === "p" || e.key === "k") { e.preventDefault(); goTo(state.current - 1); }
+  else if (e.key === "r" && !$("#refetch").hidden) { e.preventDefault(); fetchAll(); }
+  else if (e.key === "Escape") showStage();
+});
+
+/* --- export -------------------------------------------------------------- */
+
+/* A saved report is opened outside any sandbox, unlike the preview frame, and
+   `default-src 'none'` covers fetches and script but *not navigation*. A
+   <meta http-equiv=refresh> in a diffed page therefore carried the reader
+   straight to the attacker's URL on open. Tags are not wrapped in <ins>/<del>,
+   so one present in only the new document survives into the report too.
+
+   Parsed in an inert document, so nothing loads while we look, and inside a
+   <div> because that is the context the report parses this string in — what
+   this sees is what the report will render. */
+function stripNavigation(html) {
+  const host = document.implementation.createHTMLDocument("").createElement("div");
+  host.innerHTML = html;
+  for (const meta of host.querySelectorAll("meta[http-equiv]")) {
+    if (/^\s*refresh\s*$/i.test(meta.getAttribute("http-equiv") || "")) meta.remove();
+  }
+  return host.innerHTML;
+}
+
+$("#download").addEventListener("click", () => {
+  const s = state.rows.stats;
+  // Unchanged regions pass through verbatim, so a <script> present in *both*
+  // documents survives into the report — and a report is downloaded and opened
+  // outside any sandbox, unlike the preview frame. Same lockdown as the frame,
+  // plus form-action: like navigation, it does not inherit from default-src.
+  const report = `<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; form-action 'none';">
+<title>htmldiff report</title>
+<style>
+body{margin:0;font:14px/1.6 system-ui,-apple-system,sans-serif}
+.hd-head{padding:14px 20px;border-bottom:1px solid #e3e5ec;font:600 12px/1 ui-monospace,Menlo,monospace;
+letter-spacing:.1em;text-transform:uppercase;color:#5a6070}
+.hd-head b{color:#1550c4}.hd-head i{color:#b01b33;font-style:normal}
+.hd-body{padding:20px}
+${FRAME_CSS}
+</style></head><body>
+<div class="hd-head">htmldiff · <b>+${s.ins + s.mod}</b> <i>−${s.del + s.mod}</i></div>
+<div class="hd-body">${stripNavigation(state.diffHtml)}</div>
+</body></html>`;
+
+  const url = URL.createObjectURL(new Blob([report], { type: "text/html" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "htmldiff-report.html";
+  link.click();
+  URL.revokeObjectURL(url);
+});
+
+/* --- styles injected into the rendered frame ----------------------------- */
+
+const FRAME_CSS = `
+:root { color-scheme: light; }
+body { margin: 0; padding: 20px; background: #fff; color: #14161c;
+  font: 15px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+img { max-width: 100%; height: auto; }
+ins, ins.diffins, ins.diffmod, ins.mod {
+  text-decoration: none; background: #e8eefc; color: #0e3a92;
+  box-shadow: inset 0 -2px 0 #1550c4; border-radius: 2px;
+}
+del, del.diffdel, del.diffmod {
+  text-decoration: line-through; text-decoration-thickness: 1px;
+  background: #fdeaed; color: #8e1728; border-radius: 2px;
+}
+ins.hd-current, del.hd-current { outline: 2px solid #14161c; outline-offset: 1px; }
+`;
+
+/* --- sample: a product card that picked up an edit -----------------------
+   The cover swatch is a data URI so the preview renders with remote assets
+   still blocked, and its colour changes between the two versions — an <img>
+   is diffed as one token, so a swapped image shows as a replacement. */
+
+const swatch = (fill) => "data:image/svg+xml;base64," + btoa(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="150" height="96">` +
+  `<rect width="150" height="96" rx="6" fill="${fill}"/></svg>`);
+
+const SAMPLE_OLD = `<article class="card">
+  <h2>Field Notebook, A5</h2>
+  <p>A pocket notebook with <strong>96 pages</strong> of 100gsm paper,
+    stitched flat so it stays open on a desk.</p>
+  <img src="${swatch("#8b8d94")}" alt="Grey linen cover" width="150">
+  <ul>
+    <li>Dot grid, 5mm</li>
+    <li>Grey linen cover</li>
+    <li>Ships 1 Jan 2016</li>
+  </ul>
+  <p class="price">£12.00</p>
+</article>`;
+
+const SAMPLE_NEW = `<article class="card">
+  <h2>Field Notebook, A5</h2>
+  <p>A pocket notebook with <strong>128 pages</strong> of 120gsm paper,
+    stitched flat so it stays open on a desk and survives a rucksack.</p>
+  <img src="${swatch("#2f4f8f")}" alt="Navy linen cover" width="150">
+  <ul>
+    <li>Dot grid, 5mm</li>
+    <li>Navy linen cover</li>
+    <li>Ships 22 Feb 2017</li>
+    <li>Now in <em>three</em> colours</li>
+  </ul>
+  <p class="price">£14.50</p>
+</article>`;
+
+/* ===========================================================================
+   5. Served mode. Opened as a file:// document the page cannot fetch anything
+   — a cross-origin GET from a file is blocked outright. Served by the CLI it
+   gets a same-origin proxy, and the URL fields below become live: type two
+   URLs, or Refresh to re-pull both and see what a deploy changed.
+   =========================================================================== */
+
+const server = window.__htmldiffServer || null;
+
+if (server) {
+  document.querySelectorAll(".pane-url").forEach((row) => (row.hidden = false));
+  for (const side of ["a", "b"]) {
+    const field = $("#url-" + side);
+    field.value = store.get("url-" + side, "");
+    // Enter means "fetch what I've filled in and show me the diff" — fetching
+    // only this side leaves you staring at the input stage wondering why.
+    field.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); fetchAll(); }
+    });
+    $(`[data-fetch="${side}"]`).addEventListener("click", async () => {
+      await fetchSide(side);
+      if (els.a.value && els.b.value) run();
+    });
+  }
+  $("#refetch").addEventListener("click", fetchAll);
+}
+
+/** Pull one side through the proxy. Returns false if there was nothing to do
+ *  or the fetch failed, so callers can decide whether to diff. */
+async function fetchSide(side) {
+  if (!server) return false;
+  const field = $("#url-" + side);
+  const url = field.value.trim();
+  if (!url) return false;
+
+  const pane = $(side === "a" ? "#pane-a" : "#pane-b");
+  pane.classList.add("busy");
+  field.disabled = true;
+  clearError(side);
+
+  try {
+    const query = new URLSearchParams({ url, token: server.token });
+    const response = await fetch(`${server.endpoint}?${query}`);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+
+    els[side].value = payload.text;
+    field.value = payload.finalUrl;          // redirects land somewhere else
+    store.set("url-" + side, payload.finalUrl);
+    state.labels[side] = payload.finalUrl;
+    refreshStats();
+    return true;
+  } catch (error) {
+    showError(side, error.message || String(error));
+    return false;
+  } finally {
+    pane.classList.remove("busy");
+    field.disabled = false;
+  }
+}
+
+/* Pull every side that has a URL, then diff. Doubles as Refresh: the point of
+   that button is watching a staging box deploy without retyping anything. */
+async function fetchAll() {
+  const sides = ["a", "b"].filter((side) => $("#url-" + side).value.trim());
+  if (!sides.length) return;
+
+  const button = $("#refetch");
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "Refreshing…";
+  try {
+    const done = await Promise.all(sides.map(fetchSide));
+    // Only diff once both sides have something; one URL typed and the other
+    // still being typed is the common case, and diffing against empty is noise.
+    if (done.some(Boolean) && els.a.value && els.b.value) run();
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+function showError(side, message) {
+  clearError(side);
+  const note = document.createElement("span");
+  note.className = "err";
+  note.textContent = message;
+  $("#url-" + side).parentNode.appendChild(note);
+}
+
+function clearError(side) {
+  $("#url-" + side).parentNode.querySelectorAll(".err").forEach((n) => n.remove());
+}
+
+/* The `htmldiff` launcher injects both sides into the head before this script
+   runs, so a copy opened from the CLI lands on the diff rather than on two
+   empty boxes. Whatever it supplies beats the restored session. */
+if (window.__htmldiffPreload) {
+  const preload = window.__htmldiffPreload;
+  if (typeof preload.a === "string") els.a.value = preload.a;
+  if (typeof preload.b === "string") els.b.value = preload.b;
+  state.labels = { a: preload.aLabel || null, b: preload.bLabel || null };
+  // Seed the URL fields too, so Refresh works on a session the CLI started.
+  for (const side of ["a", "b"]) {
+    if (state.labels[side] && $("#url-" + side)) $("#url-" + side).value = state.labels[side];
+  }
+  refreshStats();
+  if (els.a.value || els.b.value) run();
+}
+
+/* A fetched page carries no visible sign of where it came from, and two URLs
+   off the same site look identical once the markup is on screen. */
+function showOrigins(a, b) {
+  if (!a && !b) return;
+  const trim = (url) => (url || "pasted").replace(/^https?:\/\//, "");
+  els.origins.innerHTML = `<b>${escapeHtml(trim(a))}</b> → <b>${escapeHtml(trim(b))}</b>`;
+  els.origins.title = `Original: ${a || "pasted"}\nChanged: ${b || "pasted"}`;
+  els.origins.hidden = false;
+  // The standing "no network" line is about the page, and stays true for the
+  // standalone file — but something did make a request to get here, and in
+  // served mode that something is this page. Saying otherwise would read as a
+  // promise the whole tool kept.
+  $("#privacy").textContent = server
+    ? "Fetched through the local htmldiff proxy on 127.0.0.1; nothing is sent anywhere else."
+    : "Fetched by the htmldiff command; the page itself makes no requests.";
+}
+
+/* Expose the algorithm for tests driving the page through a browser. findRun
+   and windowHashes are otherwise-internal pieces of the match phase, exposed
+   so a test can drive findRun's hash-collision probe budget directly instead
+   of hoping a specific window length surfaces through htmlDiff's recursion. */
+window.htmldiff = {
+  htmlDiff, convertHtmlToWords, sequenceDiff, buildRows, similarity,
+  findRun, windowHashes,
+};
+</script>
+</body>
+</html>

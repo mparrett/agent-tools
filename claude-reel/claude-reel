@@ -1,0 +1,26 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""claude-reel launcher — stdlib-only, no install or venv needed.
+
+uv resolves the interpreter from requires-python above, so this doesn't depend on
+what `python3` happens to point at. That mattered: the launcher used to exec bare
+`python3`, which on macOS is often /usr/bin/python3 (3.9), and the package uses PEP
+604 unions — so it died mid-import with "unsupported operand type(s) for |: 'type'
+and 'NoneType'" against a type annotation, naming neither the version nor the
+interpreter. tests/test_launcher.py fails if this floor drifts from pyproject's.
+
+`resolve()` walks the bin/ symlink to the real package root before putting it on
+sys.path, so the tool runs the same from a PATH entry as it does in place.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from claude_reel.cli import main  # noqa: E402
+
+raise SystemExit(main())

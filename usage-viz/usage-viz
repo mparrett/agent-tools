@@ -1,0 +1,500 @@
+#!/usr/bin/env python3
+"""usage-viz — standalone HTML reports of coding-agent usage.
+
+  usage-viz daily [--breakdown] [--out-dir DIR] [--open]
+      Daily token/cost history across agents (ccusage v20), with /loop
+      wakeups from Claude Code session logs overlaid and cache and output
+      trends. --breakdown adds per-model and per-project breakdowns, at about
+      twice the run time.
+
+  usage-viz codex [ROLLOUT | --id PREFIX] [--date YYYY-MM-DD] [--out-dir DIR] [--open]
+      One Codex run: what it did, when, and what it cost. With no rollout
+      given, picks the day's largest top-level session.
+
+Reports land in --out-dir, else $USAGE_VIZ_DIR, else ~/.local/share/usage-viz,
+under daily/ and codex/, each page beside the JSON it was built from. When that
+directory is inside a git repo, the new files are committed there (and only
+those files); --no-commit skips it.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import webbrowser
+from collections import Counter, defaultdict
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+# v20 is the first ccusage that reports every agent (codex, gemini, grok, ...)
+# in one daily table; the 15.x global install reports Claude only.
+CCUSAGE = ["npx", "-y", "ccusage@20.0.26"]
+CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
+# Stray ScheduleWakeup calls predate real /loop use by weeks; the shaded
+# "/loop active" region starts at the first day with at least this many.
+LOOP_MIN_WAKEUPS = 10
+LOCAL_TZ = dt.datetime.now().astimezone().tzinfo
+
+
+def out_dir(arg, kind):
+    d = Path(arg or os.environ.get("USAGE_VIZ_DIR") or Path.home() / ".local/share/usage-viz").expanduser() / kind
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def commit(paths, message, args):
+    """Commit exactly these files if they live in a git work tree. Pathspec-limited
+    so anything else staged or untracked in that repo is left alone."""
+    if args.no_commit:
+        return
+    git = ["git", "-C", str(paths[0].parent)]
+    if subprocess.run([*git, "rev-parse", "--is-inside-work-tree"], capture_output=True).returncode:
+        return
+    names = [str(p) for p in paths]
+    # git add refuses ignored paths with exit 1; an ignored output dir means the
+    # user doesn't want these tracked, not that the run failed.
+    if subprocess.run([*git, "check-ignore", "-q", "--", *names]).returncode == 0:
+        print("output dir is gitignored; not committing", file=sys.stderr)
+        return
+    subprocess.run([*git, "add", "--", *names], check=True)
+    if not subprocess.run([*git, "diff", "--cached", "--quiet", "--", *names]).returncode:
+        print("unchanged; nothing to commit", file=sys.stderr)
+        return
+    subprocess.run([*git, "commit", "-q", "-m", message, "--", *names], check=True)
+    out = subprocess.run([*git, "log", "-1", "--format=%h"], capture_output=True, text=True).stdout.strip()
+    top = subprocess.run([*git, "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+    print(f"committed {out} in {top}", file=sys.stderr)
+
+
+def local_date(ts):
+    # No-arg astimezone() applies the system zone's DST rules per timestamp, as
+    # ccusage does; LOCAL_TZ is today's fixed offset.
+    return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().date().isoformat()
+
+
+def ccusage(*args):
+    r = subprocess.run([*CCUSAGE, *args, "--json"], capture_output=True, text=True, cwd="/tmp")
+    if r.returncode:
+        sys.exit(f"ccusage failed ({r.returncode}): {r.stderr.strip()[-500:]}")
+    return json.loads(r.stdout)
+
+
+def render(template, payload, path):
+    # Prompts and commands land in an inline <script>; a literal "</script>" in
+    # one would end the block, so "<" is escaped inside the JSON.
+    data = json.dumps(payload, separators=(",", ":")).replace("<", "\\u003c")
+    html = (HERE / template).read_text().replace("__DATA__", data)
+    path.write_text(html)
+    return path
+
+
+def finish(path, args):
+    print(path)
+    if args.open:
+        webbrowser.open(path.as_uri())
+
+
+# ---------------------------------------------------------------- daily
+
+
+def sanitize(path):
+    # Claude Code names a project's transcript folder after its start directory,
+    # with every non-alphanumeric character turned into "-".
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def project_labels():
+    """Transcript-folder prefixes for the repos under ~/projects-new, longest first,
+    so a worktree or subdirectory session folds into the repo it belongs to."""
+    root = Path.home() / "projects-new"
+    if not root.is_dir():
+        # No repo layout to fold into: every project keeps its own folder label.
+        return sanitize(root) + "-", []
+    names = [d.name for d in root.iterdir() if d.is_dir() and d.name not in ("worktrees", "3p", "read-only-clones")]
+    names += [f"3p-{d.name}" for d in (root / "3p").iterdir() if d.is_dir()] if (root / "3p").is_dir() else []
+    return sanitize(root) + "-", sorted({sanitize(n) for n in names}, key=len, reverse=True)
+
+
+def project_label(folder, prefix, known):
+    if not folder.startswith(prefix):
+        home = sanitize(Path.home()) + "-"
+        return "~/" + folder[len(home):] if folder.startswith(home) else folder
+    rest = folder[len(prefix):]
+    rest = rest.removeprefix("worktrees-").split("-wt-")[0]
+    return next((k for k in known if rest == k or rest.startswith(k + "-")), rest)
+
+
+def scan_claude(requests):
+    """One pass over Claude Code transcripts, by local day: ScheduleWakeup/CronCreate
+    calls, and (when requests is set) model requests per model and per project. Both
+    dedupe on ids because subagent transcripts repeat their parent's lines."""
+    # Project labels need ~/projects-new and only feed the breakdown.
+    labels = project_labels() if requests else None
+    seen_tools, seen_msgs = set(), set()
+    wake, by_model, by_project = Counter(), defaultdict(Counter), defaultdict(Counter)
+    for f in CLAUDE_PROJECTS.rglob("*.jsonl"):
+        project = project_label(f.relative_to(CLAUDE_PROJECTS).parts[0], *labels) if labels else None
+        with f.open("rb") as fh:
+            for line in fh:
+                is_wake = b'"ScheduleWakeup"' in line or b'"CronCreate"' in line
+                # Nearly every assistant line carries usage, so counting requests
+                # means parsing most of the corpus; without it only wakeup lines are.
+                is_req = requests and b'"usage"' in line and b'"assistant"' in line
+                if not (is_wake or is_req):
+                    continue
+                try:
+                    d = json.loads(line)
+                    msg = d["message"]
+                    day = local_date(d["timestamp"])
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    continue
+                if is_req and d.get("type") == "assistant" and isinstance(msg, dict) and msg.get("usage"):
+                    key = (msg.get("id"), d.get("requestId"))
+                    model = msg.get("model")
+                    if key not in seen_msgs and model and not model.startswith("<"):
+                        seen_msgs.add(key)
+                        by_model[day][model] += 1
+                        by_project[day][project] += 1
+                content = msg.get("content") if isinstance(msg, dict) else None
+                for b in content if is_wake and isinstance(content, list) else []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in ("ScheduleWakeup", "CronCreate") and b["id"] not in seen_tools:
+                        seen_tools.add(b["id"])
+                        wake[day] += 1
+    return wake, by_model, by_project, labels
+
+
+def scan_codex():
+    """Codex model requests per local day and model. A token_count event repeats when
+    only rate limits change, so a request is counted when the running total grows."""
+    by_model = defaultdict(Counter)
+    for f in CODEX_SESSIONS.rglob("rollout-*.jsonl"):
+        model, last = None, 0
+        with f.open("rb") as fh:
+            for line in fh:
+                if b'"turn_context"' in line:
+                    try:
+                        model = json.loads(line)["payload"].get("model")
+                    except (ValueError, KeyError, AttributeError):
+                        pass
+                elif b'"token_count"' in line:
+                    try:
+                        d = json.loads(line)
+                        total = ((d["payload"].get("info") or {}).get("total_token_usage") or {}).get("total_tokens") or 0
+                        day = local_date(d["timestamp"])
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        continue
+                    if total > last and model:
+                        last = total
+                        by_model[day][model] += 1
+    return by_model
+
+
+def pretty_model(name):
+    m = re.match(r"claude-([a-z]+)-(\d+)(?:-(\d+))?", name)
+    if not m:
+        return name
+    return f"{m[1].title()} {m[2]}" + (f".{m[3]}" if m[3] and len(m[3]) < 3 else "")
+
+
+def by_model(day, requests):
+    """Cost, tokens and requests per model for one day, keyed by display name so
+    dated snapshots of one model share a series."""
+    out = defaultdict(lambda: {"cost": 0.0, "tokens": 0, "requests": 0})
+    for m in day["modelBreakdowns"]:
+        e = out[pretty_model(m["modelName"])]
+        e["cost"] += m["cost"]
+        e["tokens"] += sum(m.get(k, 0) for k in ("cacheCreationTokens", "cacheReadTokens", "inputTokens", "outputTokens"))
+    for model, n in requests.items():
+        out[pretty_model(model)]["requests"] += n
+    return {k: {**v, "cost": round(v["cost"], 2)} for k, v in out.items()}
+
+
+def cmd_daily(args):
+    d = out_dir(args.out_dir, "daily")
+    data = ccusage("daily")
+    today = dt.date.today().isoformat()
+    (d / f"ccusage-{today}.json").write_text(json.dumps(data, indent=1))
+    written = [d / f"ccusage-{today}.json"]
+    wake, claude_req, project_req, labels = scan_claude(args.breakdown)
+
+    proj_day = defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "tokens": 0, "requests": 0}))
+    if args.breakdown:
+        projects = ccusage("claude", "daily", "--instances")
+        written.append(d / f"ccusage-projects-{today}.json")
+        written[-1].write_text(json.dumps(projects, indent=1))
+        codex_req = scan_codex()
+        # ccusage --instances keys projects by transcript folder; fold them the same
+        # way the request counts are folded so worktrees land on their repo.
+        for folder, days in projects["projects"].items():
+            label = project_label(folder, *labels)
+            for day in days:
+                p = proj_day[day["date"]][label]
+                p["cost"] += day["totalCost"]
+                p["tokens"] += day["totalTokens"]
+        for day, counts in project_req.items():
+            for label, n in counts.items():
+                proj_day[day][label]["requests"] += n
+
+    rows = []
+    for day in data["daily"]:
+        claude = sum(m.get("cacheCreationTokens", 0) + m.get("cacheReadTokens", 0) + m.get("inputTokens", 0) + m.get("outputTokens", 0)
+                     for m in day["modelBreakdowns"] if m["modelName"].startswith("claude"))
+        rows.append({
+            "date": day["period"],
+            "tokens": day["totalTokens"],
+            "claude": min(claude, day["totalTokens"]),
+            "cost": round(day["totalCost"], 2),
+            "cacheRead": day["cacheReadTokens"],
+            "wakeups": wake.get(day["period"], 0),
+            "models": [m["modelName"] for m in sorted(day["modelBreakdowns"], key=lambda m: -m["cost"])],
+            "claudeCost": {m["modelName"]: m["cost"] for m in day["modelBreakdowns"] if m["modelName"].startswith("claude")},
+            "input": day["inputTokens"],
+            "cacheWrite": day["cacheCreationTokens"],
+            "output": day["outputTokens"],
+        })
+        if args.breakdown:
+            rows[-1]["byModel"] = by_model(day, claude_req[day["period"]] + codex_req[day["period"]])
+            rows[-1]["byProject"] = {k: {**v, "cost": round(v["cost"], 2)} for k, v in proj_day[day["period"]].items()}
+
+    loop_start = next((r["date"] for r in rows if r["wakeups"] >= LOOP_MIN_WAKEUPS), None)
+    # Mark when the Claude model carrying the most recent week's spend first appeared:
+    # a model switch moves tokens-per-dollar on its own, so the page shows it beside /loop.
+    recent = Counter()
+    for r in rows[-7:]:
+        recent.update(r["claudeCost"])
+    marker = None
+    if recent:
+        top = recent.most_common(1)[0][0]
+        first = next(r["date"] for r in rows if top in r["claudeCost"])
+        if first > rows[0]["date"]:
+            marker = {"date": first, "label": pretty_model(top)}
+    for r in rows:
+        del r["claudeCost"]
+
+    payload = {"rows": rows, "loopStart": loop_start, "marker": marker, "generated": today, "breakdown": args.breakdown}
+    path = render("daily.html", payload, d / f"ccusage-{today}.html")
+    commit([path, *written], f"usage: daily {today}", args)
+    finish(path, args)
+
+
+# ---------------------------------------------------------------- codex
+
+INSPECT = {"cat", "sed", "head", "rg", "grep", "ls", "fd", "find", "wc", "nl", "jq", "diff", "less", "awk", "sort", "stat", "file", "tree", "pwd", "echo", "printf", "realpath", "cmp", "shasum", "md5", "du"}
+VCS = {"git", "gh"}
+# Long runs poll their own background builds; tail/ps on a loop is waiting, not reading.
+WATCH = {"tail", "ps", "pgrep", "jobs", "lsof"}
+
+
+def program(cmd):
+    """First real program in a shell command line, skipping cd/env prefixes."""
+    for seg in re.split(r"&&|\|\||;|\n", cmd):
+        seg = seg.strip()
+        try:
+            words = shlex.split(seg, posix=True)
+        except ValueError:
+            words = seg.split()
+        while words and re.match(r"^[A-Z_][A-Z0-9_]*=", words[0]):
+            words = words[1:]
+        if words and words[0] in ("env", "time", "timeout", "nice"):
+            words = [w for w in words[1:] if not re.match(r"^(-|\d|[A-Z_]+=)", w)]
+        if not words or words[0] in ("cd", "set", "export", "source", ".", "true"):
+            continue
+        return os.path.basename(words[0])
+    return "?"
+
+
+def category(prog):
+    if prog in VCS:
+        return "vcs"
+    if prog in WATCH:
+        return "watch"
+    if prog in INSPECT:
+        return "inspect"
+    if prog in ("python", "python3", "perl", "ruby", "node"):
+        return "script"
+    return "build"
+
+
+def secs(duration):
+    return duration["secs"] + duration["nanos"] / 1e9 if isinstance(duration, dict) else float(duration or 0)
+
+
+def read_jsonl(path):
+    with open(path, "rb") as fh:
+        for line in fh:
+            try:
+                yield json.loads(line)
+            except ValueError:
+                continue
+
+
+def session_meta(path):
+    with open(path, "rb") as fh:
+        try:
+            return json.loads(fh.readline()).get("payload", {})
+        except ValueError:
+            return {}
+
+
+def find_rollout(args):
+    if args.rollout:
+        return Path(args.rollout).expanduser()
+    day = dt.date.fromisoformat(args.date) if args.date else dt.date.today()
+    if args.id:
+        hits = sorted(CODEX_SESSIONS.rglob(f"rollout-*{args.id}*.jsonl"))
+        if not hits:
+            sys.exit(f"no rollout matching {args.id}")
+        # UUIDv7 prefixes encode start time, so a guardian spawned within the
+        # same minute shares its parent's first 8 characters; prefer top-level.
+        tops = [f for f in hits if not session_meta(f).get("parent_thread_id")]
+        return (tops or hits)[-1]
+    folder = CODEX_SESSIONS / f"{day:%Y/%m/%d}"
+    tops = [f for f in folder.glob("rollout-*.jsonl") if not session_meta(f).get("parent_thread_id")]
+    if not tops:
+        sys.exit(f"no top-level Codex sessions in {folder}")
+    return max(tops, key=lambda f: f.stat().st_size)
+
+
+def children(session_id, start):
+    """Guardian/subagent rollouts spawned by this session, from its start day onward."""
+    out = []
+    for i in range(0, 4):
+        folder = CODEX_SESSIONS / f"{start + dt.timedelta(days=i):%Y/%m/%d}"
+        for f in folder.glob("rollout-*.jsonl"):
+            m = session_meta(f)
+            if m.get("parent_thread_id") == session_id:
+                out.append((f, m))
+    return out
+
+
+def rollout_usage(path):
+    last = None
+    for d in read_jsonl(path):
+        if d.get("payload", {}).get("type") == "token_count" and (d["payload"].get("info") or {}).get("total_token_usage"):
+            last = d["payload"]["info"]["total_token_usage"]
+    return last or {}
+
+
+def parse_rollout(path):
+    s = {"prompts": [], "messages": [], "commands": [], "sleeps": [], "compactions": [], "tasks": [], "tokens": [], "limits": [], "models": Counter()}
+    task_open = {}
+    for d in read_jsonl(path):
+        t, typ, p = d.get("timestamp"), d.get("type"), d.get("payload") or {}
+        if typ == "session_meta":
+            s["meta"] = {k: p.get(k) for k in ("id", "cwd", "originator", "cli_version", "timestamp")}
+            s["meta"]["git"] = p.get("git")
+        elif typ == "turn_context":
+            s["models"][f'{p.get("model")} · {p.get("effort") or "default"}'] += 1
+            s.setdefault("tz", p.get("timezone"))
+        elif typ == "compacted":
+            s["compactions"].append(t)
+        elif typ == "event_msg":
+            pt = p.get("type")
+            if pt == "token_count" and p.get("info"):
+                info = p["info"]
+                tot, last = info.get("total_token_usage") or {}, info.get("last_token_usage") or {}
+                s["tokens"].append({"t": t, "total": tot.get("total_tokens", 0), "ctx": last.get("input_tokens", 0), "window": info.get("model_context_window") or 0})
+                rl = p.get("rate_limits") or {}
+                if rl.get("primary"):
+                    s["limits"].append({"t": t, "p": rl["primary"].get("used_percent"), "s": (rl.get("secondary") or {}).get("used_percent")})
+                    s["plan"] = rl.get("plan_type")
+            elif pt == "task_started":
+                task_open[p.get("turn_id")] = t
+            elif pt == "task_complete":
+                s["tasks"].append({"start": task_open.pop(p.get("turn_id"), None), "end": t, "ms": p.get("duration_ms"),
+                                   "error": (p.get("error") or {}).get("message")})
+            elif pt == "item_completed":
+                it = p.get("item") or {}
+                kind = it.get("type")
+                if kind == "UserMessage":
+                    text = "\n".join(c.get("text", "") for c in it.get("content", []) if isinstance(c, dict))
+                    s["prompts"].append({"t": t, "text": text})
+                elif kind == "AgentMessage":
+                    text = it.get("text") or "\n".join(c.get("text", "") for c in it.get("content") or [] if isinstance(c, dict))
+                    s["messages"].append({"t": t, "text": text, "final": it.get("phase") == "final_answer"})
+                elif kind == "CommandExecution":
+                    cmd = it.get("command") or []
+                    line = cmd[-1] if cmd else ""
+                    prog = program(line)
+                    s["commands"].append({"t": t, "cmd": line[:400], "prog": prog, "cat": category(prog), "sec": round(secs(it.get("duration")), 2),
+                                          "exit": it.get("exit_code"), "status": it.get("status")})
+                elif kind == "Extension" and it.get("kind") == "clock.sleep":
+                    s["sleeps"].append({"t": t, "ms": it.get("durationMs") or 0})
+    for turn, start in task_open.items():
+        s["tasks"].append({"start": start, "end": None, "ms": None, "error": None})
+    s["models"] = [m for m, _ in s["models"].most_common()]
+    return s
+
+
+def cmd_codex(args):
+    path = find_rollout(args)
+    parent = session_meta(path).get("parent_thread_id")
+    if parent:
+        # A guardian/subagent rollout is already folded into its parent's report.
+        sys.exit(f"{path.name} is a {session_meta(path).get('thread_source') or 'side'} session of {parent}; "
+                 f"report on the parent instead: usage-viz codex --id {parent}")
+    d = out_dir(args.out_dir, "codex")
+    s = parse_rollout(path)
+    meta = s.get("meta") or {}
+    # Every real rollout opens with session_meta; without its id, side sessions
+    # and the output name cannot be resolved.
+    if not meta.get("id") or not meta.get("timestamp"):
+        sys.exit(f"{path.name} has no session_meta line; not a Codex rollout this tool can read")
+    start = dt.date.fromisoformat(local_date(meta["timestamp"]))
+
+    kids = []
+    for f, m in children(meta.get("id"), start):
+        u = rollout_usage(f)
+        kids.append({"file": f.stem, "kind": m.get("thread_source") or "subagent", "tokens": u.get("total_tokens", 0)})
+
+    costs = {}
+    if not args.no_cost:
+        try:
+            for row in ccusage("codex", "session", "--since", f"{start:%Y%m%d}").get("sessions", []):
+                costs[row["sessionFile"]] = {"cost": row.get("costUSD"), "tokens": row.get("totalTokens"),
+                                             "cacheRead": row.get("cacheReadTokens"), "output": row.get("outputTokens"),
+                                             "reasoning": row.get("reasoningOutputTokens")}
+        except SystemExit as e:
+            print(f"warning: no cost data ({e})", file=sys.stderr)
+    for k in kids:
+        k["cost"] = (costs.get(k["file"]) or {}).get("cost")
+
+    payload = {"file": str(path), "session": s, "usage": costs.get(path.stem) or {}, "children": kids,
+               "generated": dt.datetime.now(LOCAL_TZ).isoformat(timespec="minutes")}
+    # 13 characters covers the UUIDv7 millisecond timestamp; 8 repeat within a minute.
+    sid = meta["id"][:13]
+    stem = f"codex-{start}-{sid}"
+    (d / f"{stem}.json").write_text(json.dumps(payload, indent=1))
+    page = render("codex.html", payload, d / f"{stem}.html")
+    commit([page, d / f"{stem}.json"], f"usage: codex {start} {sid} ({Path(meta.get('cwd') or '?').name})", args)
+    finish(page, args)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="usage-viz", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("daily", help="daily usage across agents, with /loop overlay")
+    p.add_argument("--breakdown", action="store_true", help="add per-model and per-project breakdowns (about doubles the run time)")
+    p.add_argument("--out-dir")
+    p.add_argument("--no-commit", action="store_true", help="don't commit into a git repo at the output dir")
+    p.add_argument("--open", action="store_true")
+    p.set_defaults(fn=cmd_daily)
+    p = sub.add_parser("codex", help="report on one Codex rollout")
+    p.add_argument("rollout", nargs="?", help="path to a rollout-*.jsonl")
+    p.add_argument("--id", help="session id prefix")
+    p.add_argument("--date", help="pick the largest top-level session from this day (default today)")
+    p.add_argument("--no-cost", action="store_true", help="skip the ccusage cost lookup")
+    p.add_argument("--out-dir")
+    p.add_argument("--no-commit", action="store_true", help="don't commit into a git repo at the output dir")
+    p.add_argument("--open", action="store_true")
+    p.set_defaults(fn=cmd_codex)
+    args = ap.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

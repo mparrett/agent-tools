@@ -1,0 +1,54 @@
+name: CI
+
+# The justfile is the single source of truth for what runs. CI calls `just
+# check` and `just test` rather than listing the suites again — a second copy
+# of that list is how a suite goes missing from one side and nobody notices.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push supersedes the run in flight; nothing here publishes anything, so
+# the older result is worth nothing once it is stale.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# One job on purpose. Actions bills each job rounded up to the whole minute, so
+# `just check` — eleven seconds — cost a full billable minute every run while it
+# stood alone: 171 minutes charged for 29 minutes of work, a quarter of this
+# repo's CI spend (measured 2026-09-16). Folded in here it lands inside a minute
+# the tests job is already paying for. Split it back out only for something that
+# needs a different runner or genuinely runs long enough to parallelize.
+jobs:
+  test:
+    name: lint + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: extractions/setup-just@v2
+
+      # htmldiff and preview-diff drive a real headless browser. The binary
+      # lives outside the uv cache and a bare runner has neither it nor the
+      # shared libraries it links against, so install both up front. Not
+      # cached on purpose: the suites resolve playwright unpinned, and a
+      # browser build cached against an older library version fails in a way
+      # that reads as a test bug.
+      - name: Install Chromium for the browser suites
+        run: uv run --with playwright playwright install --with-deps chromium
+
+      - run: just test
+
+      # Runs even when the tests fail. Two separate jobs always reported both
+      # signals, and collapsing them must not cost a round trip where you fix
+      # the lint, push, and only then find out the tests were broken too.
+      - name: just check
+        if: ${{ !cancelled() }}
+        run: just check

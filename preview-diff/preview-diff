@@ -1,0 +1,1416 @@
+#!/usr/bin/env bash
+# preview-diff — render a git diff (optionally with a description) to a
+# self-contained HTML file and open it in the browser. No server, no deps.
+#
+# The whole trick: build a throwaway HTML artifact in a temp dir, then `open`
+# it. Good for eyeballing a diff/PR candidate locally before pushing.
+#
+# Usage:
+#   preview-diff [base] [head]
+#   preview-diff origin/main HEAD
+#   preview-diff --body pr-body.md --title "my PR" origin/main
+#   preview-diff --show [commit]
+#   preview-diff --serve origin/main HEAD
+#   preview-diff --review origin/main HEAD
+#   git show a b c | preview-diff --from-diff --title "3 commits"
+#
+# Positional (both optional):
+#   base   ref to diff FROM   (default: origin/main if it resolves, else HEAD~1)
+#   head   ref to diff TO      (default: HEAD)
+#
+# Options:
+#   --show          render `git show <commit>` instead of a diff; the commit is
+#                   the first positional (default: HEAD)
+#   --from-diff [f] render a diff you supply instead of generating one — from
+#                   file <f>, or stdin if omitted or `-`. The escape hatch for
+#                   anything git's own modes don't cover (multi-commit, a
+#                   .patch, `gh pr diff`, exotic flags). No repo required.
+#   -C <dir>        run git in this repo dir (default: cwd)
+#   --body <file>   markdown/text shown above the diff (e.g. a PR description).
+#                   Rendered as markdown with a raw/rendered toggle.
+#   --title <text>  page title (default: "<base>..<head>", or the commit for --show)
+#   -o <file>       output HTML path (default: a temp file)
+#   --serve [port]  after writing, serve the file over HTTP (python3 http.server,
+#                   default port auto-picked from 8137) and open the http:// URL
+#                   instead of a file:// path — handy when a file:// path would be
+#                   mangled (e.g. an agent abbreviating the temp dir to an
+#                   unclickable ".../…/x.html"). Runs in the FOREGROUND and blocks
+#                   until Ctrl-C. For non-interactive use (scripts, agents), pair
+#                   with --no-open and background the call to just get the URL:
+#                     url=$(preview-diff --serve --no-open HEAD~1 HEAD & sleep 1; ...)
+#   --review [port] review mode: same page, plus an overlay for leaving comments
+#                   on a line (click its line number) or a span (shift-click a
+#                   second line), the review text (markdown) and a reviewer
+#                   name. Submit saves a bundle under
+#                     $XDG_DATA_HOME/preview-diff/reviews/<id>/
+#                   holding review.md (the review, postable as-is with
+#                   `gh pr comment N --body-file`, and the small file to point
+#                   an agent at), review.json, review.html (self-contained page)
+#                   and source.diff. Implies --serve, since submitting POSTs
+#                   to the server; same foreground/Ctrl-C behaviour.
+#                   Agents can skip the browser and POST the same JSON directly:
+#                     curl -X POST -H 'Content-Type: application/json' \
+#                          -d @review.json http://127.0.0.1:PORT/review
+#                   {"reviewer":"me","body":"the review, markdown","comments":[
+#                     {"path":"a.py","line":42,"side":"new","body":"..."},
+#                     {"path":"a.py","start_line":10,"line":14,"body":"span"}]}
+#   --review-out <dir>  save reviews here instead of the XDG location
+#   --no-open       write the file but don't launch the browser
+#   -h, --help      this help
+
+set -euo pipefail
+
+repo="."
+body_file=""
+title=""
+out=""
+do_open=1
+serve=0
+serve_port=""
+show_mode=0
+from_diff=0
+diff_src="-"
+review=0
+review_out=""
+pos=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --show)    show_mode=1; shift ;;
+    # Optional value: consume the next arg as the source file unless it's
+    # another option, so bare `--from-diff` (and `--from-diff -`) mean stdin.
+    --from-diff)
+      from_diff=1
+      if [[ -n "${2-}" && ( "$2" == "-" || "$2" != -* ) ]]; then diff_src="$2"; shift 2; else shift; fi ;;
+    -C)        repo="$2"; shift 2 ;;
+    --body)    body_file="$2"; shift 2 ;;
+    --title)   title="$2"; shift 2 ;;
+    -o)        out="$2"; shift 2 ;;
+    --serve)
+      serve=1
+      if [[ -n "${2-}" && "$2" =~ ^[0-9]+$ ]]; then serve_port="$2"; shift 2; else shift; fi ;;
+    # Review implies serve: the comment overlay submits over HTTP, so there has
+    # to be something listening to submit to.
+    --review)
+      review=1; serve=1
+      if [[ -n "${2-}" && "$2" =~ ^[0-9]+$ ]]; then serve_port="$2"; shift 2; else shift; fi ;;
+    --review-out) review_out="$2"; shift 2 ;;
+    --no-open) do_open=0; shift ;;
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;/^set -euo/d'; exit 0 ;;
+    -*)        echo "preview-diff: unknown option $1" >&2; exit 2 ;;
+    *)         pos+=("$1"); shift ;;
+  esac
+done
+
+# Resolve the real script dir through any symlinks (bin/preview-diff is a
+# symlink) so we can find the vendored markdown renderer next to the script.
+src="${BASH_SOURCE[0]}"
+while [[ -L "$src" ]]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+script_dir="$(cd -P "$(dirname "$src")" && pwd)"
+# micromd: a tiny self-built Markdown→HTML renderer, stored pre-minified and
+# base64'd so it embeds as a data: URL <script> with no build step at runtime.
+md_b64="$script_dir/vendor/micromd.min.js.b64"
+review_server="$script_dir/review_server.py"
+
+git_repo() { git -C "$repo" "$@"; }
+
+# --serve support: probe/pick a free localhost port with bash's /dev/tcp (no nc).
+port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+find_free_port() {
+  local base="${1:-8137}" p
+  for ((p = base; p < base + 50; p++)); do port_free "$p" && { echo "$p"; return 0; }; done
+  return 1
+}
+
+# --from-diff is a pure renderer, so it needs no repo; every other mode drives
+# git and does.
+[[ $from_diff -eq 1 ]] || git_repo rev-parse --git-dir >/dev/null 2>&1 || { echo "preview-diff: $repo is not a git repo" >&2; exit 1; }
+[[ -n "$body_file" && ! -f "$body_file" ]] && { echo "preview-diff: no such body file: $body_file" >&2; exit 1; }
+if [[ $review -eq 1 ]]; then
+  command -v python3 >/dev/null || { echo "preview-diff: --review needs python3" >&2; exit 1; }
+  [[ -f "$review_server" ]] || { echo "preview-diff: missing review server: $review_server" >&2; exit 1; }
+fi
+
+# Resolve what to render. With --from-diff the diff is supplied (stdin or a
+# file); stats come from our own parse, so no repo is needed.
+# In --show mode it's a single commit (the first positional, default HEAD) fed
+# to `git show`. Otherwise it's a diff: accept either two refs (base head) or a
+# single git range arg, so both `preview-diff origin/main HEAD` and the
+# muscle-memory `preview-diff origin/main..HEAD` (or A...B) work. Bare:
+# origin/main if it resolves, else HEAD~1, vs HEAD.
+if [[ $from_diff -eq 1 ]]; then
+  label="diff"
+  if [[ "$diff_src" == "-" ]]; then diff="$(cat)"; else
+    [[ -f "$diff_src" ]] || { echo "preview-diff: no such diff file: $diff_src" >&2; exit 1; }
+    diff="$(cat "$diff_src")"
+  fi
+  [[ -z "$diff" ]] && { echo "preview-diff: empty diff input" >&2; exit 0; }
+elif [[ $show_mode -eq 1 ]]; then
+  commit="${pos[0]:-HEAD}"
+  # A merge shows an empty combined diff unless conflicted; diff it against its
+  # first parent instead so the merge's changes actually render.
+  if git_repo rev-parse --verify -q "$commit^2" >/dev/null 2>&1; then
+    diff="$(git_repo show --first-parent -m "$commit")"
+  else
+    diff="$(git_repo show "$commit")"
+  fi
+  [[ -z "$diff" ]] && { echo "preview-diff: no output for ${commit}" >&2; exit 0; }
+  # Pull the commit metadata separately (the awk parser skips the git-show
+  # preamble): subject titles the page, author·date + body surface in the header.
+  show_subject="$(git_repo show -s --format=%s "$commit" 2>/dev/null || true)"
+  show_meta="$(git_repo show -s --format='%an · %ad' --date=short "$commit" 2>/dev/null || true)"
+  show_body="$(git_repo show -s --format=%b "$commit" 2>/dev/null || true)"
+  show_short="$(git_repo rev-parse --short "$commit" 2>/dev/null || echo "$commit")"
+  label="${show_subject:-$commit}"
+else
+  base="${pos[0]:-}"
+  head="${pos[1]:-}"
+  if [[ -n "$base" && -z "$head" && "$base" == *".."* ]]; then
+    range=("$base"); label="$base"
+  else
+    [[ -z "$base" ]] && { git_repo rev-parse --verify -q origin/main >/dev/null && base="origin/main" || base="HEAD~1"; }
+    [[ -z "$head" ]] && head="HEAD"
+    range=("$base" "$head"); label="${base}..${head}"
+  fi
+  diff="$(git_repo diff "${range[@]}")"
+  [[ -z "$diff" ]] && { echo "preview-diff: no diff for ${label}" >&2; exit 0; }
+fi
+[[ -z "$title" ]] && title="$label"
+
+# mktemp owns the unique name; rename it to .html so the browser renders it as
+# HTML (and so we don't orphan the original 0-byte temp file). In --serve mode we
+# instead drop the file as index.html in a dedicated dir, so the served root is
+# clean (http://127.0.0.1:PORT/) and sibling temp files aren't listed.
+#
+# Every mktemp here spells its template out rather than using `-t`: BSD mktemp
+# reads -t's argument as a prefix, GNU coreutils reads it as a template and
+# rejects one with no XXX in it. On Linux the -t form aborts the script under
+# `set -e` before it prints anything, so --serve and --review died silently.
+# Set unconditionally — the review-mode temp below needs it even when -o
+# supplied the output path, and `set -u` makes an unset one fatal.
+tmproot="${TMPDIR:-/tmp}"; tmproot="${tmproot%/}"
+if [[ -z "$out" ]]; then
+  if [[ $serve -eq 1 ]]; then
+    servedir="$(mktemp -d "$tmproot/preview-diff-serve.XXXXXX")"; out="$servedir/index.html"
+  else
+    tmp="$(mktemp "$tmproot/preview-diff.XXXXXX")"; out="$tmp.html"; mv "$tmp" "$out"
+  fi
+fi
+
+esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+
+# One unified-diff parser for everything derived from the diff. mode=render
+# emits the per-file HTML cards; mode=stats emits "add<TAB>del<TAB>path" per
+# file. The totals and changed-files chips come from the same parse as the
+# cards, so they can't disagree with what's rendered (counts, order, #file-N
+# anchors) — which they could when numstat came from a second git invocation.
+awk_prog='
+    function esc(s){ gsub(/&/,"\\&amp;",s); gsub(/</,"\\&lt;",s); gsub(/>/,"\\&gt;",s); return s }
+    # Attribute values additionally need the quote closed off, or a path
+    # containing one would break out of the attribute.
+    function escattr(s){ s=esc(s); gsub(/"/,"\\&quot;",s); return s }
+    function langof(path,   ext){
+      ext=path; sub(/.*\./,"",ext)
+      if(ext ~ /^(js|mjs|cjs|jsx)$/) return "javascript"
+      if(ext ~ /^(ts|tsx)$/) return "typescript"
+      if(ext=="py") return "python"
+      if(ext ~ /^(ex|exs|eex|heex)$/) return "elixir"
+      if(ext=="rs") return "rust"
+      if(ext=="go") return "go"
+      if(ext=="rb") return "ruby"
+      if(ext ~ /^(sh|bash|zsh)$/) return "shell"
+      if(ext=="md") return "markdown"
+      if(ext ~ /^(yml|yaml)$/) return "yaml"
+      if(ext=="json") return "json"
+      if(ext=="html") return "html"
+      if(ext=="css") return "css"
+      return ""
+    }
+    # Bucket a changed file so the header can show implementation lines by
+    # default and disclose the total. Path rules only — no content analysis, no
+    # config. First match wins. Regular .json/.edn/.yaml/.toml stay
+    # implementation on purpose; only generated lockfiles are assets.
+    function catof(path,   ext,base){
+      base=path; sub(/.*\//,"",base)
+      ext=base; sub(/.*\./,"",ext); ext=tolower(ext)
+      if(path ~ /(^|\/)(tests?|spec|__tests__)\//) return "tests"
+      if(base ~ /(_test\.|\.test\.|_spec\.|\.spec\.)/) return "tests"
+      if(base ~ /^test_/) return "tests"
+      if(path ~ /(^|\/)docs?\//) return "docs"
+      if(ext ~ /^(md|mdx|rst|txt|adoc|org)$/) return "docs"
+      # Anchored: these only need to catch the extensionless spellings, since
+      # CHANGELOG.md and friends already matched the extension rule above. As a
+      # bare prefix it also swallowed ordinary source — NOTICEBOARD.js and
+      # AUTHORS_NOTE.py both classified as docs and left the headline count.
+      if(base ~ /^(LICEN[CS]E|COPYING|NOTICE|CHANGELOG|AUTHORS|CONTRIBUTORS)(\.|$)/) return "docs"
+      if(base ~ /^(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|go\.sum|Cargo\.lock|poetry\.lock|Gemfile\.lock|composer\.lock|uv\.lock|flake\.lock)$/) return "assets"
+      if(base ~ /\.min\.(js|css)$/) return "assets"
+      if(ext ~ /^(png|jpe?g|gif|webp|bmp|ico|svg|pdf|woff2?|ttf|otf|eot|zip|gz|tgz|tar|bz2|xz|mp4|mov|webm|mp3|wav|wasm|so|dylib|dll|bin|map|lock)$/) return "assets"
+      return "implementation"
+    }
+    function bar(a,d,   g,r,s,out,i){
+      s=a+d; g=0; r=0
+      if(s>0){ g=int((a*5 + s/2)/s); if(a>0&&g==0)g=1; if(d>0&&g==5)g=4; r=5-g }
+      out=""
+      for(i=0;i<g;i++) out=out "<i class=\"g\"></i>"
+      for(i=0;i<r;i++) out=out "<i class=\"r\"></i>"
+      return out
+    }
+    # Strip git quoting ("..."), an a/ or b/ prefix, and a trailing tab+timestamp
+    # (plain diff), so both git and POSIX unified-diff paths land clean.
+    function cleanpath(s){ sub(/\t.*$/,"",s); if(s ~ /^".*"$/) s=substr(s,2,length(s)-2); sub(/^[ab]\//,"",s); return s }
+    function startfile(p){ flush(); fileno++; path=p; add=0; del=0; rows=""; ln_o=0; ln_n=0; infile=1 }
+    function emit(line,   c){
+      if(!infile) return
+      if(line ~ /^@@/){
+        match(line,/-[0-9]+/); ln_o=substr(line,RSTART+1,RLENGTH-1)+0
+        match(line,/\+[0-9]+/); ln_n=substr(line,RSTART+1,RLENGTH-1)+0
+        rows=rows "<tr class=\"r-hunk\"><td class=\"ln ln-o\"></td><td class=\"ln ln-n\"></td><td class=\"code\">" esc(line) "</td></tr>"
+        return
+      }
+      c=substr(line,2)
+      # data-o/data-n are what the review overlay anchors to: they name the
+      # (side, line) a comment attaches to, apart from how the row is rendered.
+      if(line ~ /^\+/){ add++; rows=rows "<tr class=\"r-add\" data-n=\"" ln_n "\"><td class=\"ln ln-o\"></td><td class=\"ln ln-n\">" ln_n "</td><td class=\"code\"><span class=\"sign\">+</span>" esc(c) "</td></tr>"; ln_n++; return }
+      if(line ~ /^-/){ del++; rows=rows "<tr class=\"r-del\" data-o=\"" ln_o "\"><td class=\"ln ln-o\">" ln_o "</td><td class=\"ln ln-n\"></td><td class=\"code\"><span class=\"sign\">-</span>" esc(c) "</td></tr>"; ln_o++; return }
+      if(line ~ /^ /){ rows=rows "<tr data-o=\"" ln_o "\" data-n=\"" ln_n "\"><td class=\"ln ln-o\">" ln_o "</td><td class=\"ln ln-n\">" ln_n "</td><td class=\"code\"><span class=\"sign\"> </span>" esc(c) "</td></tr>"; ln_o++; ln_n++; return }
+    }
+    function flush(   lang,cat){
+      if(!infile) return
+      infile=0
+      cat=catof(path)
+      # stats mode carries the category as a third field so the header totals and
+      # the changed-files chips classify from the same parse as the cards.
+      if(mode=="stats"){ printf "%d\t%d\t%s\t%s\n", add, del, cat, path; return }
+      lang=langof(path)
+      printf "<details class=\"file\" id=\"file-%d\" data-path=\"%s\" open><summary class=\"file-head\"><div class=\"file-name\"><span class=\"chev\"></span>", fileno, escattr(path)
+      if(lang!="") printf "<span class=\"lang\" data-lang=\"%s\">%s</span>", lang, lang
+      printf "<h2>%s</h2></div>", esc(path)
+      printf "<div class=\"file-stat\">"
+      # Implementation is the default and carries no tag; tests/docs/assets do.
+      if(cat!="implementation") printf "<span class=\"file-cat cat-%s\">%s</span>", cat, cat
+      printf "<span class=\"add\">+%d</span> <span class=\"del\">-%d</span> <span class=\"bar\">%s</span></div></summary>", add, del, bar(add,del)
+      printf "<div class=\"code-wrap\"><table class=\"diff\">%s</table></div></details>\n", rows
+    }
+    # A plain-diff "--- " is only a file header if the next line is "+++ "; decide here
+    # (the line after the stashed "--- "). Otherwise it was a "-- x" content del line.
+    maybe_header==1 {
+      maybe_header=0
+      if($0 ~ /^\+\+\+ /){ startfile(cleanpath(substr($0,5))); next }
+      emit(pending_old)   # stashed line was content; fall through to process this one
+    }
+    /^diff --git / { saw_git=1; p=$0; sub(/^diff --git /,"",p); sub(/^.* /,"",p); startfile(cleanpath(p)); pend=1; next }
+    /^index / { next }
+    /^rename to / { if(infile) path=cleanpath(substr($0,11)); next }
+    /^--- / {
+      if(pend) next                        # git header (old side)
+      if(saw_git){ emit($0); next }         # git-mode content collision (-- x)
+      pending_old=$0; maybe_header=1; next  # plain diff: confirm against the next line
+    }
+    /^\+\+\+ / {
+      if(pend){ pend=0; p=cleanpath(substr($0,5)); if(p!="/dev/null" && p!="") path=p; next }
+      emit($0); next                        # content collision (++ y)
+    }
+    infile==0 { next }
+    /^@@/ { emit($0); next }
+    /^\+/ { emit($0); next }
+    /^-/  { emit($0); next }
+    /^ /  { emit($0); next }
+    /^\\/ { next }
+    { next }
+    END { flush() }
+'
+parse_diff() { printf '%s\n' "$diff" | awk -v mode="$1" "$awk_prog"; }
+
+numstat="$(parse_diff stats)"
+
+files_n=0; add_n=0; del_n=0; impl_files=0; impl_add=0; impl_del=0
+while IFS=$'\t' read -r a d c p; do
+  [[ -z "${p:-}" ]] && continue
+  files_n=$((files_n + 1))
+  add_n=$((add_n + a))
+  del_n=$((del_n + d))
+  if [[ "$c" == implementation ]]; then
+    impl_files=$((impl_files + 1))
+    impl_add=$((impl_add + a))
+    impl_del=$((impl_del + d))
+  fi
+done <<< "$numstat"
+
+# eyebrow + base→head refs by mode
+if [[ $show_mode -eq 1 ]]; then eyebrow="commit"; base_ref=""; head_ref="${show_short:-$commit}"
+elif [[ "$label" == *..* ]]; then eyebrow="branch review"; base_ref="${label%%..*}"; head_ref="${label##*..}"
+else eyebrow="diff review"; base_ref=""; head_ref=""
+fi
+
+# A 5-square bar split green/red by the add:del ratio (both get ≥1 when nonzero).
+bar_html() {
+  local a="$1" d="$2" tot=5 g r i out=""
+  local sum=$((a + d))
+  if [[ $sum -eq 0 ]]; then g=0; r=0
+  else
+    g=$(( (a * tot + sum / 2) / sum ))
+    [[ $a -gt 0 && $g -eq 0 ]] && g=1
+    [[ $d -gt 0 && $g -ge $tot ]] && g=$((tot - 1))
+    r=$((tot - g))
+  fi
+  for ((i = 0; i < g; i++)); do out+='<i class="g"></i>'; done
+  for ((i = 0; i < r; i++)); do out+='<i class="r"></i>'; done
+  printf '%s' "$out"
+}
+
+{
+  echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'"$(printf '%s' "$title" | esc)"'</title>'
+  cat <<'CSS'
+<style>
+:root{
+  --ground:#0f1419; --surface:#171d23; --code-bg:#1a2027; --border:#2a333c;
+  --text:#c9d3de; --muted:#7d8896; --faint:#59636e;
+  --accent:#4fd6be; --add:#3fb950; --del:#f85149; --hunk:#58a6ff;
+  --add-bg:rgba(63,185,80,.10); --del-bg:rgba(248,81,73,.10);
+  --add-gutter:rgba(63,185,80,.28); --del-gutter:rgba(248,81,73,.28);
+  /* Clearance under the sticky header for anything scrolled to. Measured
+     from the real header at load — it grows with a wrapped title or an
+     extra ref line, and a stale guess buries whatever you jumped to. */
+  --anchor:164px;
+  --mono:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+*{box-sizing:border-box}
+/* text-size-adjust:100% stops iOS/mobile from auto-inflating the code text —
+   the browser boosts blocks it reads as "main content" (the wide diff) while
+   leaving the chrome alone, so the code renders disproportionately large. */
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1080px;margin:0 auto;padding:0 20px 96px}
+.top{position:sticky;top:0;z-index:10;background:rgba(15,20,25,.86);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);margin:0 -20px 0;padding:18px 20px 16px}
+.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600;display:flex;gap:10px;align-items:center}
+.eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+h1{font-size:23px;margin:8px 0 0;font-weight:650;letter-spacing:-.01em;text-wrap:balance}
+.refs{margin-top:6px;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+.refs b{color:var(--text);font-weight:600}
+.refs .arrow{color:var(--faint);margin:0 6px}
+.cmeta{margin-top:5px;font-family:var(--mono);font-size:12px;color:var(--faint)}
+.totals{display:flex;gap:18px;margin-top:14px;font-family:var(--mono);font-size:13px;font-variant-numeric:tabular-nums;align-items:center;flex-wrap:wrap}
+.totals .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-right:6px}
+.totals a{border-bottom:1px dotted var(--faint)}
+.totals a:hover{border-bottom-color:var(--accent)} .totals a:hover .k{color:var(--accent)}
+.keys{margin-left:auto;font-size:10.5px;color:var(--faint);letter-spacing:.02em}
+.keys b{color:var(--muted);font-weight:600}
+.keys .sep{margin:0 6px;opacity:.5}
+.add{color:var(--add)} .del{color:var(--del)}
+.desc{margin:22px 0 0;scroll-margin-top:var(--anchor)}
+.desc-head{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:10px}
+/* Typography above is shared with the review header, which is a plain div and
+   must not look clickable; the interactive half hangs off summary. */
+summary.desc-head{cursor:pointer;list-style:none;margin:0;padding:6px 0}
+summary.desc-head::-webkit-details-marker{display:none}
+summary.desc-head:hover{color:var(--text)}
+details.desc[open] summary.desc-head{margin:0 0 8px}
+details.desc[open] .chev{transform:rotate(90deg)}
+.tog{font:11px var(--mono);padding:2px 9px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--muted);cursor:pointer;text-transform:none;letter-spacing:0}
+.tog:hover{background:var(--code-bg);color:var(--text)}
+.md{color:var(--text)} .md h1,.md h2,.md h3,.md h4{font-family:var(--sans);margin:16px 0 8px} .md h1{font-size:18px} .md h2{font-size:16px} .md h3{font-size:14px}
+.md code{background:var(--code-bg);padding:1px 5px;border-radius:4px;font:12px var(--mono);color:var(--accent)} .md pre{background:var(--code-bg);padding:12px 14px;border-radius:8px;overflow:auto} .md pre code{background:none;padding:0;color:var(--text)}
+.md a{color:var(--hunk)} .md ul,.md ol{padding-left:22px} .md blockquote{border-left:2px solid var(--border);margin:0;padding-left:14px;color:var(--muted)}
+.md table{border-collapse:collapse} .md th,.md td{border:1px solid var(--border);padding:5px 10px;text-align:left}
+.desc pre{background:var(--code-bg);padding:12px 14px;border-radius:8px;overflow:auto;font:12px var(--mono);color:var(--text)}
+.summary{margin:22px 0 30px;scroll-margin-top:var(--anchor)}
+.sumhead{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:0;padding:6px 0;cursor:pointer;list-style:none}
+.sumhead::-webkit-details-marker{display:none}
+.summary[open] .sumhead{margin:0 0 6px}
+.summary[open] .chev{transform:rotate(90deg)}
+.sumhead h3{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0;font-weight:600;display:flex;align-items:center;gap:9px}
+.sumhead h3 .n{font-family:var(--mono);letter-spacing:0;color:var(--faint);font-weight:500}
+.sumhead:hover h3{color:var(--text)}
+.btns{display:flex;gap:8px}
+.chips{display:flex;flex-direction:column;gap:2px}
+.chip{display:grid;grid-template-columns:1fr auto auto;align-items:center;gap:14px;padding:7px 12px;border-radius:7px;transition:background .12s;cursor:pointer}
+.chip:hover{background:var(--surface)}
+.chip-path{font-family:var(--mono);font-size:12.5px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+.chip-num{font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.bar{display:inline-flex;gap:2px}
+.bar i{width:7px;height:9px;border-radius:1.5px;display:inline-block}
+.bar .g{background:var(--add)} .bar .r{background:var(--del)}
+.file{background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:20px;overflow:hidden;scroll-margin-top:var(--anchor)}
+.file.kb{border-color:var(--accent)}
+.cm-thread.kb{box-shadow:0 0 0 1px var(--accent)}
+.file-head{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:12px 16px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(255,255,255,.02),transparent);cursor:pointer;list-style:none;user-select:none}
+.file-head::-webkit-details-marker{display:none}
+.file:not([open]) .file-head{border-bottom:none}
+.chev{width:0;height:0;flex:none;border-left:6px solid var(--faint);border-top:5px solid transparent;border-bottom:5px solid transparent;transition:transform .15s}
+.file[open] .chev{transform:rotate(90deg)}
+.file-name{display:flex;align-items:center;gap:11px;min-width:0}
+.file-name h2{font-family:var(--mono);font-size:13.5px;font-weight:600;margin:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+.lang{font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:700;color:var(--ground);background:var(--accent);padding:3px 6px;border-radius:4px;flex:none}
+.lang[data-lang=javascript]{background:#e2c65a} .lang[data-lang=typescript]{background:#5fa8dc}
+.lang[data-lang=elixir]{background:#a790d6} .lang[data-lang=python]{background:#6ba6de}
+.lang[data-lang=rust]{background:#d99a6c} .lang[data-lang=shell]{background:#8fce8f}
+.lang[data-lang=markdown]{background:#9aa4b0} .lang[data-lang=go]{background:#6ad0e0}
+.file-stat{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums;flex:none}
+/* File-category tags and the implementation-count disclosure. Monochrome on
+   purpose: the label carries the meaning, so no palette decision is made here. */
+.file-cat,.chip-cat{font-family:var(--mono);font-size:10px;letter-spacing:.05em;text-transform:lowercase;color:var(--muted);background:var(--code-bg);border:1px solid var(--border);border-radius:5px;padding:1px 6px;flex:none}
+.chip-cat{margin-left:8px;vertical-align:middle}
+.impl-star{color:var(--muted);cursor:help;border-bottom:1px dotted var(--faint);font-size:11px;white-space:nowrap}
+.code-wrap{overflow-x:auto}
+table.diff{border-collapse:collapse;width:100%;font-family:var(--mono);font-size:12.5px;line-height:1.65;background:var(--code-bg)}
+table.diff td{padding:0;vertical-align:top}
+.ln{width:1%;min-width:42px;text-align:right;padding:0 10px;color:var(--faint);font-variant-numeric:tabular-nums;user-select:none;white-space:nowrap;border-right:1px solid var(--border)}
+.ln-o{border-right:none;padding-right:6px} .ln-n{padding-left:6px}
+.code{padding:0 16px 0 12px;white-space:pre;color:var(--text);width:100%}
+.code .sign{display:inline-block;width:1ch;margin-right:.6ch;color:var(--faint);user-select:none}
+.r-add{background:var(--add-bg)} .r-add .ln{box-shadow:inset 2px 0 var(--add-gutter)} .r-add .sign{color:var(--add)}
+.r-del{background:var(--del-bg)} .r-del .ln{box-shadow:inset 2px 0 var(--del-gutter)} .r-del .sign{color:var(--del)}
+.r-hunk td.code{color:var(--hunk);background:rgba(88,166,255,.07);padding-top:5px;padding-bottom:5px;font-size:12px} .r-hunk .ln{background:rgba(88,166,255,.05)}
+/* Split (side-by-side) view. Built client-side from the unified rows; the
+   unified table stays the render source and the review anchoring. Four columns:
+   old#, old code, new#, new code. Per-side add/del tint via s-del/s-add on the
+   cell (not the row), so a modification tints left-red and right-green. */
+/* fixed layout so the two code columns hold an even 50/50 and long lines WRAP
+   inside their pane instead of overflowing and squishing the other side —
+   unified keeps white-space:pre + horizontal scroll; split trades that for wrap,
+   which also suits narrow/phone widths. */
+/* Split uses auto layout with the max-width:0 wrap trick, not table-layout:fixed.
+   Fixed layout sizes columns from the first row, which here is a colspan hunk
+   header, so neither cell widths nor a <col> width were honored and the gutters
+   ballooned to 25%. Instead: a wrap-enabled cell with max-width:0 collapses its
+   preferred width, then width:50% pulls each code column to half the table while
+   long lines wrap inside it. Gutters stay at their small content width. */
+.diff-split .ln{width:46px;min-width:46px;white-space:nowrap}
+.diff-split .code{width:50%;max-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.diff-split .code-o{border-right:1px solid var(--border)}
+.diff-split .s-del{background:var(--del-bg)} .diff-split .s-del.ln{box-shadow:inset 2px 0 var(--del-gutter)}
+.diff-split .s-add{background:var(--add-bg)} .diff-split .s-add.ln{box-shadow:inset 2px 0 var(--add-gutter)}
+.diff-split .blank{background:rgba(127,127,127,.045)}
+.foot{margin-top:36px;padding-top:20px;border-top:1px solid var(--border);color:var(--muted);font-size:12.5px;font-family:var(--mono)}
+.foot b{color:var(--text)}
+/* No hardware keyboard on a phone, and the hint is the widest thing in the
+   header. The collapsible rows are the only tap targets that are text-height
+   rather than card-height, so they get padded up to a thumb. */
+@media (max-width:700px){.keys{display:none}}
+@media (max-width:640px){.file-name h2{font-size:12px}.ln{min-width:34px}
+  summary.sumhead,summary.desc-head{padding:14px 0}
+  .tog{padding:7px 10px}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.chev{transition:none}}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style></head><body>
+CSS
+  # Review overlay styling. Emitted only in review mode so the plain artifact
+  # carries none of it; the saved review artifact inherits it, since it is a
+  # copy of this page.
+  if [[ $review -eq 1 ]]; then
+    cat <<'RVCSS'
+<style>
+/* The submit bar is fixed; the page's own 96px tail is shorter than the bar, so
+   the last rows would sit under it. Only live mode has a bar. */
+body.rv .wrap{padding-bottom:280px}
+.rv .ln{cursor:pointer}
+.rv tr[data-n] .ln:hover,.rv tr[data-o] .ln:hover{background:rgba(79,214,190,.18);color:var(--accent)}
+tr.sel td,tr.sel-pending td{background:rgba(79,214,190,.10)}
+tr.sel .ln,tr.sel-pending .ln{box-shadow:inset 2px 0 var(--accent)}
+tr.cm-row>td{padding:0}
+/* Clears the sticky header and leaves a few lines of the code it hangs off
+   visible above it. n/p read this back as their anchor — see hopThread. */
+.cm-thread{border-left:2px solid var(--accent);background:var(--surface);margin:6px 10px 8px;border-radius:0 8px 8px 0;padding:10px 14px;font-family:var(--sans);white-space:normal;scroll-margin-top:calc(var(--anchor) + 86px)}
+.cm-meta{display:flex;align-items:center;gap:9px;font-size:11px;color:var(--muted);margin-bottom:6px}
+.cm-who{color:var(--accent);font-weight:600}
+.cm-anchor{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.cm-body{font-size:13.5px;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+.cm-del{margin-left:auto;background:none;border:0;color:var(--faint);cursor:pointer;font-size:15px;line-height:1;padding:0 3px}
+.cm-del:hover{color:var(--del)}
+.cm-editor{margin:6px 10px 8px;background:var(--surface);border:1px solid var(--border);border-left:2px solid var(--accent);border-radius:0 8px 8px 0;padding:10px 12px}
+.cm-editor textarea{width:100%;min-height:76px;background:var(--code-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font:13px var(--sans);resize:vertical}
+.cm-editor textarea:focus{outline:none;border-color:var(--accent)}
+.cm-acts{display:flex;align-items:center;gap:8px;margin-top:8px}
+.cm-hint{font-size:11px;color:var(--faint);margin-right:auto}
+.btn{font:12px var(--sans);padding:5px 12px;border:1px solid var(--border);border-radius:6px;background:var(--code-bg);color:var(--text);cursor:pointer}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.btn-go{background:var(--accent);border-color:var(--accent);color:var(--ground);font-weight:600}
+.btn-go:hover{filter:brightness(1.1);color:var(--ground)}
+.btn:disabled{opacity:.5;cursor:not-allowed;filter:none}
+.rv-bar{position:fixed;left:0;right:0;bottom:0;z-index:20;background:rgba(15,20,25,.94);backdrop-filter:blur(8px);border-top:1px solid var(--border)}
+.rv-in{max-width:1080px;margin:0 auto;padding:12px 20px}
+.rv-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.rv-count{font:12px var(--mono);color:var(--muted)}
+.rv-count b{color:var(--accent)}
+.rv-grow{flex:1}
+.rv-name{background:var(--code-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font:12px var(--sans);width:170px}
+.rv-name:focus{outline:none;border-color:var(--accent)}
+.rv-body{width:100%;margin-top:10px;min-height:64px;background:var(--code-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font:13px var(--sans);resize:vertical}
+.rv-body:focus{outline:none;border-color:var(--accent)}
+/* The bar is fixed to the bottom, so the box costs that height on every screen
+   for the whole read. Collapsed it gives the space back until there is
+   something to say. The count row stays: it is the live comment tally. */
+.rv-bar.rv-fold .rv-body{display:none}
+.rv-count{cursor:pointer}
+.rv-draft{color:var(--accent);font:11px var(--mono)}
+.rv-msg{font:12px var(--mono);margin-top:8px;word-break:break-all}
+.rv-msg.err{color:var(--del)} .rv-msg.ok{color:var(--add)}
+.rv-msg a{color:var(--hunk);text-decoration:underline}
+.rv-done{font-size:13px;color:var(--text)}
+.rv-summary{margin:22px 0 0}
+.rv-orphan{border:1px solid var(--del);border-radius:8px;padding:10px 14px;margin-top:12px}
+.rv-orphan .cm-anchor{color:var(--del)}
+@media (max-width:640px){.rv-name{width:120px}}
+</style>
+RVCSS
+  fi
+  echo '<div class="wrap"><div class="top">'
+  echo '<div class="eyebrow"><span class="dot"></span>'"$(printf '%s' "$eyebrow" | esc | tr '[:lower:]' '[:upper:]')"'</div>'
+  echo '<h1>'"$(printf '%s' "$title" | esc)"'</h1>'
+  if [[ -n "$head_ref" ]]; then
+    printf '<div class="refs">'
+    [[ -n "$base_ref" ]] && printf '<b>%s</b><span class="arrow">→</span>' "$(printf '%s' "$base_ref" | esc)"
+    printf '<b>%s</b></div>\n' "$(printf '%s' "$head_ref" | esc)"
+  fi
+  [[ -n "${show_meta:-}" ]] && echo '<div class="cmeta">'"$(printf '%s' "$show_meta" | esc)"'</div>'
+  # Which prose blocks render decides both their markup and the keys offered for
+  # them, so the tests are computed once here and reused below rather than
+  # repeated — a hint naming a key for a block that is not on the page is worse
+  # than no hint.
+  has_msg=0; [[ -n "${show_body:-}" && -n "${show_body//[$'\n\t ']/}" ]] && has_msg=1
+  has_desc=0; [[ -n "$body_file" && -f "$body_file" ]] && has_desc=1
+
+  # The keybind hint doubles as the discovery path — there is no help overlay,
+  # so everything bound is listed here.
+  sep='<span class="sep">·</span>'
+  # `v` is wrapped so the split script can withdraw the offer when split isn't
+  # available — under --review, or below SPLIT_MIN — the same way .k-r is
+  # dropped on a saved review. A hint for a key that does nothing is worse than
+  # no hint: this is the only place the binding is documented.
+  keys='<b>j/k</b> file'"$sep"'<b>o</b> open'"$sep"'<b>e/c</b> all'"$sep"'<b>f</b> list<span class="k-v">'"$sep"'<b>v</b> split</span>'
+  [[ $has_msg -eq 1 ]] && keys="$keys$sep"'<b>m</b> message'
+  [[ $has_desc -eq 1 ]] && keys="$keys$sep"'<b>d</b> description'
+  keys="$keys$sep"'<b>g/G</b> top/end'
+  [[ $review -eq 1 ]] && keys="$keys$sep"'<b>n/p</b> comment<span class="k-r">'"$sep"'<b>r</b> review</span>'
+  # The added/removed counts headline implementation lines; a `∗` discloses the
+  # true total (tests, docs, assets) when it differs. When every changed file is
+  # implementation, the counts are equal and no marker shows.
+  # A diff with no implementation files at all (docs-only, tests-only) has
+  # impl_add and impl_del at 0, which differs from the totals and so headlined
+  # `+0 −0` — reading as an empty diff, with the real counts only in the `∗`
+  # tooltip, which doesn't exist on touch. With no implementation signal to
+  # headline, the totals are the honest number.
+  if [[ $impl_files -gt 0 && ( $impl_add -ne $add_n || $impl_del -ne $del_n ) ]]; then
+    disp_add=$impl_add; disp_del=$impl_del
+    star=' <span class="impl-star" title="Implementation only ('"$impl_files"' of '"$files_n"' files). Total incl. tests, docs, and assets: +'"$add_n"' −'"$del_n"'">∗ impl</span>'
+  else
+    disp_add=$add_n; disp_del=$del_n; star=''
+  fi
+  # The Split/Unified toggle ships hidden; the split-view script reveals it only
+  # when there are diff tables and JS is running, so the static artifact is
+  # unaffected without it.
+  echo '<div class="totals"><a href="#filelist"><span class="k">files</span>'"$files_n"'</a><span><span class="k">added</span><span class="add">+'"$disp_add"'</span></span><span><span class="k">removed</span><span class="del">-'"$disp_del"'</span></span>'"$star"'<button id="view-toggle" class="tog" hidden title="Toggle side-by-side (v)">Split</button><span class="keys">'"$keys"'</span></div>'
+  echo '</div>'
+
+  # Commit message body (--show mode) — the git-show preamble the awk parser skips.
+  if [[ $has_msg -eq 1 ]]; then
+    echo '<details class="desc" id="msgblock" open><summary class="desc-head"><span class="chev"></span>Message</summary><pre>'; printf '%s' "$show_body" | esc; echo '</pre></details>'
+  fi
+
+  # Description (markdown) via the vendored micromd renderer, with a raw/rendered
+  # toggle. The source lives once in an escaped <pre> (no injection); JS reads its
+  # textContent as the markdown source. Falls back to raw <pre> if unvendored.
+  have_md=0; [[ -f "$md_b64" ]] && have_md=1
+  if [[ $has_desc -eq 1 ]]; then
+    if [[ $have_md -eq 1 ]]; then
+      echo '<details class="desc" id="descblock" open><summary class="desc-head"><span class="chev"></span>Description<button id="md-toggle" class="tog">raw</button></summary>'
+      echo '<div id="md-rendered" class="md"></div>'
+      echo '<pre id="md-raw" hidden>'; esc < "$body_file"; echo '</pre></details>'
+    else
+      echo '<details class="desc" id="descblock" open><summary class="desc-head"><span class="chev"></span>Description</summary><pre>'; esc < "$body_file"; echo '</pre></details>'
+    fi
+  fi
+
+  # Where a submitted review's header (reviewer, general comment, any comments
+  # that no longer anchor) renders. Empty and unused until the page is carrying
+  # a review; the live overlay leaves it alone.
+  [[ $review -eq 1 ]] && echo '<div id="rv-summary" class="rv-summary"></div>'
+
+  # Changed-files summary — each chip links to its file section (#file-N, matched
+  # to the awk file counter below); expand/collapse-all act on the <details>.
+  #
+  # The list itself is a closed <details>: on a wide change it pushed every diff
+  # below the fold, and the sticky header already carries the file count. That
+  # count links here, and #filelist opens it via the same hash handler the file
+  # cards use.
+  if [[ -n "${numstat//[$'\n\t ']/}" ]]; then
+    echo '<details class="summary" id="filelist"><summary class="sumhead"><h3><span class="chev"></span>Changed files<span class="n">'"$files_n"'</span></h3><span class="btns"><button class="tog" id="expand-all">Expand all</button><button class="tog" id="collapse-all">Collapse all</button></span></summary><div class="chips">'
+    fi_i=0
+    while IFS=$'\t' read -r a d c p; do
+      [[ -z "${p:-}" ]] && continue
+      fi_i=$((fi_i + 1))
+      # Non-implementation files carry a tag; it rides inside the path column so
+      # the chip's three-column grid is unchanged.
+      cattag=''
+      [[ "$c" != implementation ]] && cattag=' <span class="chip-cat cat-'"$c"'">'"$c"'</span>'
+      echo '<a class="chip" href="#file-'"$fi_i"'"><span class="chip-path">'"$(printf '%s' "$p" | esc)"''"$cattag"'</span><span class="chip-num"><span class="add">+'"$a"'</span> <span class="del">-'"$d"'</span></span><span class="bar">'"$(bar_html "$a" "$d")"'</span></a>'
+    done <<< "$numstat"
+    echo '</div></details>'
+  fi
+
+  # Per-file diff: split the unified diff into cards, each with a language pill,
+  # per-file +/- stat and bar, and a two-gutter (old/new line no.) diff table.
+  parse_diff render
+
+  echo '<div class="foot">Generated by <b>preview-diff</b>.</div></div>'
+
+  # The submit bar, and the payload slot the server bakes a submitted review
+  # into. An empty slot means "live, editable"; a populated one means the page
+  # is a saved review and renders read-only. One page, both roles.
+  if [[ $review -eq 1 ]]; then
+    cat <<'RVBAR'
+<div class="rv-bar rv-fold" id="rv-bar" hidden>
+  <div class="rv-in">
+    <div class="rv-head">
+      <span class="rv-count" id="rv-fold-toggle" title="Write the review (r)"><b id="rv-n">0</b> <span id="rv-n-label">line comments</span><span class="rv-draft" id="rv-draft" hidden> · draft</span></span>
+      <span class="rv-hint cm-hint">click a line number to comment · shift-click to span · <b>r</b> to write</span>
+      <span class="rv-grow"></span>
+      <input class="rv-name" id="rv-name" type="text" placeholder="your name" autocomplete="name">
+      <button class="btn btn-go" id="rv-submit">Submit review</button>
+    </div>
+    <textarea class="rv-body" id="rv-general" placeholder="Your review — markdown, saved as-is to review.md for posting · ⌘/Ctrl+Enter submits · Esc closes"></textarea>
+    <div class="rv-msg" id="rv-msg"></div>
+  </div>
+</div>
+<script type="application/json" id="review-data"></script>
+RVBAR
+  fi
+
+  # Expand/collapse-all, keyboard navigation, and opening a file section when
+  # its chip is followed (so a jump to a collapsed file still reveals it).
+  cat <<'JS'
+<script>
+ (function(){
+   var files=[].slice.call(document.querySelectorAll('details.file'));
+   var ea=document.getElementById('expand-all'), ca=document.getElementById('collapse-all');
+   function setAll(v){ files.forEach(function(d){ d.open=v; }); }
+   // Both buttons sit inside the file-list <summary>, so the default click
+   // would also toggle the list shut under the person who just used them.
+   function act(el, fn){ if(el) el.onclick=function(e){ e.preventDefault(); e.stopPropagation(); fn(); }; }
+   act(ea, function(){ setAll(true); });
+   act(ca, function(){ setAll(false); });
+   // The sticky header's file count opens the list. A plain href only fires
+   // hashchange when the hash actually changes, so re-clicking it after a
+   // manual collapse would do nothing.
+   var fl=document.getElementById('filelist');
+   var flLink=document.querySelector('.totals a[href="#filelist"]');
+   if(fl&&flLink) flLink.onclick=function(e){ e.preventDefault(); fl.open=true; fl.scrollIntoView(); };
+   // The sticky header's height is not a constant: a long title wraps, and
+   // --show adds a meta line. Publish the measured value so every jump target
+   // clears it.
+   function syncAnchor(){
+     var top=document.querySelector('.top');
+     if(top) document.documentElement.style.setProperty('--anchor', Math.round(top.getBoundingClientRect().height+14)+'px');
+   }
+   syncAnchor();
+   window.addEventListener('resize', syncAnchor);
+   function openHash(){ if(!location.hash) return; var t=document.getElementById(location.hash.slice(1)); if(t&&t.tagName==='DETAILS'){ t.open=true; t.scrollIntoView(); } }
+   window.addEventListener('hashchange', openHash);
+   openHash();
+
+   // Keyboard navigation. Every binding is listed in the header hint; there is
+   // no help overlay, so nothing may be bound that the hint does not name.
+   var cur=-1;
+   function mark(i){
+     files.forEach(function(d){ d.classList.remove('kb'); });
+     cur=Math.max(0, Math.min(i, files.length-1));
+     var d=files[cur]; if(!d) return;
+     d.classList.add('kb'); d.scrollIntoView();
+   }
+   // j/k from cold start should take the file you are looking at, not file 1.
+   function nearest(){
+     for(var i=0;i<files.length;i++){ if(files[i].getBoundingClientRect().bottom > 170) return i; }
+     return files.length-1;
+   }
+   function step(n){ mark(cur<0 ? nearest() : cur+n); }
+   // The file list, Message and Description all collapse the same way. A block
+   // the page did not render leaves its key unbound rather than inert, since
+   // the hint only offers keys for blocks that are there.
+   function toggleBlock(e, d){
+     if(!d) return;
+     e.preventDefault();
+     d.open=!d.open;
+     if(d.open) d.scrollIntoView();
+   }
+   function threads(){ return [].slice.call(document.querySelectorAll('.cm-thread')); }
+   // A thread inside a collapsed card measures as a zero rect, which would sort
+   // it to the top of the page; stand in its card, which is where it will appear.
+   function rect(el){
+     var r=el.getBoundingClientRect();
+     if(r.width||r.height) return r;
+     var c=el.closest('details.file');
+     return c ? c.getBoundingClientRect() : r;
+   }
+   // Where the reader is among the comments. This has to be a remembered index
+   // rather than a position read back off the page: scrollIntoView cannot park
+   // a thread at its anchor once the document is scrolled to the end, so a
+   // position-derived cursor re-picks the same thread forever and every comment
+   // in the last screenful — the whole last file of a diff — is unreachable.
+   // Deriving from position also races the smooth scroll it just started.
+   // null is "no idea where the reader is", and only then is position consulted.
+   // -1 means "above the first comment" and TI_END "past the last", so g and G
+   // seed the cursor rather than leaving the next hop to guess against a scroll
+   // that is still animating.
+   var TI_END=1e9;
+   var ti=null;
+   function hopThread(n){
+     var t=threads(); if(!t.length) return;
+     var next;
+     if(ti===null){
+       // The reader scrolled by hand: take the first comment below the anchor,
+       // which is where a hop would have parked one.
+       var a=parseFloat(getComputedStyle(t[0]).scrollMarginTop)||0, k=t.length;
+       for(var i=0;i<t.length;i++){ if(rect(t[i]).top > a+4){ k=i; break; } }
+       next = n>0 ? k : k-1;
+     } else { next=ti+n; }
+     ti=Math.max(0, Math.min(next, t.length-1));
+     t.forEach(function(x){ x.classList.remove('kb'); });
+     // A page shorter than the viewport cannot scroll, so the mark is the only
+     // thing that says the hop happened.
+     t[ti].classList.add('kb');
+     var card=t[ti].closest('details.file'); if(card) card.open=true;
+     t[ti].scrollIntoView();
+   }
+   // A scroll the reader drove means neither cursor describes where they are.
+   ['wheel','touchmove'].forEach(function(ev){
+     window.addEventListener(ev, function(){ cur=-1; ti=null; }, {passive:true});
+   });
+
+   // --- Split (side-by-side) view -------------------------------------------
+   // Built from the unified rows on demand and cached; the unified table stays
+   // the render source and keeps the review anchoring. Split is a read view —
+   // it carries no comment threads and no comment wiring, so review is unified.
+   var vt=document.getElementById('view-toggle');
+   var wraps=[].slice.call(document.querySelectorAll('details.file .code-wrap'));
+   var SPLIT_MIN=760;   // below this width, force unified regardless of choice
+   function uniTable(w){ return w.querySelector('table.diff:not(.diff-split)'); }
+   function cellHTML(row,sel){ var c=row.querySelector(sel); return c?c.innerHTML:''; }
+   function lnText(row,sel){ var c=row.querySelector(sel); return c?c.textContent:''; }
+   function buildSplit(uni){
+     var out=document.createElement('table'); out.className='diff diff-split';
+     var body=document.createElement('tbody'), dels=[], adds=[];
+     function flush(){
+       var n=Math.max(dels.length, adds.length), i;
+       for(i=0;i<n;i++){
+         var d=dels[i], a=adds[i], tr=document.createElement('tr');
+         tr.innerHTML=
+           '<td class="ln ln-o'+(d?' s-del':'')+'">'+(d?lnText(d,'.ln-o'):'')+'</td>'+
+           '<td class="code code-o'+(d?' s-del':' blank')+'">'+(d?cellHTML(d,'td.code'):'')+'</td>'+
+           '<td class="ln ln-n'+(a?' s-add':'')+'">'+(a?lnText(a,'.ln-n'):'')+'</td>'+
+           '<td class="code code-n'+(a?' s-add':' blank')+'">'+(a?cellHTML(a,'td.code'):'')+'</td>';
+         body.appendChild(tr);
+       }
+       dels=[]; adds=[];
+     }
+     var rows=uni.querySelectorAll('tr'), i;
+     for(i=0;i<rows.length;i++){
+       var r=rows[i];
+       if(r.classList.contains('r-hunk')){ flush();
+         var h=document.createElement('tr'); h.className='r-hunk';
+         h.innerHTML='<td class="code" colspan="4">'+cellHTML(r,'td.code')+'</td>';
+         body.appendChild(h); continue; }
+       if(r.classList.contains('r-del')){ dels.push(r); continue; }
+       if(r.classList.contains('r-add')){ adds.push(r); continue; }
+       var code=r.querySelector('td.code');
+       if(code && !r.querySelector('.cm-thread')){ flush();
+         var cr=document.createElement('tr');
+         cr.innerHTML=
+           '<td class="ln ln-o">'+lnText(r,'.ln-o')+'</td><td class="code code-o">'+code.innerHTML+'</td>'+
+           '<td class="ln ln-n">'+lnText(r,'.ln-n')+'</td><td class="code code-n">'+code.innerHTML+'</td>';
+         body.appendChild(cr); continue; }
+       flush();   // thread or other non-diff row: dropped from the read view
+     }
+     flush();
+     out.appendChild(body); return out;
+   }
+   var want='unified';
+   try{ want=localStorage.getItem('pd-view')||'unified'; }catch(_e){}
+   function effView(){ return (want==='split' && window.innerWidth>=SPLIT_MIN) ? 'split' : 'unified'; }
+   // Split is a read view by construction, not by convention: buildSplit drops
+   // thread rows and emits <tr> without data-o/data-n, so the delegated gutter
+   // handler finds nothing to anchor to. Offering it under --review silently
+   // disables line commenting and hides existing threads, with nothing on the
+   // page saying why — so don't offer it. #review-data is emitted only in
+   // review mode, which makes it the signal.
+   var reviewing=!!document.getElementById('review-data');
+   var kv=document.querySelector('.keys .k-v');
+   // Below SPLIT_MIN effView() forces unified, so a toggle there is a control
+   // that does nothing — and then labels itself with the state it failed to
+   // reach. Withdraw it instead of letting it lie.
+   function splitAvailable(){ return !reviewing && wraps.length>0 && window.innerWidth>=SPLIT_MIN; }
+   function applyView(){
+     var mode=effView();
+     wraps.forEach(function(w){
+       var uni=uniTable(w); if(!uni) return;
+       var sp=w.querySelector('table.diff-split');
+       if(mode==='split'){
+         if(!sp){ sp=buildSplit(uni); uni.parentNode.insertBefore(sp, uni.nextSibling); }
+         uni.style.display='none'; sp.style.display='';
+       }else{
+         if(sp) sp.style.display='none';
+         uni.style.display='';
+       }
+     });
+     var avail=splitAvailable();
+     // Label from the view actually applied, never from `want`: under SPLIT_MIN
+     // they disagree, and reading `want` is what let the button claim it had
+     // switched when it hadn't.
+     if(vt){ vt.hidden=!avail; vt.textContent=(mode==='split'?'Unified':'Split'); }
+     if(kv) kv.hidden=!avail;
+     document.documentElement.setAttribute('data-view', mode);
+     lastApplied=mode+'|'+(avail?'1':'0');
+   }
+   function toggleSplit(){
+     if(!splitAvailable()) return;
+     want=(want==='split'?'unified':'split');
+     try{ localStorage.setItem('pd-view',want); }catch(_e){}
+     applyView();
+   }
+   if(vt && wraps.length) vt.onclick=toggleSplit;
+   var lastApplied=null, resizeQueued=false;
+   applyView();
+   // Mobile browsers fire resize throughout a scroll as the address bar
+   // collapses, and each applyView walks every .code-wrap — crossing SPLIT_MIN
+   // with want==='split' also buildSplits every file synchronously in the
+   // handler. Coalesce to a frame, then do nothing unless the outcome changed.
+   window.addEventListener('resize', function(){
+     if(resizeQueued) return;
+     resizeQueued=true;
+     requestAnimationFrame(function(){
+       resizeQueued=false;
+       if(effView()+'|'+(splitAvailable()?'1':'0')!==lastApplied) applyView();
+     });
+   });
+
+   document.addEventListener('keydown', function(e){
+     var tag=(e.target.tagName||'').toUpperCase();
+     if(tag==='INPUT'||tag==='TEXTAREA'||e.target.isContentEditable) return;
+     if(e.metaKey||e.ctrlKey||e.altKey) return;
+     var k=e.key;
+     if(k==='j'){ e.preventDefault(); step(1); }
+     else if(k==='k'){ e.preventDefault(); step(-1); }
+     else if(k==='o'){ e.preventDefault(); if(cur<0) mark(nearest()); var d=files[cur]; if(d){ d.open=!d.open; d.scrollIntoView(); } }
+     else if(k==='e'){ e.preventDefault(); setAll(true); }
+     else if(k==='c'){ e.preventDefault(); setAll(false); }
+     else if(k==='f'){ toggleBlock(e, fl); }
+     // Same gate as the button: under --review or below SPLIT_MIN, let `v`
+     // fall through rather than swallow a key for a view that can't be shown.
+     else if(k==='v'){ if(splitAvailable()){ e.preventDefault(); toggleSplit(); } }
+     else if(k==='m'){ toggleBlock(e, document.getElementById('msgblock')); }
+     else if(k==='d'){ toggleBlock(e, document.getElementById('descblock')); }
+     else if(k==='g'){ e.preventDefault(); cur=-1; ti=-1; window.scrollTo(0,0); }
+     else if(k==='G'){ e.preventDefault(); cur=-1; ti=TI_END; window.scrollTo(0,document.body.scrollHeight); }
+     // Both are review-only. Swallowing them on a plain diff page, where the
+     // hint does not offer them, would eat a browser shortcut for nothing.
+     else if(k==='n'||k==='p'){ if(threads().length){ e.preventDefault(); hopThread(k==='n'?1:-1); } }
+     // The review script owns the fold, and loads after this one.
+     else if(k==='r'){ if(window.pdOpenReview){ e.preventDefault(); window.pdOpenReview(); } }
+   });
+ })();
+</script>
+JS
+
+  # micromd has two consumers now — the --body description and, in review mode,
+  # the review text itself. Emit it once here, ahead of both, along with the
+  # shared render-and-defang helper.
+  need_md=0
+  if [[ $have_md -eq 1 ]] && { [[ -n "$body_file" && -f "$body_file" ]] || [[ $review -eq 1 ]]; }; then
+    need_md=1
+    echo '<script src="data:text/javascript;base64,'"$(cat "$md_b64")"'"></script>'
+    cat <<'MDJS'
+<script>
+ // micromd escapes code spans and fences but passes raw prose HTML through, so
+ // text written by someone else rides into the page as live markup — and a
+ // review artifact is meant to be opened by someone else.
+ //
+ // This is an allowlist on purpose. Naming a few dangerous attributes leaves
+ // action, formaction, xlink:href, srcdoc and whatever the next browser adds;
+ // naming the handful markdown actually produces does not.
+ var MD_TAGS={P:1,H1:1,H2:1,H3:1,H4:1,H5:1,H6:1,UL:1,OL:1,LI:1,PRE:1,CODE:1,
+   BLOCKQUOTE:1,A:1,EM:1,STRONG:1,B:1,I:1,S:1,DEL:1,INS:1,IMG:1,TABLE:1,
+   THEAD:1,TBODY:1,TFOOT:1,TR:1,TH:1,TD:1,HR:1,BR:1,SPAN:1,DIV:1,SUP:1,SUB:1,
+   KBD:1,DETAILS:1,SUMMARY:1};
+ // id and class are deliberately absent: the page anchors comments by element
+ // id, so review text must not be able to mint one.
+ var MD_ATTRS={href:1,src:1,alt:1,title:1,width:1,height:1,colspan:1,rowspan:1,
+   start:1,lang:1,dir:1,align:1};
+ // Content of these is not prose, so drop it rather than unwrap it.
+ var MD_DROP={SCRIPT:1,STYLE:1,SVG:1,MATH:1,IFRAME:1,OBJECT:1,EMBED:1,
+   TEMPLATE:1,LINK:1,META:1,BASE:1,FORM:1};
+ function pdSafeUrl(v){
+   v=(v||'').trim();
+   if(/^(#|\/|\.{1,2}\/)/.test(v)) return true;            // fragment or relative
+   if(/^(https?:|mailto:)/i.test(v)) return true;
+   if(/^data:image\//i.test(v)) return true;
+   return !/^[a-z][a-z0-9+.\-]*:/i.test(v);                // bare, no scheme
+ }
+ function pdRenderMd(el, src){
+   el.innerHTML=markdownToHtml(src);
+   [].slice.call(el.querySelectorAll('*')).forEach(function(node){
+     // SVG elements report a lowercase tagName; normalise before matching.
+     var tag=(node.tagName||'').toUpperCase();
+     if(MD_DROP[tag]){ node.remove(); return; }
+     if(!MD_TAGS[tag]){                    // unknown element: keep its text
+       var parent=node.parentNode;
+       if(parent){
+         while(node.firstChild) parent.insertBefore(node.firstChild, node);
+         parent.removeChild(node);
+       }
+       return;
+     }
+     [].slice.call(node.attributes).forEach(function(a){
+       var name=a.name.toLowerCase();
+       if(!MD_ATTRS[name]){ node.removeAttribute(a.name); return; }
+       if((name==='href'||name==='src') && !pdSafeUrl(a.value)) node.removeAttribute(a.name);
+     });
+   });
+ }
+</script>
+MDJS
+  fi
+
+  # The review overlay. One script drives both roles: an empty review-data slot
+  # means this is a live review page (gutters clickable, submit bar shown), a
+  # populated one means it is a saved review and renders read-only.
+  if [[ $review -eq 1 ]]; then
+    cat <<'RVJS'
+<script>
+ (function(){
+   var slot=document.getElementById('review-data');
+   var bar=document.getElementById('rv-bar');
+   if(!slot) return;
+
+   var data=null, raw=(slot.textContent||'').trim();
+   if(raw){ try{ data=JSON.parse(raw); }catch(e){ data=null; } }
+
+   // ---- anchoring ---------------------------------------------------------
+   // A comment names (path, side, line); the row carrying that line is found by
+   // the data-path/data-o/data-n attributes the diff parser emits.
+   // One path can appear on several cards (a multi-commit diff renders a file
+   // once per commit), so prefer the card the comment names and fall back to
+   // the first card with that path.
+   function fileCard(path, fileId){
+     if(fileId){
+       var byId=document.getElementById(fileId);
+       if(byId && byId.getAttribute('data-path')===path) return byId;
+     }
+     var cards=document.querySelectorAll('details.file');
+     for(var i=0;i<cards.length;i++){ if(cards[i].getAttribute('data-path')===path) return cards[i]; }
+     return null;
+   }
+   function rowFor(path, side, line, fileId){
+     var card=fileCard(path, fileId); if(!card) return null;
+     var n=parseInt(line,10); if(!(n>0)) return null;
+     return card.querySelector('tr['+(side==='old'?'data-o':'data-n')+'="'+n+'"]');
+   }
+   function rowsBetween(path, side, a, b, fileId){
+     var out=[], lo=Math.min(a,b), hi=Math.max(a,b);
+     for(var i=lo;i<=hi;i++){ var r=rowFor(path,side,i,fileId); if(r) out.push(r); }
+     return out;
+   }
+   // Every row a comment covers, for highlighting.
+   function commentRows(c){
+     return (c.start_line && c.start_line<c.line)
+       ? rowsBetween(c.path, c.side, c.start_line, c.line, c.file_id)
+       : [rowFor(c.path, c.side, c.line, c.file_id)].filter(Boolean);
+   }
+   function anchorLabel(c){
+     var span=(c.start_line && c.start_line<c.line) ? (c.start_line+'–'+c.line) : String(c.line);
+     return c.path+':'+span+(c.side==='old'?' (old)':'');
+   }
+
+   // ---- rendering ---------------------------------------------------------
+   // Every field of a comment is user text, so it goes in via textContent.
+   function threadEl(c, who, onDelete){
+     var wrap=document.createElement('div'); wrap.className='cm-thread';
+     var meta=document.createElement('div'); meta.className='cm-meta';
+     if(who){ var w=document.createElement('span'); w.className='cm-who'; w.textContent=who; meta.appendChild(w); }
+     var a=document.createElement('span'); a.className='cm-anchor'; a.textContent=anchorLabel(c); meta.appendChild(a);
+     if(onDelete){
+       var d=document.createElement('button');
+       d.className='cm-del'; d.type='button'; d.title='remove comment'; d.textContent='×';
+       d.onclick=onDelete; meta.appendChild(d);
+     }
+     wrap.appendChild(meta);
+     var b=document.createElement('div'); b.className='cm-body'; b.textContent=c.body;
+     wrap.appendChild(b);
+     return wrap;
+   }
+   function insertAfter(row, el){
+     var tr=document.createElement('tr'); tr.className='cm-row';
+     var td=document.createElement('td'); td.colSpan=3;
+     td.appendChild(el); tr.appendChild(td);
+     row.parentNode.insertBefore(tr, row.nextSibling);
+     return tr;
+   }
+   function place(c, who, onDelete){
+     var row=rowFor(c.path,c.side,c.line,c.file_id);
+     if(!row) return null;
+     commentRows(c).forEach(function(r){ r.classList.add('sel'); });
+     return {tr:insertAfter(row, threadEl(c, who, onDelete)), rows:[row]};
+   }
+
+   // ---- read-only: a saved review ----------------------------------------
+   if(data){
+     if(bar) bar.remove();
+     // A saved artifact has no review box, so drop the key the hint offers for it.
+     var kr=document.querySelector('.keys .k-r'); if(kr) kr.remove();
+     var orphans=[];
+     (data.comments||[]).forEach(function(c){ if(!place(c, data.reviewer, null)) orphans.push(c); });
+     var host=document.getElementById('rv-summary');
+     if(host){
+       var n=(data.comments||[]).length;
+       var head=document.createElement('div'); head.className='desc-head'; head.textContent='Review';
+       host.appendChild(head);
+       var bits=[];
+       if(data.reviewer) bits.push(data.reviewer);
+       if(data.created) bits.push(data.created);
+       bits.push(n+' line comment'+(n===1?'':'s'));
+       var meta=document.createElement('div'); meta.className='cmeta'; meta.textContent=bits.join(' · ');
+       host.appendChild(meta);
+       // The review text is markdown — whatever structure the author gave it
+       // (severity tags, fences, headings) renders as written.
+       if(data.body){
+         var b=document.createElement('div'); b.style.marginTop='12px';
+         if(typeof pdRenderMd==='function'){ b.className='md'; pdRenderMd(b, data.body); }
+         else { b.className='cm-body'; b.textContent=data.body; }
+         host.appendChild(b);
+       }
+       // A comment that no longer lands on a row would otherwise vanish silently.
+       if(orphans.length){
+         var o=document.createElement('div'); o.className='rv-orphan';
+         var oh=document.createElement('div'); oh.className='cm-anchor';
+         oh.textContent=orphans.length+' comment'+(orphans.length===1?'':'s')+' could not be anchored to this diff';
+         o.appendChild(oh);
+         orphans.forEach(function(c){ o.appendChild(threadEl(c, data.reviewer, null)); });
+         host.appendChild(o);
+       }
+     }
+     return;
+   }
+
+   // ---- live: leaving a review -------------------------------------------
+   document.body.classList.add('rv');
+   if(bar) bar.hidden=false;
+
+   var comments=[];
+   var pending=null;   // the span being commented on right now
+   var nEl=document.getElementById('rv-n');
+   var nameInput=document.getElementById('rv-name');
+   var generalEl=document.getElementById('rv-general');
+   var submitBtn=document.getElementById('rv-submit');
+   var msgEl=document.getElementById('rv-msg');
+
+   function updateCount(){
+     if(nEl) nEl.textContent=String(comments.length);
+     var lbl=document.getElementById('rv-n-label');
+     if(lbl) lbl.textContent='line comment'+(comments.length===1?'':'s');
+   }
+   function say(kind, text){
+     while(msgEl.firstChild) msgEl.removeChild(msgEl.firstChild);
+     msgEl.className='rv-msg '+kind;
+     msgEl.textContent=text;
+   }
+
+   function pendingComment(body){
+     var lo=Math.min(pending.start,pending.end), hi=Math.max(pending.start,pending.end);
+     return {path:pending.path, file_id:pending.fileId, side:pending.side,
+             start_line:(lo<hi?lo:null), line:hi, body:body};
+   }
+   // Highlights are derived from state, never toggled in place: a pending
+   // selection and a committed comment can cover the same row, and clearing one
+   // by hand would strip the other.
+   function repaint(){
+     var lit=document.querySelectorAll('tr.sel, tr.sel-pending');
+     for(var i=0;i<lit.length;i++) lit[i].classList.remove('sel','sel-pending');
+     comments.forEach(function(c){ commentRows(c).forEach(function(r){ r.classList.add('sel'); }); });
+     if(pending) pending.rows.forEach(function(r){ r.classList.add('sel-pending'); });
+   }
+   function clearPending(){
+     if(!pending) return;
+     if(pending.editorRow) pending.editorRow.remove();
+     pending=null;
+     repaint();
+   }
+   function openEditor(){
+     // Carry any typed text across a shift-click that re-anchors the editor.
+     var prev='';
+     if(pending.editorRow){
+       var old=pending.editorRow.querySelector('textarea');
+       if(old) prev=old.value;
+       pending.editorRow.remove(); pending.editorRow=null;
+     }
+     var box=document.createElement('div'); box.className='cm-editor';
+     var ta=document.createElement('textarea');
+     ta.placeholder='Comment on '+anchorLabel(pendingComment(''));
+     ta.value=prev;
+     box.appendChild(ta);
+     var acts=document.createElement('div'); acts.className='cm-acts';
+     var hint=document.createElement('span'); hint.className='cm-hint';
+     hint.textContent='shift-click another line to extend · ⌘/Ctrl+Enter to save · Esc to cancel';
+     var cancel=document.createElement('button'); cancel.className='btn'; cancel.type='button'; cancel.textContent='Cancel';
+     var save=document.createElement('button'); save.className='btn btn-go'; save.type='button'; save.textContent='Add comment';
+     acts.appendChild(hint); acts.appendChild(cancel); acts.appendChild(save);
+     box.appendChild(acts);
+     cancel.onclick=function(){ clearPending(); };
+     save.onclick=function(){ commit(ta.value); };
+     ta.addEventListener('keydown', function(e){
+       if((e.metaKey||e.ctrlKey) && e.key==='Enter'){ e.preventDefault(); commit(ta.value); }
+       else if(e.key==='Escape'){ e.preventDefault(); clearPending(); }
+     });
+     pending.editorRow=insertAfter(pending.rows[pending.rows.length-1], box);
+     ta.focus();
+   }
+   function commit(text){
+     text=(text||'').trim();
+     if(!text){ say('err','Comment is empty.'); return; }
+     var c=pendingComment(text);
+     var rows=pending.rows.slice();
+     pending.editorRow.remove(); pending.editorRow=null;
+     pending=null;
+     var tr=insertAfter(rows[rows.length-1], threadEl(c, null, function(){
+       tr.remove();
+       var ix=comments.indexOf(c); if(ix>=0) comments.splice(ix,1);
+       updateCount();
+       repaint();
+     }));
+     comments.push(c);
+     updateCount();
+     repaint();          // the span stays lit: it is what the comment covers
+     say('','');
+   }
+
+   document.addEventListener('click', function(ev){
+     var cell=ev.target.closest && ev.target.closest('td.ln');
+     if(!cell) return;
+     var row=cell.parentNode;
+     // The gutter that was clicked names the side. A context row carries both
+     // numbers, so deriving side from the row would anchor a click on the old
+     // gutter to the new line — the editor would say :20 for a line displayed
+     // as 10. Blank gutters have no matching attribute, so they stay inert.
+     var isOld=cell.classList.contains('ln-o');
+     var side=isOld?'old':'new';
+     var line=parseInt(row.getAttribute(isOld?'data-o':'data-n'),10);
+     if(!(line>0)) return;
+     var card=row.closest('details.file'); if(!card) return;
+     var path=card.getAttribute('data-path'), fileId=card.id;
+     // Extend only within the card that started the selection — the same path
+     // can appear on more than one.
+     if(ev.shiftKey && pending && pending.fileId===fileId && pending.side===side){
+       pending.end=line;
+       pending.rows=rowsBetween(path, side, pending.start, pending.end, fileId);
+       openEditor();
+     } else {
+       clearPending();
+       pending={path:path, fileId:fileId, side:side, start:line, end:line,
+                rows:[row], editorRow:null};
+       openEditor();
+     }
+     repaint();
+   });
+
+   // The reviewer is the same person most of the time; remember them.
+   try{ var who=localStorage.getItem('preview-diff.reviewer'); if(who) nameInput.value=who; }catch(e){}
+
+   function copyButton(text){
+     var b=document.createElement('button'); b.className='btn'; b.type='button'; b.textContent='Copy md path';
+     b.style.marginTop='6px';
+     b.onclick=function(){
+       var ok=function(){ b.textContent='Copied'; setTimeout(function(){ b.textContent='Copy path'; },1200); };
+       if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(ok,function(){}); return; }
+       var t=document.createElement('textarea'); t.value=text;
+       document.body.appendChild(t); t.select();
+       try{ document.execCommand('copy'); ok(); }catch(e){}
+       t.remove();
+     };
+     return b;
+   }
+   function done(r){
+     submitBtn.disabled=false;
+     // Lead with the markdown: it is what gets posted, and what an agent should
+     // be pointed at. The html is the same review with the whole diff around it.
+     say('ok','Review saved → '+r.review_md);
+     var hint=document.createElement('div');
+     hint.style.color='var(--muted)'; hint.style.marginTop='4px';
+     hint.textContent='gh pr comment <n> --body-file '+r.review_md;
+     msgEl.appendChild(hint);
+     var page=document.createElement('div');
+     page.style.color='var(--muted)'; page.style.marginTop='4px';
+     // A file:// link cannot be followed from an http:// page, so hand over the
+     // path rather than pretending it is clickable.
+     page.textContent='Full page (self-contained): '+r.review_html;
+     msgEl.appendChild(page);
+     msgEl.appendChild(copyButton(r.review_md));
+   }
+
+   // The review box starts folded — it is fixed to the bottom of every screen,
+   // and most of a review is spent reading. `r` and the comment count open it.
+   // A folded box still holds whatever was typed, so say so rather than let the
+   // text vanish.
+   var rvBar=document.getElementById('rv-bar');
+   var draftEl=document.getElementById('rv-draft');
+   function markDraft(){
+     if(draftEl) draftEl.hidden = !(rvBar.classList.contains('rv-fold') && generalEl.value.trim());
+   }
+   function foldReview(v){
+     rvBar.classList.toggle('rv-fold', v);
+     if(v){ generalEl.blur(); } else { generalEl.focus(); }
+     markDraft();
+   }
+   // `r` only ever opens: once focus is in the box the global handler ignores
+   // it, so a toggle would close from outside and type an "r" from inside.
+   // Esc closes, and the count is a click-toggle for the mouse.
+   window.pdOpenReview=function(){ foldReview(false); };
+   var foldToggle=document.getElementById('rv-fold-toggle');
+   if(foldToggle) foldToggle.onclick=function(){ foldReview(!rvBar.classList.contains('rv-fold')); };
+   generalEl.addEventListener('input', markDraft);
+   generalEl.addEventListener('keydown', function(e){
+     // Matches the line-comment editor, which has had both since it shipped.
+     if((e.metaKey||e.ctrlKey) && e.key==='Enter'){ e.preventDefault(); submitBtn.click(); }
+     else if(e.key==='Escape'){ e.preventDefault(); foldReview(true); }
+   });
+
+   submitBtn.onclick=function(){
+     var general=(generalEl.value||'').trim();
+     if(!comments.length && !general){
+       say('err','Nothing to submit yet — add a line comment or a general comment.');
+       return;
+     }
+     var payload={
+       reviewer:(nameInput.value||'').trim(),
+       body:general,
+       comments:comments.map(function(c){
+         return {path:c.path, file_id:c.file_id, side:c.side,
+                 start_line:c.start_line, line:c.line, body:c.body};
+       })
+     };
+     try{ localStorage.setItem('preview-diff.reviewer', payload.reviewer); }catch(e){}
+     submitBtn.disabled=true;
+     say('','Submitting…');
+     fetch('/review', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})
+       .then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; },
+                                              function(){ return {ok:false, j:{error:'server sent a non-JSON reply'}}; }); })
+       .then(function(res){
+         if(!res.ok){ submitBtn.disabled=false; say('err', res.j.error||'submit failed'); return; }
+         done(res.j);
+       })
+       .catch(function(e){
+         submitBtn.disabled=false;
+         say('err','Could not reach the review server: '+e.message);
+       });
+   };
+   updateCount();
+ })();
+</script>
+RVJS
+  fi
+
+  if [[ -n "$body_file" && -f "$body_file" && $need_md -eq 1 ]]; then
+    cat <<'JS'
+<script>
+ (function(){
+   var raw=document.getElementById('md-raw'), out=document.getElementById('md-rendered'), btn=document.getElementById('md-toggle');
+   pdRenderMd(out, raw.textContent);
+   var showRaw=false;
+   // The button sits in the Description <summary>, so a default click would
+   // also collapse the block it is switching the view of.
+   btn.onclick=function(e){ e.preventDefault(); e.stopPropagation(); showRaw=!showRaw; raw.hidden=!showRaw; out.hidden=showRaw; btn.textContent=showRaw?'rendered':'raw'; };
+ })();
+</script>
+JS
+  fi
+  echo '</body></html>'
+} > "$out"
+
+# --serve: hand the artifact to python's http.server on loopback and hold the
+# process open (Ctrl-C to stop). Emitting an http:// URL instead of a file path
+# sidesteps the abbreviated-path linkify problem entirely.
+if [[ $serve -eq 1 ]]; then
+  command -v python3 >/dev/null || { echo "preview-diff: --serve needs python3" >&2; exit 1; }
+  dir="$(dirname "$out")"; file="$(basename "$out")"
+  [[ "$file" == "index.html" ]] && urlpath="" || urlpath="$file"
+
+  # In review mode the artifact is served by our own handler instead, because
+  # http.server answers GET only and a submission is a POST. The diff is stashed
+  # so a saved review carries what it reviewed.
+  if [[ $review -eq 1 ]]; then
+    # Not "$dir/source.diff": with -o that directory is the user's, and a file
+    # of that name there is theirs to keep.
+    review_diff="$(mktemp "$tmproot/preview-diff-src.XXXXXX")"
+    trap 'rm -f "$review_diff"' EXIT
+    printf '%s\n' "$diff" > "$review_diff"
+    review_args=(--dir "$dir" --page "$file" --diff "$review_diff"
+                 --title "$title" --base "$base_ref" --head "$head_ref")
+    [[ -n "$review_out" ]] && review_args+=(--out-root "$review_out")
+    # The review server answers the page at /, whatever it is called on disk.
+    urlpath=""
+  fi
+
+  # Launch on $1 and wait until OUR child holds the listener. "Port busy" alone
+  # is not readiness — a foreign listener passes that check while the child dies
+  # on the failed bind, and the printed URL would point at the wrong service.
+  start_server() {
+    if [[ $review -eq 1 ]]; then
+      python3 "$review_server" --port "$1" --bind 127.0.0.1 "${review_args[@]}" >&2 &
+    else
+      python3 -m http.server "$1" --bind 127.0.0.1 --directory "$dir" >/dev/null 2>&1 &
+    fi
+    srv=$!
+    # Re-state the temp-diff cleanup: this trap replaces the one set above.
+    trap 'kill "$srv" 2>/dev/null; rm -f "${review_diff:-}"' EXIT INT TERM
+    for _ in $(seq 1 50); do
+      kill -0 "$srv" 2>/dev/null || return 1   # child died: bind failed
+      port_free "$1" || return 0               # listener up, child alive: ours
+      sleep 0.1
+    done
+    kill "$srv" 2>/dev/null
+    return 1
+  }
+
+  if [[ -n "$serve_port" ]]; then
+    # Explicit port: preflight and fail loud — silently serving elsewhere would
+    # contradict what the user asked for.
+    port="$serve_port"
+    port_free "$port" || { echo "preview-diff: port $port is already in use" >&2; exit 1; }
+    start_server "$port" || { echo "preview-diff: could not serve on port $port" >&2; exit 1; }
+  else
+    # Auto-picked port: another process can win the race between find_free_port
+    # and the bind; pick again and retry.
+    started=0
+    for _ in 1 2 3; do
+      port="$(find_free_port)" || { echo "preview-diff: no free port in 8137..8186" >&2; exit 1; }
+      start_server "$port" && { started=1; break; }
+    done
+    [[ $started -eq 1 ]] || { echo "preview-diff: could not start http.server after 3 attempts" >&2; exit 1; }
+  fi
+
+  url="http://127.0.0.1:$port/$urlpath"
+  echo "$url"
+  if [[ $review -eq 1 ]]; then
+    echo "preview-diff: review at $url — submit posts to http://127.0.0.1:$port/review — Ctrl-C to stop" >&2
+    echo "preview-diff: reviews save to ${review_out:-${XDG_DATA_HOME:-$HOME/.local/share}/preview-diff/reviews}" >&2
+  else
+    echo "preview-diff: serving on $url — Ctrl-C to stop" >&2
+  fi
+  if [[ $do_open -eq 1 ]]; then
+    if command -v open >/dev/null; then open "$url"
+    elif command -v xdg-open >/dev/null; then xdg-open "$url"; fi
+  fi
+  wait "$srv"
+  exit 0
+fi
+
+echo "$out"
+if [[ $do_open -eq 1 ]]; then
+  if command -v open >/dev/null; then open "$out"
+  elif command -v xdg-open >/dev/null; then xdg-open "$out"
+  else echo "preview-diff: no opener (open/xdg-open); file written above" >&2
+  fi
+fi

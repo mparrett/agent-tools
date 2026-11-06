@@ -1,0 +1,12 @@
+OpenAI Codex
+Copyright 2025 OpenAI
+
+This skill adapts prompt and workflow text from two upstream sources with
+different licenses:
+
+- OpenAI Codex (https://github.com/openai/codex): Apache License, Version 2.0
+  — see the LICENSE file in this directory.
+- The openai-curated `github` plugin (https://github.com/openai/plugins,
+  plugins/github): MIT License — see the LICENSE-MIT file in this directory.
+
+See the Provenance section of SKILL.md for which upstream pieces were used.
