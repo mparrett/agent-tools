@@ -28,8 +28,9 @@ catch. Add a suite to the justfile and CI picks it up.
 
 Two things it will not do for you:
 
-- **It does not block a merge.** No branch protection or ruleset is configured,
-  so a red run is a report, not a gate — read it before merging.
+- **It blocks a merge, and nobody bypasses it.** A ruleset on `main` requires
+  the `lint + tests` check and forbids force-pushes and deleting `main`, with no
+  bypass actors. A change to `main` goes through a PR, config edits included.
 - **A cancelled run on `main` is not a failure.** The workflow sets
   `cancel-in-progress`, and merges land close enough together here that one run
   supersedes another. Check the run for the newer SHA.
@@ -132,7 +133,7 @@ just wt-rm fix/my-thing  # retire one (refuses unless clean and pushed)
 just mine                # commits your branch adds over origin/main
 ```
 
-**`~/projects-new/agent-tools` is the canonical checkout: clean `main`,
+**`~/projects-new/agent-tools-public` is the canonical checkout: clean `main`,
 fast-forward only.** Nothing is authored there. That is the whole rule, and it is
 load-bearing rather than tidiness — `git checkout -b` branches from **`HEAD`, not
 `main`**, so running it while a session has left `HEAD` on their branch silently
@@ -153,7 +154,7 @@ merged one — a session may still be working from it.
 
 ## This repo is checked out twice
 
-You commit in `~/projects-new/agent-tools`. Claude Code *loads this repo's skills*
+You commit in `~/projects-new/agent-tools-public`. Claude Code *loads this repo's skills*
 from `~/projects-new/read-only-clones/agent-tools`, a second clone pinned to `main`.
 Both see this file, so the rules above apply in either — but only one of them is
 yours to write in.
