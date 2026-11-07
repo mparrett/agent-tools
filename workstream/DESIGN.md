@@ -442,7 +442,7 @@ workstream match   [--session SID] [--json]        # ranked candidates for a ses
 workstream attach  <ws> [--session SID] [--ancillary] [--anchor REF]... [--note TEXT] [--no-sync]
 workstream attach  --new "<title>" --name <slug> [--anchor REF]... [--session SID]
 workstream attach  --none "<reason>" [--session SID]
-workstream sync    [ws...] [--session SID] [--ancillary] [--dry-run] [--json]   # default: owning sessions of every open ws
+workstream sync    [ws...] [--session SID] [--ancillary] [--dry-run | --interactive] [--verbose] [--json]   # default: owning sessions of every open ws
 workstream show    <ws> [--json] [--local]
 workstream frontier <ws> [--record] [--full] [--json] [--local]
 workstream retire  <sid>... [--json]              # capture frontier for every ws each sid is attached to, release its claims

@@ -25,7 +25,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from workstream import anchors, frontier, seam, sessions, store
 from workstream.clock import Instant
@@ -298,6 +298,7 @@ def run(
     retract: bool = True,
     gh_runner=None,
     history: Optional[Iterable[store.Workstream]] = None,
+    progress: Optional[Callable[[str, int, int], None]] = None,
 ) -> Report:
     """Sync each target workstream from the sessions that own it (`owners`).
     `ancillary` adds every other attached session; `only` (a session id)
@@ -313,7 +314,9 @@ def run(
     inside its windows for that workstream (frontier.session_scope); an
     ancillary one, having none, gives its whole transcript. `history` is
     every workstream whose claims bound those windows, closed ones included;
-    it defaults to `targets` and `others`."""
+    it defaults to `targets` and `others`. `progress(step, done, total)` is
+    called before each session is read and each workstream's gone worktrees
+    are checked, since a sweep reads transcripts for seconds at a time."""
     targets = list(targets)
     others = list(others)
     history = list(history) if history is not None else [*targets, *others]
@@ -342,7 +345,9 @@ def run(
     # By session and window: one session's evidence differs per workstream.
     found_by: dict[tuple, list[Found]] = {}
     missing: set[str] = set()
-    for _, ws, sref, sid in pairs:
+    for n, (_, ws, sref, sid) in enumerate(pairs):
+        if progress:
+            progress(f"{_label(ws)}: {sref}", n, len(pairs))
         if sid in missing:
             continue
         wins = frontier.session_scope(sref, ws, history)
@@ -387,7 +392,9 @@ def run(
             report.added.append(row)
             report.by_session.setdefault(f.session, []).append({**row, "result": "added"})
     if retract:
-        for ws in targets:
+        for n, ws in enumerate(targets):
+            if progress:
+                progress(f"{_label(ws)}: gone worktrees", n, len(targets))
             _retract(ws, facts, report, log=log, dry_run=dry_run, gh_runner=gh_runner)
     return report
 

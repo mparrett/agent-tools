@@ -958,3 +958,105 @@ def test_sync_verbose_lists_every_skip(capsys):
     out = capsys.readouterr().out
     assert out.count("skipped wt:/w/alpha/wt/") == 5
     assert "--verbose lists them" not in out
+
+
+def _review_report():
+    from workstream import sync
+
+    def add(ws, ref):
+        return {
+            "workstream": ws,
+            "ref": ref,
+            "session": "claude:aaaaaaaa",
+            "how": "gh pr create",
+            "at": None,
+        }
+
+    return sync.Report(
+        added=[add("alpha", "gh:o/r#1"), add("alpha", "gh:o/r#2"), add("beta", "gh:o/r#3")],
+        retracted=[
+            {
+                "workstream": "alpha",
+                "ref": "wt:/w/gone",
+                "branch": "b",
+                "how": "x",
+                "reason": "merged",
+            }
+        ],
+        skipped=[_skip("alpha", "gh:o/r#9", "already an anchor")],
+    )
+
+
+def _keys(*keys):
+    it = iter(keys)
+    return lambda prompt: next(it)
+
+
+def _refs(rows):
+    return [r["ref"] for r in rows]
+
+
+@pytest.mark.parametrize(
+    "keys, adds, gones",
+    [
+        (("y", "n", "y", "n"), ["gh:o/r#1", "gh:o/r#3"], []),
+        # w accepts the rest of alpha's additions, then asks again for beta.
+        (("w", "n", "y"), ["gh:o/r#1", "gh:o/r#2"], ["wt:/w/gone"]),
+        (("n", "a"), ["gh:o/r#2", "gh:o/r#3"], ["wt:/w/gone"]),
+        # q declines everything left, retractions included.
+        (("y", "q"), ["gh:o/r#1"], []),
+        # An unknown key asks again rather than counting as no.
+        (("?", "", "y", "y", "y", "y"), ["gh:o/r#1", "gh:o/r#2", "gh:o/r#3"], ["wt:/w/gone"]),
+    ],
+)
+def test_review_sync_keys(keys, adds, gones):
+    from rich.console import Console
+
+    got_adds, got_gones = cli._review_sync(
+        _review_report(), Console(file=io.StringIO()), _keys(*keys)
+    )
+    assert (_refs(got_adds), _refs(got_gones)) == (adds, gones)
+
+
+def _interactive(monkeypatch, keys):
+    from rich.console import Console
+
+    from workstream import sync
+
+    writes = []
+    monkeypatch.setattr(
+        sync, "run", lambda targets, **kw: (kw["progress"]("alpha: s", 0, 1), _review_report())[1]
+    )
+    monkeypatch.setattr(
+        store, "add_anchor", lambda ws, ref, source: writes.append(("add", ws, ref, source))
+    )
+    monkeypatch.setattr(store, "rm_anchor", lambda ws, ref: writes.append(("rm", ws, ref)))
+    targets = [store.Workstream.__new__(store.Workstream) for _ in range(2)]
+    monkeypatch.setattr(sync, "_label", lambda ws: "alpha" if ws is targets[0] else "beta")
+    buf = io.StringIO()
+    code = cli._sync_interactive(targets, {}, Console(file=buf, width=200), verbose=False, ask=keys)
+    return code, writes, buf.getvalue(), targets
+
+
+def test_sync_interactive_writes_only_what_was_accepted(monkeypatch):
+    code, writes, out, (alpha, beta) = _interactive(monkeypatch, _keys("y", "n", "n", "y"))
+    assert code == 0
+    assert writes == [("add", alpha, "gh:o/r#1", store.SYNC_SOURCE), ("rm", alpha, "wt:/w/gone")]
+    assert "1 added, 2 declined, 1 already anchored, 1 retracted (0 kept)" in out
+
+
+def test_sync_interactive_interrupted_writes_nothing(monkeypatch):
+    def interrupted(prompt):
+        raise EOFError
+
+    code, writes, out, _ = _interactive(monkeypatch, interrupted)
+    assert (code, writes) == (130, [])
+    assert "nothing written" in out
+
+
+def test_sync_interactive_needs_a_terminal(capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    with pytest.raises(SystemExit, match="needs a terminal"):
+        cli.main(["sync", "--interactive"])
+    with pytest.raises(SystemExit, match="neither --json nor --dry-run"):
+        cli.main(["sync", "--interactive", "--dry-run"])

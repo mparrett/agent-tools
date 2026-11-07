@@ -18,6 +18,7 @@ workstream attach  <ws> [--ancillary] [--anchor REF]... [--no-sync]
 workstream attach  --new "<title>" --name <slug> [--anchor REF]...
 workstream attach  --none "<reason>"               this session is not a workstream
 workstream sync    [ws...] [--session SID] [--ancillary] [--dry-run]   anchors from what owning sessions wrote to
+workstream sync    --interactive [ws...] [--verbose]   review each change before it is written
 workstream show    <ws> [--local]                  sessions, anchors, messages, UTC timeline
 workstream frontier <ws> [--record] [--full] [--local]   concise state, loose ends, ways to pick it up
 workstream retire  <sid>...                        capture the frontier, release the claims

@@ -338,6 +338,11 @@ def _print_sync(
 
 
 def cmd_sync(args) -> int:
+    if args.interactive:
+        if args.json or args.dry_run:
+            raise SystemExit("workstream: --interactive takes neither --json nor --dry-run")
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise SystemExit("workstream: --interactive needs a terminal; --dry-run shows the same")
     # Closed workstreams only bound sessions' earlier claims (store.session_windows).
     everything = store.list_workstreams(include_closed=True)
     live = [w for w in everything if not w.closed]
@@ -360,19 +365,126 @@ def cmd_sync(args) -> int:
                 f"workstream: session {only[:8]} is attached to none of {where}; attach it first"
             )
     ids = {t.id for t in targets}
-    report = sync.run(
-        targets,
+    run = dict(
         others=[w for w in live if w.id not in ids],
         only=only,
         ancillary=args.ancillary,
         log=_load_log(),
-        dry_run=args.dry_run,
         history=everything,
     )
+    if args.interactive:
+        return _sync_interactive(targets, run, _console(args), verbose=args.verbose)
+    report = sync.run(targets, dry_run=args.dry_run, **run)
     if args.json:
         return _emit_json({**report.to_dict(), "dry_run": args.dry_run})
     _print_sync(report, dry_run=args.dry_run, verbose=args.verbose)
     return 0
+
+
+def _sync_interactive(targets, run: dict, con: Console, verbose: bool, ask=input) -> int:
+    """Sweep as a dry run, then write only what the person accepts.
+
+    The sweep is read-only, so declining costs nothing and an interrupted
+    review writes nothing at all. Writes go through the same store calls the
+    non-interactive path makes."""
+    with con.status("reading sessions") as status:
+
+        def progress(step: str, done: int, total: int) -> None:
+            status.update(f"[dim]{done + 1}/{total}[/] {escape(step)}")
+
+        report = sync.run(targets, dry_run=True, progress=progress, **run)
+    by_label = {sync._label(t): t for t in targets}
+    try:
+        adds, gones = _review_sync(report, con, ask)
+    except (EOFError, KeyboardInterrupt):
+        con.print("\n[yellow]stopped; nothing written[/]")
+        return 130
+    for r in adds:
+        store.add_anchor(by_label[r["workstream"]], r["ref"], source=store.SYNC_SOURCE)
+    for r in gones:
+        store.rm_anchor(by_label[r["workstream"]], r["ref"])
+    notable = [r for r in report.skipped if r["reason"] != "already an anchor"]
+    lines = (
+        [
+            f"skipped {r['ref']} for {r['workstream']}: {r['reason']} ({r['session']} {r['how']})"
+            for r in notable
+        ]
+        if verbose
+        else _fold_skips(notable)
+    )
+    for line in lines:
+        con.print(f"[dim]{escape(line)}[/]")
+    for w in report.warnings:
+        con.print(f"[yellow]warning:[/] {escape(w)}")
+    have = len(report.skipped) - len(notable)
+    parts = [
+        f"[green]{len(adds)} added[/]",
+        f"{len(report.added) - len(adds)} declined",
+        f"{have} already anchored",
+    ]
+    if report.retracted:
+        parts.append(f"[red]{len(gones)} retracted[/] ({len(report.retracted) - len(gones)} kept)")
+    if report.ancillary:
+        parts.append(f"{len(report.ancillary)} ancillary session(s) left out")
+    con.print(", ".join(parts))
+    return 0
+
+
+_REVIEW_KEYS = "[y]es [n]o [w]orkstream [a]ll [q]uit"
+
+
+def _review_sync(report: sync.Report, con: Console, ask=input) -> tuple[list[dict], list[dict]]:
+    """Walk the proposed additions, then retractions, one workstream at a
+    time, and return the ones accepted. `w` accepts the rest of the current
+    workstream's group, `a` everything left, `q` declines everything left."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for kind, rows in (("add", report.added), ("retract", report.retracted)):
+        for r in rows:
+            groups.setdefault((kind, r["workstream"]), []).append(r)
+    if not groups:
+        con.print("nothing to add or retract")
+        return [], []
+    total = len(report.added) + len(report.retracted)
+    con.print(f"{total} change(s) to review; {escape(_REVIEW_KEYS)}")
+    accepted: dict[str, list[dict]] = {"add": [], "retract": []}
+    everything = stop = False
+    for (kind, ws), rows in groups.items():
+        if stop:
+            break
+        verb = "add to" if kind == "add" else "retract from"
+        con.print(f"\n[bold]{verb} {escape(ws)}[/] ({len(rows)})")
+        whole = everything
+        for r in rows:
+            # Evidence on its own line: ref plus evidence ran past any terminal width.
+            if kind == "add":
+                when = f"  {r['at']}" if r["at"] else ""
+                con.print(f"  [green]+ {escape(r['ref'])}[/]")
+                sid = _UUID_TAIL.sub(r"\1", r["session"])
+                detail = f"{sid} {r['how']}{when}"
+            else:
+                con.print(f"  [red]- {escape(r['ref'])}[/]")
+                detail = f"{r['reason']}; {r['how']}"
+            con.print(f"      [dim]{escape(detail)}[/]")
+            if not whole:
+                key = _ask_key(ask)
+                if key == "q":
+                    stop = True
+                    break
+                if key == "n":
+                    continue
+                if key == "a":
+                    everything = True
+                whole = key in ("w", "a")
+            accepted[kind].append(r)
+    return accepted["add"], accepted["retract"]
+
+
+def _ask_key(ask) -> str:
+    while True:
+        key = ask("  ? ").strip().lower()[:1]
+        if key in ("y", "n", "w", "a", "q"):
+            return key
+        print(f"  {_REVIEW_KEYS}")
 
 
 def _interval_end(iv: store.AttachInterval, as_of: Instant, local: bool) -> str:
@@ -932,6 +1044,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="list every skipped ref (default: repeats are folded into one line per workstream)",
+    )
+    sp.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="review each addition and retraction before anything is written (needs a terminal)",
     )
     common(sp, session=True)
     sp.set_defaults(fn=cmd_sync)
