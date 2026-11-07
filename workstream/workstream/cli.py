@@ -118,7 +118,7 @@ def _rank_for(
     wss = store.list_workstreams()
     msgs = []
     if log and with_messages:
-        msgs = [m for m in log.messages(involving={sid}) if sid in (m.from_sid, m.to_sid)]
+        msgs = log.messages(involving={sid})
     recent = _recent_facts(log, wss) if with_overlap else []
     return me, attribution.rank(me, wss, recent, msgs)
 
