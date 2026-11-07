@@ -103,6 +103,25 @@ def test_dry_run_reports_without_writing(seeded, capsys):
 
 
 @needs_weft
+def test_a_declined_ref_goes_to_the_next_workstream_with_evidence(seeded):
+    worker = seeded["sessions"]["worker"]
+    other = store.create("seam-review", "Second look at the seam")
+    store.attach(other, worker.ref, canonical=False, note="seed")
+    ref = store._canon_ref(f"gh:{seeded['slug']}#31")
+
+    def sweep(exclude=()):
+        targets = [store.get("sync-seam"), store.get("seam-review")]
+        return sync.run(targets, ancillary=True, dry_run=True, exclude=exclude)
+
+    first = sweep()
+    assert [r["workstream"] for r in first.added if r["ref"] == ref] == ["sync-seam"]
+    assert any(r["ref"] == ref and r["reason"] == "an anchor of sync-seam" for r in first.skipped)
+    again = sweep({("sync-seam", ref)})
+    assert [r["workstream"] for r in again.added if r["ref"] == ref] == ["seam-review"]
+    assert any(r["ref"] == ref and r["reason"] == "declined" for r in again.skipped)
+
+
+@needs_weft
 def test_sync_adds_exactly_the_evidence_then_nothing(seeded, capsys):
     worker = seeded["sessions"]["worker"]
     d = run_json(capsys, "sync", "sync-seam")
