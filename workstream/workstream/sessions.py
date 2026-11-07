@@ -26,6 +26,7 @@ from typing import Iterable, Iterator, Optional
 
 from . import seam
 from .clock import Instant, parse_transcript_ts
+from .hooklog import shell_unresolved
 
 HEAD_BYTES = 128 * 1024
 TAIL_BYTES = 256 * 1024
@@ -520,13 +521,15 @@ def _unquote(tok: str) -> str:
 
 def _abs_path(raw: str, base: str) -> Optional[str]:
     p = os.path.expandvars(os.path.expanduser(_unquote(raw)))
-    if "$" in p or not p:
+    if not p or shell_unresolved(p):
         return None
     if not os.path.isabs(p):
         if not base:
             return None
         p = os.path.join(base, p)
-    return os.path.normpath(p)
+    p = os.path.normpath(p)
+    # The base can carry the problem too: a cwd of `<repo>/~/x` came from an earlier misread.
+    return None if shell_unresolved(p) else p
 
 
 def _canonical(path: str) -> Optional[str]:

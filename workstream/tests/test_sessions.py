@@ -464,3 +464,20 @@ def test_bare_compaction_without_a_size_is_unknown(boundary):
     r = Rec(S_MAIN, "/w")
     scan = sessions._scan_claude(_compacted(r, boundary), is_subagent=False)
     assert (scan.compaction_count, scan.context_after_compaction) == (1, None)
+
+
+@pytest.mark.parametrize(
+    "raw,base",
+    [
+        ("$WORKSTREAM_TEST_UNSET_VAR/wt/x", "/w"),
+        ("wt/x`", "/w"),
+        ("wt/x", "/w/~/repo"),
+    ],
+    ids=["unexpanded-var", "trailing-backtick", "tilde-mid-path-in-base"],
+)
+def test_abs_path_rejects_paths_the_shell_would_have_rewritten(raw, base):
+    assert sessions._abs_path(raw, base) is None
+
+
+def test_abs_path_keeps_a_leading_tilde():
+    assert sessions._abs_path("~/repo/wt/x", "/w") == os.path.expanduser("~/repo/wt/x")

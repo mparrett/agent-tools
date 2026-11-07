@@ -366,6 +366,18 @@ _WT_CLI_RE = re.compile(r"(?:^|[;&|(]\s*|\s)wt\s+(new|rm)\b(?:\s+([^\s;&|)-][^\s
 _GIT_WT_ARG_OPTS = {"-b", "-B", "--reason"}
 
 
+def shell_unresolved(path: str) -> bool:
+    """True for a path the shell would have rewritten before git saw it: an
+    unexpanded `$VAR`, a backtick, or a `~` that is not the first character.
+
+    These come from reading a command's text rather than running it
+    (`cd $R && git worktree add …`, a path quoted in backticks), so they name
+    worktrees that never existed. Reporting them as "no longer exists" reads as
+    a removed worktree, so they are dropped before they become candidates.
+    """
+    return "$" in path or "`" in path or "/~/" in path or path.endswith("/~")
+
+
 def _git_worktree_path(command: str, verb: str, cwd: str, git_c: Optional[str]) -> Optional[str]:
     """The path operand of `git worktree add|remove`, made absolute."""
     m = re.search(rf"\bworktree\s+{verb}\b(.*)", command)
@@ -385,10 +397,11 @@ def _git_worktree_path(command: str, verb: str, cwd: str, git_c: Optional[str]) 
             continue
         if tok.startswith("-"):
             continue
-        base = Path(git_c) if git_c else Path(cwd or "/")
+        base = Path(os.path.expanduser(git_c)) if git_c else Path(cwd or "/")
         if not base.is_absolute():
             base = Path(cwd or "/") / base
-        return os.path.normpath(str(base / os.path.expanduser(tok)))
+        path = os.path.normpath(str(base / os.path.expanduser(tok)))
+        return None if shell_unresolved(path) else path
     return None
 
 

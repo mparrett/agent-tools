@@ -1,5 +1,6 @@
 import gzip
 import json
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -523,3 +524,24 @@ def test_pairing_finds_a_transcript_by_session_id_when_path_is_stale(store):
     lines = [ln.replace(str(store.projects), "/moved/away") for ln in lines]
     store.write("hook_events.log", lines)
     assert [o for _, o in store.load().timeline.samples] == [-5 * H]
+
+
+@pytest.mark.parametrize(
+    "command,git_c,expected",
+    [
+        # Read from the command's text, never run: the shell would have expanded these.
+        ("git worktree add .claude/worktrees/x", "$R", None),
+        ("git worktree add $S/$S/.claude/worktrees/x", None, None),
+        ("git worktree add .claude/worktrees/x`", None, None),
+        ("git worktree add ../demo-y", None, "/work/demo-y"),
+    ],
+    ids=["var-in-dash-C", "var-in-operand", "trailing-backtick", "plain-relative"],
+)
+def test_git_worktree_path_drops_what_the_shell_would_have_rewritten(command, git_c, expected):
+    assert hooklog._git_worktree_path(command, "add", "/work/demo", git_c) == expected
+
+
+def test_git_worktree_path_expands_a_leading_tilde_in_dash_C():
+    # `git -C ~/repo worktree add …` from another directory used to become `<cwd>/~/repo/…`.
+    got = hooklog._git_worktree_path("git worktree add wt/x", "add", "/elsewhere", "~/repo")
+    assert got == os.path.normpath(os.path.expanduser("~/repo/wt/x"))
