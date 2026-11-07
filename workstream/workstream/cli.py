@@ -243,7 +243,9 @@ def cmd_attach(args) -> int:
                 f"workstream: attached, but sync failed ({e}); run `workstream sync`\n"
             )
             return 0
-        _print_sync(report, dry_run=False, quiet_when_empty=True)
+        # attach syncs one session, whose skips are few, and has no --verbose
+        # to recover a folded line, so it lists every skip.
+        _print_sync(report, dry_run=False, quiet_when_empty=True, verbose=True)
     return 0
 
 
@@ -264,6 +266,11 @@ def _attach_note(
     return ws.title[:80]
 
 
+# Three full session ids would run a folded line past 200 columns; the first
+# eight characters are what claude-ls resolves anyway.
+_UUID_TAIL = re.compile(r"\b([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+
+
 def _fold_skips(rows: list[dict]) -> list[str]:
     """One line per (workstream, ref scheme, reason) that repeats, in first-seen order.
 
@@ -282,8 +289,13 @@ def _fold_skips(rows: list[dict]) -> list[str]:
             r = rs[0]
             out.append(f"skipped {r['ref']} for {ws}: {reason} ({r['session']} {r['how']})")
         else:
+            # The sessions stay visible, so a wrong skip can be traced to the
+            # session that produced it without rerunning the sweep.
+            seen = list(dict.fromkeys(_UUID_TAIL.sub(r"\1", r["session"]) for r in rs))
+            who = ", ".join(seen[:3]) + (f" +{len(seen) - 3} more" if len(seen) > 3 else "")
             out.append(
-                f"skipped {len(rs)} {scheme}: refs for {ws}: {reason} (--verbose lists them)"
+                f"skipped {len(rs)} {scheme}: refs for {ws}: {reason} "
+                f"(from {who}; --verbose lists them)"
             )
     return out
 
