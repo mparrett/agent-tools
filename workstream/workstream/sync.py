@@ -299,6 +299,7 @@ def run(
     gh_runner=None,
     history: Optional[Iterable[store.Workstream]] = None,
     progress: Optional[Callable[[str, int, int], None]] = None,
+    exclude: Iterable[tuple[str, str]] = (),
 ) -> Report:
     """Sync each target workstream from the sessions that own it (`owners`).
     `ancillary` adds every other attached session; `only` (a session id)
@@ -307,7 +308,8 @@ def run(
     them already holds is skipped rather than added twice, since the session
     acted on it for that other work. Canonical attachments go first, so a
     session attached to two workstreams gives its evidence to the one it owns.
-    `facts` reuses SessionFacts the caller already has, by session id.
+    `facts` reuses SessionFacts the caller already has, by session id, and
+    gains the ones read here.
     `retract` also removes each target's gone, merged worktrees (`_retract`).
 
     A session that holds or held a canonical claim gives only what it did
@@ -316,11 +318,16 @@ def run(
     every workstream whose claims bound those windows, closed ones included;
     it defaults to `targets` and `others`. `progress(step, done, total)` is
     called before each session is read and each workstream's gone worktrees
-    are checked, since a sweep reads transcripts for seconds at a time."""
+    are checked, since a sweep reads transcripts for seconds at a time.
+    `exclude` holds (workstream label, ref) pairs a person declined: each is
+    skipped as declined and, never being held, stays open to the next
+    workstream that has evidence for it."""
+    exclude = set(exclude)
     targets = list(targets)
     others = list(others)
     history = list(history) if history is not None else [*targets, *others]
-    facts = dict(facts or {})
+    # Filled in place, so a caller sweeping twice reads each transcript once.
+    facts = facts if facts is not None else {}
     report = Report()
     held: dict[str, str] = {}
     for ws in [*others, *targets]:
@@ -376,6 +383,8 @@ def run(
                 reason = f.unusable
             elif canon in have[ws.id]:
                 reason = "already an anchor"
+            elif (label, canon) in exclude:
+                reason = "declined"
             elif canon in held and held[canon] != label:
                 reason = f"an anchor of {held[canon]}"
             else:

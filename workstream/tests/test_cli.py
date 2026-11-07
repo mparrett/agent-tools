@@ -992,64 +992,106 @@ def _keys(*keys):
     return lambda prompt: next(it)
 
 
-def _refs(rows):
-    return [r["ref"] for r in rows]
+def _items(report):
+    return [("add", r) for r in report.added] + [("retract", r) for r in report.retracted]
 
 
 @pytest.mark.parametrize(
-    "keys, adds, gones",
+    "keys, accepted, stopped",
     [
-        (("y", "n", "y", "n"), ["gh:o/r#1", "gh:o/r#3"], []),
-        # w accepts the rest of alpha's additions, then asks again for beta.
-        (("w", "n", "y"), ["gh:o/r#1", "gh:o/r#2"], ["wt:/w/gone"]),
-        (("n", "a"), ["gh:o/r#2", "gh:o/r#3"], ["wt:/w/gone"]),
-        # q declines everything left, retractions included.
-        (("y", "q"), ["gh:o/r#1"], []),
+        # One workstream at a time, additions before retractions.
+        (("y", "n", "y", "n"), {"gh:o/r#1", "wt:/w/gone"}, False),
+        # w accepts the rest of alpha, its retraction included, then asks for beta.
+        (("w", "n"), {"gh:o/r#1", "gh:o/r#2", "wt:/w/gone"}, False),
+        (("n", "a"), {"gh:o/r#2", "gh:o/r#3", "wt:/w/gone"}, False),
+        # q declines everything left.
+        (("y", "q"), {"gh:o/r#1"}, True),
         # An unknown key asks again rather than counting as no.
-        (("?", "", "y", "y", "y", "y"), ["gh:o/r#1", "gh:o/r#2", "gh:o/r#3"], ["wt:/w/gone"]),
+        (("?", "", "y", "y", "y", "y"), {"gh:o/r#1", "gh:o/r#2", "gh:o/r#3", "wt:/w/gone"}, False),
     ],
 )
-def test_review_sync_keys(keys, adds, gones):
+def test_review_sync_keys(keys, accepted, stopped):
     from rich.console import Console
 
-    got_adds, got_gones = cli._review_sync(
-        _review_report(), Console(file=io.StringIO()), _keys(*keys)
-    )
-    assert (_refs(got_adds), _refs(got_gones)) == (adds, gones)
+    items = _items(_review_report())
+    answers, quit_ = cli._review_sync(items, Console(file=io.StringIO()), _keys(*keys))
+    assert {r["ref"] for (_, r), yes in zip(items, answers) if yes} == accepted
+    assert quit_ is stopped
 
 
-def _interactive(monkeypatch, keys):
+def _interactive(monkeypatch, keys, reports=None, fail=()):
     from rich.console import Console
 
     from workstream import sync
 
-    writes = []
-    monkeypatch.setattr(
-        sync, "run", lambda targets, **kw: (kw["progress"]("alpha: s", 0, 1), _review_report())[1]
-    )
-    monkeypatch.setattr(
-        store, "add_anchor", lambda ws, ref, source: writes.append(("add", ws, ref, source))
-    )
+    writes, calls = [], []
+    reports = list(reports or [_review_report()])
+
+    def fake_run(targets, **kw):
+        kw["progress"]("alpha: s", 0, 1)
+        calls.append(set(kw["exclude"]))
+        return reports[min(len(calls), len(reports)) - 1]
+
+    def add_anchor(ws, ref, source):
+        if ref in fail:
+            raise store.WeftError("ref add failed")
+        writes.append(("add", ws, ref, source))
+
+    monkeypatch.setattr(sync, "run", fake_run)
+    monkeypatch.setattr(store, "add_anchor", add_anchor)
     monkeypatch.setattr(store, "rm_anchor", lambda ws, ref: writes.append(("rm", ws, ref)))
     targets = [store.Workstream.__new__(store.Workstream) for _ in range(2)]
     monkeypatch.setattr(sync, "_label", lambda ws: "alpha" if ws is targets[0] else "beta")
     buf = io.StringIO()
     code = cli._sync_interactive(targets, {}, Console(file=buf, width=200), verbose=False, ask=keys)
-    return code, writes, buf.getvalue(), targets
+    return code, writes, buf.getvalue(), targets, calls
 
 
 def test_sync_interactive_writes_only_what_was_accepted(monkeypatch):
-    code, writes, out, (alpha, beta) = _interactive(monkeypatch, _keys("y", "n", "n", "y"))
+    code, writes, out, (alpha, beta), calls = _interactive(monkeypatch, _keys("y", "n", "n", "y"))
     assert code == 0
-    assert writes == [("add", alpha, "gh:o/r#1", store.SYNC_SOURCE), ("rm", alpha, "wt:/w/gone")]
-    assert "1 added, 2 declined, 1 already anchored, 1 retracted (0 kept)" in out
+    assert writes == [
+        ("add", alpha, "gh:o/r#1", store.SYNC_SOURCE),
+        ("add", beta, "gh:o/r#3", store.SYNC_SOURCE),
+    ]
+    assert "2 added, 1 declined, 1 already anchored, 0 retracted (1 kept)" in out
+    # Declining an addition sweeps again without it; nothing new came of it.
+    assert calls == [set(), {("alpha", "gh:o/r#2")}]
+
+
+def test_sync_interactive_offers_what_a_decline_freed(monkeypatch):
+    from workstream import sync
+
+    def add(ws, ref):
+        return {"workstream": ws, "ref": ref, "session": "claude:a", "how": "git push", "at": None}
+
+    first = sync.Report(
+        added=[add("alpha", "gh:o/r#5")], skipped=[_skip("beta", "gh:o/r#5", "an anchor of alpha")]
+    )
+    second = sync.Report(
+        added=[add("beta", "gh:o/r#5")], skipped=[_skip("alpha", "gh:o/r#5", "declined")]
+    )
+    code, writes, out, (_, beta), calls = _interactive(
+        monkeypatch, _keys("n", "y"), reports=[first, second]
+    )
+    assert code == 0 and writes == [("add", beta, "gh:o/r#5", store.SYNC_SOURCE)]
+    assert "declining freed 1 more" in out and "an anchor of alpha" not in out
+    assert "1 added, 1 declined" in out
+
+
+def test_sync_interactive_reports_a_failed_write_and_keeps_going(monkeypatch):
+    code, writes, out, (alpha, beta), _ = _interactive(monkeypatch, _keys("a"), fail={"gh:o/r#1"})
+    assert code == 1
+    assert [w[2] for w in writes] == ["gh:o/r#2", "gh:o/r#3", "wt:/w/gone"]
+    assert "failed: add gh:o/r#1 for alpha: ref add failed" in out
+    assert "2 added" in out and "1 failed; rerun to retry" in out
 
 
 def test_sync_interactive_interrupted_writes_nothing(monkeypatch):
     def interrupted(prompt):
         raise EOFError
 
-    code, writes, out, _ = _interactive(monkeypatch, interrupted)
+    code, writes, out, _, _ = _interactive(monkeypatch, interrupted)
     assert (code, writes) == (130, [])
     assert "nothing written" in out
 

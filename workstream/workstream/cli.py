@@ -385,25 +385,67 @@ def _sync_interactive(targets, run: dict, con: Console, verbose: bool, ask=input
     """Sweep as a dry run, then write only what the person accepts.
 
     The sweep is read-only, so declining costs nothing and an interrupted
-    review writes nothing at all. Writes go through the same store calls the
-    non-interactive path makes."""
-    with con.status("reading sessions") as status:
+    review writes nothing at all. A dry run counts each proposal as held, so
+    a ref proposed for one workstream is skipped for the next; declining it
+    therefore sweeps again without it (transcripts are read once), and only
+    the changes that appear then are offered. Writes go through the same
+    store calls the non-interactive path makes."""
+    facts: dict = {}
+    decided: dict[tuple, bool] = {}
+    declined: set[tuple[str, str]] = set()
+    rows: dict[tuple, dict] = {}
+    first = True
+    while True:
+        with con.status("reading sessions") as status:
 
-        def progress(step: str, done: int, total: int) -> None:
-            status.update(f"[dim]{done + 1}/{total}[/] {escape(step)}")
+            def progress(step: str, done: int, total: int) -> None:
+                status.update(f"[dim]{done + 1}/{total}[/] {escape(step)}")
 
-        report = sync.run(targets, dry_run=True, progress=progress, **run)
+            report = sync.run(
+                targets, dry_run=True, progress=progress, facts=facts, exclude=declined, **run
+            )
+        fresh = [
+            (kind, r)
+            for kind, rs in (("add", report.added), ("retract", report.retracted))
+            for r in rs
+            if (kind, r["workstream"], r["ref"]) not in decided
+        ]
+        if not fresh:
+            if first:
+                con.print("nothing to add or retract")
+            break
+        if not first:
+            con.print(f"\n[bold]declining freed {len(fresh)} more[/]")
+        first = False
+        try:
+            answers, stopped = _review_sync(fresh, con, ask)
+        except (EOFError, KeyboardInterrupt):
+            con.print("\n[yellow]stopped; nothing written[/]")
+            return 130
+        for (kind, r), yes in zip(fresh, answers):
+            decided[(kind, r["workstream"], r["ref"])] = yes
+            rows[(kind, r["workstream"], r["ref"])] = r
+            if kind == "add" and not yes:
+                declined.add((r["workstream"], r["ref"]))
+        # Only a declined addition can free a ref for another workstream.
+        if stopped or all(yes or kind != "add" for (kind, _), yes in zip(fresh, answers)):
+            break
     by_label = {sync._label(t): t for t in targets}
-    try:
-        adds, gones = _review_sync(report, con, ask)
-    except (EOFError, KeyboardInterrupt):
-        con.print("\n[yellow]stopped; nothing written[/]")
-        return 130
-    for r in adds:
-        store.add_anchor(by_label[r["workstream"]], r["ref"], source=store.SYNC_SOURCE)
-    for r in gones:
-        store.rm_anchor(by_label[r["workstream"]], r["ref"])
-    notable = [r for r in report.skipped if r["reason"] != "already an anchor"]
+    written = {"add": 0, "retract": 0}
+    failed = []
+    for (kind, label, ref), yes in decided.items():
+        if not yes:
+            continue
+        try:
+            if kind == "add":
+                store.add_anchor(by_label[label], ref, source=store.SYNC_SOURCE)
+            else:
+                store.rm_anchor(by_label[label], ref)
+            written[kind] += 1
+        except store.WeftError as e:
+            # Keep going: each write stands alone, and the summary says which landed.
+            failed.append(f"{kind} {ref} for {label}: {e}")
+    notable = [r for r in report.skipped if r["reason"] not in ("already an anchor", "declined")]
     lines = (
         [
             f"skipped {r['ref']} for {r['workstream']}: {r['reason']} ({r['session']} {r['how']})"
@@ -416,53 +458,57 @@ def _sync_interactive(targets, run: dict, con: Console, verbose: bool, ask=input
         con.print(f"[dim]{escape(line)}[/]")
     for w in report.warnings:
         con.print(f"[yellow]warning:[/] {escape(w)}")
-    have = len(report.skipped) - len(notable)
+    for f in failed:
+        con.print(f"[red]failed:[/] {escape(f)}")
+    n_gone = sum(1 for k in decided if k[0] == "retract")
+    have = sum(1 for r in report.skipped if r["reason"] == "already an anchor")
     parts = [
-        f"[green]{len(adds)} added[/]",
-        f"{len(report.added) - len(adds)} declined",
+        f"[green]{written['add']} added[/]",
+        f"{sum(1 for k, v in decided.items() if k[0] == 'add' and not v)} declined",
         f"{have} already anchored",
     ]
-    if report.retracted:
-        parts.append(f"[red]{len(gones)} retracted[/] ({len(report.retracted) - len(gones)} kept)")
+    if n_gone:
+        kept = sum(1 for k, v in decided.items() if k[0] == "retract" and not v)
+        parts.append(f"[red]{written['retract']} retracted[/] ({kept} kept)")
     if report.ancillary:
         parts.append(f"{len(report.ancillary)} ancillary session(s) left out")
+    if failed:
+        parts.append(f"[red]{len(failed)} failed[/]; rerun to retry")
     con.print(", ".join(parts))
-    return 0
+    return 1 if failed else 0
 
 
 _REVIEW_KEYS = "[y]es [n]o [w]orkstream [a]ll [q]uit"
 
 
-def _review_sync(report: sync.Report, con: Console, ask=input) -> tuple[list[dict], list[dict]]:
-    """Walk the proposed additions, then retractions, one workstream at a
-    time, and return the ones accepted. `w` accepts the rest of the current
-    workstream's group, `a` everything left, `q` declines everything left."""
-    groups: dict[tuple[str, str], list[dict]] = {}
-    for kind, rows in (("add", report.added), ("retract", report.retracted)):
-        for r in rows:
-            groups.setdefault((kind, r["workstream"]), []).append(r)
-    if not groups:
-        con.print("nothing to add or retract")
-        return [], []
-    total = len(report.added) + len(report.retracted)
-    con.print(f"{total} change(s) to review; {escape(_REVIEW_KEYS)}")
-    accepted: dict[str, list[dict]] = {"add": [], "retract": []}
+def _review_sync(items: list[tuple[str, dict]], con: Console, ask=input) -> tuple[list[bool], bool]:
+    """Walk proposed changes one workstream at a time, additions before
+    retractions, and return an answer per item (in `items` order) plus whether
+    the person quit. `w` accepts the rest of the current workstream, both
+    kinds; `a` everything left; `q` declines everything left."""
+    order: dict[str, list[int]] = {}
+    for i, (kind, r) in enumerate(items):
+        order.setdefault(r["workstream"], []).append(i)
+    for idx in order.values():
+        idx.sort(key=lambda i: items[i][0] != "add")
+    answers = [False] * len(items)
+    con.print(f"{len(items)} change(s) to review; {escape(_REVIEW_KEYS)}")
     everything = stop = False
-    for (kind, ws), rows in groups.items():
+    for ws, idx in order.items():
         if stop:
             break
-        verb = "add to" if kind == "add" else "retract from"
-        con.print(f"\n[bold]{verb} {escape(ws)}[/] ({len(rows)})")
+        con.print(f"\n[bold]{escape(ws)}[/] ({len(idx)})")
         whole = everything
-        for r in rows:
+        for i in idx:
+            kind, r = items[i]
             # Evidence on its own line: ref plus evidence ran past any terminal width.
             if kind == "add":
                 when = f"  {r['at']}" if r["at"] else ""
-                con.print(f"  [green]+ {escape(r['ref'])}[/]")
+                con.print(f"  [green]+ add {escape(r['ref'])}[/]")
                 sid = _UUID_TAIL.sub(r"\1", r["session"])
                 detail = f"{sid} {r['how']}{when}"
             else:
-                con.print(f"  [red]- {escape(r['ref'])}[/]")
+                con.print(f"  [red]- retract {escape(r['ref'])}[/]")
                 detail = f"{r['reason']}; {r['how']}"
             con.print(f"      [dim]{escape(detail)}[/]")
             if not whole:
@@ -475,8 +521,8 @@ def _review_sync(report: sync.Report, con: Console, ask=input) -> tuple[list[dic
                 if key == "a":
                     everything = True
                 whole = key in ("w", "a")
-            accepted[kind].append(r)
-    return accepted["add"], accepted["retract"]
+            answers[i] = True
+    return answers, stop
 
 
 def _ask_key(ask) -> str:
