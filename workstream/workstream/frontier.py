@@ -443,7 +443,7 @@ def build(
         # involves sent or got it outside its windows: then it was that
         # session's other work, even when the other end is unscoped here.
         messages = []
-        for m in log.messages():
+        for m in log.messages(involving=member_ids):
             ends = [sid for sid in (m.from_sid, m.to_sid) if sid in member_ids]
             if ends and all(_in(m.at, scope_of[sid]) for sid in ends):
                 messages.append(m)

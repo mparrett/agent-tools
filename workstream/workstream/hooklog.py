@@ -538,15 +538,20 @@ class HookLog:
                 return r.get("name") or None
         return None
 
-    def _peer_records(self, earliest: Instant) -> list[tuple[Instant, str, dict]]:
+    def _peer_records(
+        self, earliest: Instant, sids: Optional[set[str]] = None
+    ) -> list[tuple[Instant, str, dict]]:
         """(at, recipient sid, origin) for every incoming peer message in a
-        transcript touched since `earliest`. Only top-level transcripts are
-        read: subagents (`<sid>/subagents/`) are never messaged by peers."""
+        transcript touched since `earliest`, or only in the transcripts of
+        `sids` when given. Only top-level transcripts are read: subagents
+        (`<sid>/subagents/`) are never messaged by peers."""
         out: list[tuple[Instant, str, dict]] = []
         if self.projects is None or not Path(self.projects).is_dir():
             return out
         floor = earliest.utc.timestamp() - MESSAGE_WINDOW.total_seconds()
         for path in Path(self.projects).glob("*/*.jsonl"):
+            if sids is not None and path.stem not in sids:
+                continue
             try:
                 if path.stat().st_mtime < floor:
                     continue
@@ -627,9 +632,20 @@ class HookLog:
                 return to, "registry-id"
         return None, None
 
-    def messages(self, since: Since = None) -> list[MessageEvent]:
+    def messages(
+        self, since: Since = None, involving: Optional[set[str]] = None
+    ) -> list[MessageEvent]:
         """SendMessage calls, recipients resolved now (D5): a peer record in the
-        recipient's transcript with the same body, then the live registry."""
+        recipient's transcript with the same body, then the live registry.
+
+        `involving` keeps only messages sent by or resolved to one of those
+        sessions, and is what keeps a workstream's view cheap: resolving every
+        call in the log means scanning every transcript touched since the
+        oldest one, gigabytes on a busy store. A call from outside the set can
+        only matter if its recipient is inside it, so it is matched against the
+        members' transcripts alone. Same answers as the unfiltered call, except
+        when one body went to two sessions within MESSAGE_WINDOW: the unfiltered
+        call picks the closer peer record, this one prefers a member's."""
         out: list[MessageEvent] = []
         for call in self._tool_calls("SendMessage"):
             ev = call.first
@@ -647,28 +663,66 @@ class HookLog:
             )
         if not out:
             return out
-        peers = self._peer_records(min(m.at for m in out))
-        for m in out:
-            sender = self._sender_name(m.from_sid)
-            best: Optional[tuple[timedelta, str]] = None
-            for at, sid, origin in peers:
-                if origin.get("body") != m.body or not sid or sid == m.from_sid:
+        if involving is None:
+            peers = self._peer_records(min(m.at for m in out))
+            for m in out:
+                self._resolve_recipient(m, peers)
+            return out
+
+        sent = [m for m in out if m.from_sid in involving]
+        others = [m for m in out if m.from_sid not in involving]
+        kept = list(sent)
+        if sent:
+            peers = self._peer_records(min(m.at for m in sent))
+            for m in sent:
+                self._resolve_recipient(m, peers)
+        if others:
+            mine = self._peer_records(min(m.at for m in others), sids=involving)
+            for m in others:
+                if self._match_body(m, mine) is not None:
+                    self._resolve_recipient(m, mine)
+                    kept.append(m)
                     continue
-                if sender and origin.get("name") and origin.get("name") != sender:
-                    continue
-                gap = abs(at.utc - m.at.utc)
-                if gap <= MESSAGE_WINDOW and (best is None or gap < best[0]):
-                    best = (gap, sid)
-            if best is not None:
-                m.to_sid, m.how = best[1], "body"
+                if _SUBAGENT_ID_RE.fullmatch(m.to_raw):
+                    continue  # the sender's own subagent, never a member's
+                to_sid, _ = self._resolve_by_registry(m.to_raw, m.at)
+                if to_sid in involving:
+                    # The registry names a member, but a non-member's
+                    # transcript may hold the body match that wins: settle it
+                    # with the full scan, for these few calls only.
+                    self._resolve_recipient(m, self._peer_records(m.at))
+                    if m.to_sid in involving:
+                        kept.append(m)
+        keep = {id(m) for m in kept}
+        return [m for m in out if id(m) in keep]  # log order, as unfiltered
+
+    def _match_body(
+        self, m: MessageEvent, peers: list[tuple[Instant, str, dict]]
+    ) -> Optional[str]:
+        """The recipient whose peer record carries `m`'s body nearest in time."""
+        sender = self._sender_name(m.from_sid)
+        best: Optional[tuple[timedelta, str]] = None
+        for at, sid, origin in peers:
+            if origin.get("body") != m.body or not sid or sid == m.from_sid:
                 continue
-            if _SUBAGENT_ID_RE.fullmatch(m.to_raw):
-                # A message to the sender's own subagent names it by agent id;
-                # no peer record is written for that, and no registry row.
-                m.to_sid, m.how = f"{m.from_sid}/{m.to_raw}", "subagent"
+            if sender and origin.get("name") and origin.get("name") != sender:
                 continue
-            m.to_sid, m.how = self._resolve_by_registry(m.to_raw, m.at)
-        return out
+            gap = abs(at.utc - m.at.utc)
+            if gap <= MESSAGE_WINDOW and (best is None or gap < best[0]):
+                best = (gap, sid)
+        return best[1] if best is not None else None
+
+    def _resolve_recipient(self, m: MessageEvent, peers: list[tuple[Instant, str, dict]]) -> None:
+        to = self._match_body(m, peers)
+        if to is not None:
+            m.to_sid, m.how = to, "body"
+            return
+        if _SUBAGENT_ID_RE.fullmatch(m.to_raw):
+            # A message to the sender's own subagent names it by agent id;
+            # no peer record is written for that, and no registry row.
+            m.to_sid, m.how = f"{m.from_sid}/{m.to_raw}", "subagent"
+            return
+        m.to_sid, m.how = self._resolve_by_registry(m.to_raw, m.at)
 
     def list_agents_calls(self, since: Since = None) -> list[HookEvent]:
         return [

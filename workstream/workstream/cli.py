@@ -118,7 +118,7 @@ def _rank_for(
     wss = store.list_workstreams()
     msgs = []
     if log and with_messages:
-        msgs = [m for m in log.messages() if sid in (m.from_sid, m.to_sid)]
+        msgs = [m for m in log.messages(involving={sid}) if sid in (m.from_sid, m.to_sid)]
     recent = _recent_facts(log, wss) if with_overlap else []
     return me, attribution.rank(me, wss, recent, msgs)
 
@@ -944,6 +944,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     # One weft listing for every frontier this invocation builds.
     frontier._history_cache = {}
+    sessions._snapshot = {}
     try:
         return args.fn(args)
     except (store.NotFound, sessions.NotFound) as e:
@@ -957,6 +958,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 6
     finally:
         frontier._history_cache = None
+        sessions._snapshot = None
 
 
 if __name__ == "__main__":
