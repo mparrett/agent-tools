@@ -469,15 +469,39 @@ def test_bare_compaction_without_a_size_is_unknown(boundary):
 @pytest.mark.parametrize(
     "raw,base",
     [
-        ("$WORKSTREAM_TEST_UNSET_VAR/wt/x", "/w"),
+        ("$WORKSTREAM_TEST_VAR/wt/x", "/w"),
         ("wt/x`", "/w"),
         ("wt/x", "/w/~/repo"),
     ],
     ids=["unexpanded-var", "trailing-backtick", "tilde-mid-path-in-base"],
 )
-def test_abs_path_rejects_paths_the_shell_would_have_rewritten(raw, base):
+def test_abs_path_rejects_paths_the_shell_would_have_rewritten(raw, base, monkeypatch):
+    # Set here on purpose: the session's variables are not this process's, so even a
+    # variable the reader happens to have must not be expanded.
+    monkeypatch.setenv("WORKSTREAM_TEST_VAR", "/somewhere/else")
     assert sessions._abs_path(raw, base) is None
 
 
 def test_abs_path_keeps_a_leading_tilde():
     assert sessions._abs_path("~/repo/wt/x", "/w") == os.path.expanduser("~/repo/wt/x")
+
+
+def test_abs_path_expands_home_like_the_hooklog_reader():
+    assert sessions._abs_path("$HOME/wt/x", "/w") == os.path.expanduser("~/wt/x")
+    assert sessions._abs_path("${HOME}/wt/x", "/w") == os.path.expanduser("~/wt/x")
+
+
+def test_worktree_add_after_an_unresolvable_cd_is_not_recorded(store):
+    sid = "88888888-aaaa-4bbb-8ccc-00000000000b"
+    r = Rec(sid, store["alpha"])
+    write_jsonl(
+        store["proj"] / f"{sid}.jsonl",
+        [
+            r.user(0, "make worktrees"),
+            r.tool(1, "Bash", "b1", command="cd $R && git worktree add .claude/worktrees/x"),
+            r.tool(2, "Bash", "b2", command="cd ../beta && git worktree add wt/y"),
+        ],
+    )
+    assert sessions.facts(sid).worktrees == [
+        os.path.normpath(os.path.join(store["alpha"], "../beta/wt/y"))
+    ]

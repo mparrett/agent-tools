@@ -545,3 +545,17 @@ def test_git_worktree_path_expands_a_leading_tilde_in_dash_C():
     # `git -C ~/repo worktree add …` from another directory used to become `<cwd>/~/repo/…`.
     got = hooklog._git_worktree_path("git worktree add wt/x", "add", "/elsewhere", "~/repo")
     assert got == os.path.normpath(os.path.expanduser("~/repo/wt/x"))
+
+
+@pytest.mark.parametrize(
+    "prefix,expected",
+    [
+        ("", "/work/demo"),
+        ("cd ../other && ", "/work/other"),
+        ("cd $R && ", None),
+        ("cd /abs; cd sub && ", "/abs/sub"),
+    ],
+    ids=["no-cd", "relative-cd", "unresolvable-cd", "chained-cd"],
+)
+def test_cwd_after_cd(prefix, expected):
+    assert hooklog.cwd_after_cd(prefix, "/work/demo") == expected

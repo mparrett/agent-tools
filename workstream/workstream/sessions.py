@@ -26,7 +26,7 @@ from typing import Iterable, Iterator, Optional
 
 from . import seam
 from .clock import Instant, parse_transcript_ts
-from .hooklog import shell_unresolved
+from .hooklog import cwd_after_cd, expand_home, shell_unresolved
 
 HEAD_BYTES = 128 * 1024
 TAIL_BYTES = 256 * 1024
@@ -520,7 +520,9 @@ def _unquote(tok: str) -> str:
 
 
 def _abs_path(raw: str, base: str) -> Optional[str]:
-    p = os.path.expandvars(os.path.expanduser(_unquote(raw)))
+    # Only ~ and $HOME: other variables were the session's, and expanding them
+    # with this process's environment would invent a path (see expand_home).
+    p = expand_home(_unquote(raw))
     if not p or shell_unresolved(p):
         return None
     if not os.path.isabs(p):
@@ -615,7 +617,9 @@ def _locations(
             for m in _GH_REPO_RE.finditer(t.command):
                 _add_unique(gh_repos, m.group(1))
             for m in _WT_ADD_RE.finditer(t.command):
-                wt(_worktree_add_path(m, t.cwd), t.at, "git worktree add")
+                base = cwd_after_cd(t.command[: m.start()], t.cwd)
+                if base is not None:
+                    wt(_worktree_add_path(m, base), t.at, "git worktree add")
             for m in _WT_NAMED_RE.finditer(t.command):
                 # `just wt <branch>` names the branch; `wt new`'s argument is not known to be one.
                 branch = m.group(1) if m.group(0).lstrip().startswith("just") else None
@@ -629,12 +633,12 @@ def _locations(
                 or t.input.get("path")
             )
             if isinstance(p, str):
-                wt(
-                    _abs_path(p, t.cwd) or p,
-                    t.at,
-                    "EnterWorktree",
-                    (extra or {}).get("worktreeBranch"),
-                )
+                # Fall back to the path as given only when there was no cwd to
+                # resolve it against; a refused path stays refused.
+                q = _abs_path(p, t.cwd)
+                if q is None and not t.cwd and not shell_unresolved(p):
+                    q = p
+                wt(q, t.at, "EnterWorktree", (extra or {}).get("worktreeBranch"))
     return repos, gh_repos, worktrees, branches
 
 
