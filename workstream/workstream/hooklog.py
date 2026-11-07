@@ -696,9 +696,7 @@ class HookLog:
         keep = {id(m) for m in kept}
         return [m for m in out if id(m) in keep]  # log order, as unfiltered
 
-    def _match_body(
-        self, m: MessageEvent, peers: list[tuple[Instant, str, dict]]
-    ) -> Optional[str]:
+    def _match_body(self, m: MessageEvent, peers: list[tuple[Instant, str, dict]]) -> Optional[str]:
         """The recipient whose peer record carries `m`'s body nearest in time."""
         sender = self._sender_name(m.from_sid)
         best: Optional[tuple[timedelta, str]] = None

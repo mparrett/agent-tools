@@ -327,9 +327,7 @@ def test_messages_involving_matches_the_unfiltered_answer(store):
     ]
 
 
-def test_messages_involving_reads_only_member_transcripts_for_outsider_calls(
-    store, monkeypatch
-):
+def test_messages_involving_reads_only_member_transcripts_for_outsider_calls(store, monkeypatch):
     # The point of `involving`: a call between two outsiders must not cost a
     # scan of every transcript in the store.
     t0 = datetime(2026, 10, 25, 9, 0)
