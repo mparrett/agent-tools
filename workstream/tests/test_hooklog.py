@@ -285,6 +285,81 @@ def test_former_name_expired_before_send_does_not_resolve(store):
     assert store.load(registry=registry).messages()[0].to_sid is None
 
 
+SID_D = "dddddddd-4444-4444-8444-000000000004"
+
+
+def _outsider_mix(store):
+    """SID_A is the only member. Every resolution path, from both sides."""
+    t0 = datetime(2026, 10, 25, 9, 0)
+    lines = store.start(SID_A, t0, -5 * H)
+    lines += send(t0 + H, SID_A, "uds:/tmp/cc-socks/1.sock", "member to outsider")
+    lines += send(t0 + 2 * H, SID_B, "uds:/tmp/cc-socks/2.sock", "outsider to member")
+    lines += send(t0 + 3 * H, SID_B, "uds:/tmp/cc-socks/3.sock", "outsider to outsider")
+    lines += send(t0 + 4 * H, SID_B, "lead", "outsider to member by name")
+    lines += send(t0 + 5 * H, SID_C, "a0123456789abcdef", "outsider to own subagent")
+    store.write("hook_events.log", lines)
+    # t0 in UTC, plus 30s: peer records on exact quarter hours would compete
+    # with the first prompt when the log infers the session's offset.
+    utc = datetime(2026, 10, 25, 14, 0, 30)
+    store.transcript(SID_C, [peer_record(SID_C, utc + H, "member to outsider", "lead")])
+    store.transcript(SID_A, [peer_record(SID_A, utc + 2 * H, "outsider to member", "b")])
+    store.transcript(SID_D, [peer_record(SID_D, utc + 3 * H, "outsider to outsider", "b")])
+    return [
+        {"sessionId": SID_A, "name": "lead"},
+        {"sessionId": SID_B, "name": "b"},
+    ]
+
+
+def test_messages_involving_matches_the_unfiltered_answer(store):
+    registry = _outsider_mix(store)
+
+    def rows(msgs):
+        return [(m.body, m.from_sid, m.to_sid, m.how) for m in msgs]
+
+    every = store.load(registry=registry).messages()
+    want = [m for m in every if SID_A in (m.from_sid, m.to_sid)]
+    got = store.load(registry=registry).messages(involving={SID_A})
+    assert rows(got) == rows(want)
+    assert [m.body for m in got] == [
+        "member to outsider",
+        "outsider to member",
+        "outsider to member by name",
+    ]
+
+
+def test_one_member_record_answers_one_outsider_call(store):
+    # The same body to the member and then to an outsider: searching only the
+    # member's transcript, both calls match its one record. Only the nearer
+    # call reached the member.
+    t0 = datetime(2026, 10, 25, 9, 0)
+    lines = store.start(SID_A, t0, -5 * H)
+    lines += send(t0 + H, SID_B, "uds:/tmp/cc-socks/2.sock", "re-pull")
+    lines += send(t0 + H + timedelta(seconds=40), SID_B, "uds:/tmp/cc-socks/4.sock", "re-pull")
+    store.write("hook_events.log", lines)
+    utc = datetime(2026, 10, 25, 15, 0, 5)  # 5s after the first call, in UTC
+    store.transcript(SID_A, [peer_record(SID_A, utc, "re-pull", "b")])
+    store.transcript(SID_D, [peer_record(SID_D, utc + timedelta(seconds=40), "re-pull", "b")])
+    registry = [{"sessionId": SID_B, "name": "b"}]
+    got = store.load(registry=registry).messages(involving={SID_A})
+    assert [(m.to_raw, m.to_sid) for m in got] == [("uds:/tmp/cc-socks/2.sock", SID_A)]
+
+
+def test_messages_involving_reads_only_member_transcripts_for_outsider_calls(store, monkeypatch):
+    # The point of `involving`: a call between two outsiders must not cost a
+    # scan of every transcript in the store.
+    t0 = datetime(2026, 10, 25, 9, 0)
+    lines = store.start(SID_A, t0, -5 * H)
+    lines += send(t0 + H, SID_B, "uds:/tmp/cc-socks/3.sock", "outsider to outsider")
+    store.write("hook_events.log", lines)
+    store.transcript(SID_D, [peer_record(SID_D, datetime(2026, 10, 25, 15, 0), "x", "b")])
+    log = store.load(registry=[])
+    scanned = []
+    real = log._scan_peers
+    monkeypatch.setattr(log, "_scan_peers", lambda p: scanned.append(p.stem) or real(p))
+    assert log.messages(involving={SID_A}) == []
+    assert scanned == [SID_A]
+
+
 def test_messages_since_and_post_only_calls(store):
     t0 = datetime(2026, 10, 25, 9, 0)
     lines = store.start(SID_A, t0, -5 * H)

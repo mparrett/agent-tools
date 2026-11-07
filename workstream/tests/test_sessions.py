@@ -342,6 +342,19 @@ def test_resolve(store):
         sessions.resolve("ffffffff")
 
 
+def test_snapshot_lists_the_store_once(store, monkeypatch):
+    calls = []
+    real = sessions._claude_refs
+    monkeypatch.setattr(sessions, "_claude_refs", lambda: calls.append(1) or real())
+    sessions.known_session_ids()
+    sessions.known_session_ids()
+    assert len(calls) == 2  # no snapshot: the store as it is now, every time
+    monkeypatch.setattr(sessions, "_snapshot", {})
+    sessions.known_session_ids()
+    sessions.resolve(S_MAIN)
+    assert len(calls) == 3
+
+
 def test_known_session_ids(store):
     ids = sessions.known_session_ids()
     assert {S_MAIN, AGENT, CODEX, CODEX_CHILD} <= ids

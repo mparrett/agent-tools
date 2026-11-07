@@ -170,10 +170,23 @@ def _codex_refs() -> Iterator[_Ref]:
         )
 
 
+# Per-invocation memo, set and cleared by cli.main (like frontier's history
+# cache). One `show` resolves every member and lists recent sessions; without
+# it each of those re-globbed the whole store and re-read every Codex
+# rollout's metadata. None outside a CLI invocation, so library callers and
+# tests that add transcripts between calls always see the store as it is.
+_snapshot: Optional[dict] = None
+
+
 def _all_refs(include_codex: bool = True) -> list[_Ref]:
+    key = ("refs", include_codex)
+    if _snapshot is not None and key in _snapshot:
+        return _snapshot[key]
     refs = list(_claude_refs())
     if include_codex:
         refs.extend(_codex_refs())
+    if _snapshot is not None:
+        _snapshot[key] = refs
     return refs
 
 
@@ -1254,8 +1267,17 @@ def _fork_groups(mains: list[tuple[str, str, Optional[Instant]]]) -> dict[str, l
 
 
 def _first_prompt_and_start(path: Path) -> tuple[str, Optional[Instant]]:
+    # facts() asks this of every sibling in a member's project folder, and a
+    # workstream's members usually share one folder: memoized per invocation,
+    # it is one head read per sibling rather than one per sibling per member.
+    key = ("head", path)
+    if _snapshot is not None and key in _snapshot:
+        return _snapshot[key]
     scan = _scan_claude(_head_entries(path), is_subagent=False)
-    return scan.first_prompt, scan.first_ts
+    out = (scan.first_prompt, scan.first_ts)
+    if _snapshot is not None:
+        _snapshot[key] = out
+    return out
 
 
 def facts(sid_or_prefix: str, log=None) -> SessionFacts:
