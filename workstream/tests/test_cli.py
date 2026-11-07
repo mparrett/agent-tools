@@ -888,3 +888,73 @@ def test_message_to_own_subagent_renders_as_such():
     assert own.to_text() == "own subagent bbbbbbbb"
     assert peer.to_text() == "cccccccc"
     assert lost.to_text() == "pane (unresolved)"
+
+
+def _skip(ws, ref, reason, sid="claude:aaaaaaaa"):
+    return {"workstream": ws, "ref": ref, "reason": reason, "session": sid, "how": "EnterWorktree"}
+
+
+def _sweep_report():
+    from workstream import sync
+
+    gone = "the worktree no longer exists"
+    return sync.Report(
+        added=[
+            {
+                "ref": "gh:o/r#1",
+                "workstream": "alpha",
+                "session": "claude:aaaaaaaa",
+                "how": "gh pr create",
+                "at": None,
+            }
+        ],
+        skipped=[
+            _skip(
+                "alpha",
+                f"wt:/w/alpha/wt/{i}",
+                gone,
+                "claude:bbbbbbbb" if i % 2 else "claude:aaaaaaaa",
+            )
+            for i in range(5)
+        ]
+        + [
+            _skip("beta", "wt:/w/beta/wt/x", gone),
+            _skip("alpha", "gh:o/other#2", "it wrote nothing to o/other"),
+            _skip("alpha", "gh:o/r#3", "already an anchor"),
+        ],
+    )
+
+
+def test_sync_folds_repeated_skips_into_one_line(capsys):
+    cli._print_sync(_sweep_report(), dry_run=True)
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        "would add gh:o/r#1 to alpha: claude:aaaaaaaa gh pr create",
+        "skipped 5 wt: refs for alpha: the worktree no longer exists "
+        "(from claude:aaaaaaaa, claude:bbbbbbbb; --verbose lists them)",
+        # A group of one keeps its ref: then the ref is the information.
+        "skipped wt:/w/beta/wt/x for beta: the worktree no longer exists (claude:aaaaaaaa EnterWorktree)",
+        "skipped gh:o/other#2 for alpha: it wrote nothing to o/other (claude:aaaaaaaa EnterWorktree)",
+        "1 would add, 1 already anchored",
+    ]
+
+
+def test_folded_skip_names_at_most_three_sessions():
+    rows = [_skip("alpha", f"wt:/w/{i}", "gone", f"claude:{i}") for i in range(5)]
+    assert cli._fold_skips(rows) == [
+        "skipped 5 wt: refs for alpha: gone (from claude:0, claude:1, claude:2 +2 more; "
+        "--verbose lists them)"
+    ]
+
+
+def test_folded_skip_shortens_session_ids():
+    sid = "claude:ee7781e1-2003-5805-8391-233633d24fd3"
+    rows = [_skip("alpha", f"wt:/w/{i}", "gone", sid) for i in range(2)]
+    assert "(from claude:ee7781e1; " in cli._fold_skips(rows)[0]
+
+
+def test_sync_verbose_lists_every_skip(capsys):
+    cli._print_sync(_sweep_report(), dry_run=True, verbose=True)
+    out = capsys.readouterr().out
+    assert out.count("skipped wt:/w/alpha/wt/") == 5
+    assert "--verbose lists them" not in out

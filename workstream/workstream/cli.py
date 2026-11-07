@@ -243,7 +243,9 @@ def cmd_attach(args) -> int:
                 f"workstream: attached, but sync failed ({e}); run `workstream sync`\n"
             )
             return 0
-        _print_sync(report, dry_run=False, quiet_when_empty=True)
+        # attach syncs one session, whose skips are few, and has no --verbose
+        # to recover a folded line, so it lists every skip.
+        _print_sync(report, dry_run=False, quiet_when_empty=True, verbose=True)
     return 0
 
 
@@ -264,7 +266,43 @@ def _attach_note(
     return ws.title[:80]
 
 
-def _print_sync(report: sync.Report, dry_run: bool, quiet_when_empty: bool = False) -> None:
+# Three full session ids would run a folded line past 200 columns; the first
+# eight characters are what claude-ls resolves anyway.
+_UUID_TAIL = re.compile(r"\b([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+
+
+def _fold_skips(rows: list[dict]) -> list[str]:
+    """One line per (workstream, ref scheme, reason) that repeats, in first-seen order.
+
+    A sweep over a busy store skips dozens of retired worktrees for one
+    workstream, each correct and none worth reading on its own; listed one per
+    line they buried the few additions above them. A group of one keeps its full
+    line, since then the ref itself is the information.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for r in rows:
+        key = (r["workstream"], r["ref"].partition(":")[0], r["reason"])
+        groups.setdefault(key, []).append(r)
+    out = []
+    for (ws, scheme, reason), rs in groups.items():
+        if len(rs) == 1:
+            r = rs[0]
+            out.append(f"skipped {r['ref']} for {ws}: {reason} ({r['session']} {r['how']})")
+        else:
+            # The sessions stay visible, so a wrong skip can be traced to the
+            # session that produced it without rerunning the sweep.
+            seen = list(dict.fromkeys(_UUID_TAIL.sub(r"\1", r["session"]) for r in rs))
+            who = ", ".join(seen[:3]) + (f" +{len(seen) - 3} more" if len(seen) > 3 else "")
+            out.append(
+                f"skipped {len(rs)} {scheme}: refs for {ws}: {reason} "
+                f"(from {who}; --verbose lists them)"
+            )
+    return out
+
+
+def _print_sync(
+    report: sync.Report, dry_run: bool, quiet_when_empty: bool = False, verbose: bool = False
+) -> None:
     verb = "would add" if dry_run else "added"
     notable = [r for r in report.skipped if r["reason"] != "already an anchor"]
     if quiet_when_empty and not (report.added or notable or report.warnings or report.retracted):
@@ -276,10 +314,15 @@ def _print_sync(report: sync.Report, dry_run: bool, quiet_when_empty: bool = Fal
     for r in report.retracted:
         print(f"{gone_verb} {r['ref']} from {r['workstream']}: {r['reason']}; {r['how']}")
     have = sum(1 for r in report.skipped if r["reason"] == "already an anchor")
-    for r in notable:
-        print(
-            f"skipped {r['ref']} for {r['workstream']}: {r['reason']} ({r['session']} {r['how']})"
-        )
+    if verbose:
+        for r in notable:
+            print(
+                f"skipped {r['ref']} for {r['workstream']}: {r['reason']} "
+                f"({r['session']} {r['how']})"
+            )
+    else:
+        for line in _fold_skips(notable):
+            print(line)
     if not quiet_when_empty:
         print(
             f"{len(report.added)} {verb}, {have} already anchored"
@@ -328,7 +371,7 @@ def cmd_sync(args) -> int:
     )
     if args.json:
         return _emit_json({**report.to_dict(), "dry_run": args.dry_run})
-    _print_sync(report, dry_run=args.dry_run)
+    _print_sync(report, dry_run=args.dry_run, verbose=args.verbose)
     return 0
 
 
@@ -884,6 +927,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--ancillary",
         action="store_true",
         help="also sync ancillary sessions (default: sessions that hold or held a claim)",
+    )
+    sp.add_argument(
+        "--verbose",
+        action="store_true",
+        help="list every skipped ref (default: repeats are folded into one line per workstream)",
     )
     common(sp, session=True)
     sp.set_defaults(fn=cmd_sync)
