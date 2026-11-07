@@ -366,6 +366,45 @@ _WT_CLI_RE = re.compile(r"(?:^|[;&|(]\s*|\s)wt\s+(new|rm)\b(?:\s+([^\s;&|)-][^\s
 _GIT_WT_ARG_OPTS = {"-b", "-B", "--reason"}
 
 
+def shell_unresolved(path: str) -> bool:
+    """True for a path the shell would have rewritten before git saw it: an
+    unexpanded `$VAR`, a backtick, or a `~` that is not the first character.
+
+    These come from reading a command's text rather than running it
+    (`cd $R && git worktree add …`, a path quoted in backticks), so they name
+    worktrees that never existed. Reporting them as "no longer exists" reads as
+    a removed worktree, so they are dropped before they become candidates.
+    """
+    return "$" in path or "`" in path or "/~/" in path or path.endswith("/~")
+
+
+def expand_home(path: str) -> str:
+    """Expand `~` and `$HOME` / `${HOME}`, and no other variable.
+
+    Every other variable belonged to the session's shell, which the reader does
+    not have; expanding it with the reader's own environment would invent a
+    path. HOME is the same user on the same machine, so it is safe.
+    """
+    for var in ("${HOME}", "$HOME"):
+        if path == var or path.startswith(var + "/"):
+            path = "~" + path[len(var) :]
+    return os.path.expanduser(path)
+
+
+_CD_RE = re.compile(r"(?:^|&&|;|\|\||\n)\s*cd\s+(\"[^\"]*\"|'[^']*'|[^\s;&|]+)")
+
+
+def cwd_after_cd(prefix: str, cwd: str) -> Optional[str]:
+    """The directory a command runs in after the `cd`s before it on the same
+    command line, or None when one of them cannot be resolved (`cd $R`)."""
+    for m in _CD_RE.finditer(prefix):
+        target = expand_home(m.group(1).strip("\"'"))
+        if shell_unresolved(target):
+            return None
+        cwd = os.path.normpath(os.path.join(cwd or "/", target))
+    return cwd
+
+
 def _git_worktree_path(command: str, verb: str, cwd: str, git_c: Optional[str]) -> Optional[str]:
     """The path operand of `git worktree add|remove`, made absolute."""
     m = re.search(rf"\bworktree\s+{verb}\b(.*)", command)
@@ -385,10 +424,11 @@ def _git_worktree_path(command: str, verb: str, cwd: str, git_c: Optional[str]) 
             continue
         if tok.startswith("-"):
             continue
-        base = Path(git_c) if git_c else Path(cwd or "/")
+        base = Path(expand_home(git_c)) if git_c else Path(cwd or "/")
         if not base.is_absolute():
             base = Path(cwd or "/") / base
-        return os.path.normpath(str(base / os.path.expanduser(tok)))
+        path = os.path.normpath(str(base / expand_home(tok)))
+        return None if shell_unresolved(path) else path
     return None
 
 
@@ -398,13 +438,20 @@ def _bash_workspace_events(call: _ToolCall, at: Instant) -> list[WorkspaceEvent]
     out = []
     for m in _GIT_WT_RE.finditer(command):
         verb = m.group(2)
+        # `cd $R && git worktree add x` runs in $R, not the hook's cwd; an
+        # unresolvable cd leaves the path unknown rather than wrong.
+        base = cwd_after_cd(command[: m.start()], ev.cwd)
         out.append(
             WorkspaceEvent(
                 at=at,
                 session_id=ev.session_id,
                 kind=verb,
                 via="git",
-                path=_git_worktree_path(command[m.start() :], verb, ev.cwd, m.group(1)),
+                path=(
+                    _git_worktree_path(command[m.start() :], verb, base, m.group(1))
+                    if base is not None
+                    else None
+                ),
                 command=command,
             )
         )
