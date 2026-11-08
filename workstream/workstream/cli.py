@@ -984,6 +984,9 @@ def cmd_hook(args) -> int:
     if not isinstance(payload, dict):
         payload = {}
     sid = payload.get("session_id") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if sid and "WEFT_ACTOR" not in os.environ:
+        # The payload names the session outright; a hook's environment may not.
+        os.environ["WEFT_ACTOR"] = store._holder(f"claude:{sid}")
     if args.event == "SessionEnd":
         if not sid:
             return _emit_json({"recorded": [], "skipped": []})

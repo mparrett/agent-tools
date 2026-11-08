@@ -4,6 +4,9 @@ Every call shells out to `weft <cmd> ... --json` with a timeout, and branches
 on weft's exit code, never its stderr (weft's own contract). The environment
 passes through untouched, so `WEFT_HOME`, `WEFT_ACTOR` and `WEFT_NS` reach
 weft as the caller set them; `actor=` overrides `WEFT_ACTOR` for one call.
+With neither, a call made inside a Claude Code session is attributed to that
+session (`_default_actor`), and one from a plain terminal falls to weft's own
+default, the git email.
 
 Shapes this module relies on (checked against weft on 2026-11-02):
 - `add`, `ref add`, `release`, `ls`: `{"nodes": [node, ...]}`; `release` adds
@@ -32,6 +35,7 @@ Shapes this module relies on (checked against weft on 2026-11-02):
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import subprocess
@@ -231,12 +235,50 @@ def in_windows(at: Optional[datetime], windows: Optional[list[Window]]) -> bool:
 # --- plumbing ---------------------------------------------------------------
 
 
+def _default_actor() -> Optional[str]:
+    """The Claude Code session running this command, as a claim holder.
+
+    Without it every write an agent made, a sync's inferred refs included,
+    was recorded as the human's git email, so a person's sweep and an agent's
+    sync could not be told apart in the log. Claude Code sets the variable in
+    every Bash call, which reaches the CLI with no hook or install step; a
+    plain terminal has none. A command a person types through `!` inside a
+    session is attributed to the session; WEFT_ACTOR overrides that."""
+    sid = _session_for_actor(os.environ.get("CLAUDE_CODE_SESSION_ID") or None)
+    return _holder(f"claude:{sid}") if sid else None
+
+
+@functools.lru_cache(maxsize=4)
+def _session_for_actor(env_sid: Optional[str]) -> Optional[str]:
+    """The live session this process belongs to, or None.
+
+    The same resolution `_me` uses (seam.me_session_id), with one difference:
+    an inherited id the live registry does not hold is dropped rather than
+    trusted. A tmux pane or job started from a session keeps its
+    CLAUDE_CODE_SESSION_ID after the session ends, and a person typing there
+    is not that agent. Cached: a sync makes hundreds of weft calls, and the
+    lookup can walk the process table."""
+    try:
+        registry = seam.live_registry()
+        sid = seam.me_session_id(registry)
+    except Exception:
+        return env_sid
+    if sid and registry and sid not in {r.get("sessionId") for r in registry}:
+        return None
+    return sid
+
+
 def _run(args: list[str], *, timeout: Optional[float] = None, actor: Optional[str] = None) -> dict:
     timeout = TIMEOUT if timeout is None else timeout
     cmd = [seam.weft_bin(), *args, "--json"]
     env = dict(os.environ)
     if actor:
         env["WEFT_ACTOR"] = actor
+    elif "WEFT_ACTOR" not in env:
+        # Present but empty is a choice too: weft then uses its own default.
+        default = _default_actor()
+        if default:
+            env["WEFT_ACTOR"] = default
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     except FileNotFoundError as e:
