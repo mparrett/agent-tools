@@ -313,6 +313,7 @@ transcript records and rounding to 15 minutes.
 | weft | `~/.weft` | `WEFT_HOME`, binary via `WORKSTREAM_WEFT_BIN` |
 | project-docs | `~/projects-new/project-docs/docs` | `WORKSTREAM_DOCS_ROOT` |
 | gh cache | `$XDG_CACHE_HOME/workstream` | `WORKSTREAM_CACHE_DIR` |
+| weft actor | `agent:claude:<sid>` inside a Claude Code session (`CLAUDE_CODE_SESSION_ID`), else weft's git email | `WEFT_ACTOR` |
 
 Missing stores degrade to warnings. Only the hook swallows errors outright.
 

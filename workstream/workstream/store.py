@@ -4,6 +4,9 @@ Every call shells out to `weft <cmd> ... --json` with a timeout, and branches
 on weft's exit code, never its stderr (weft's own contract). The environment
 passes through untouched, so `WEFT_HOME`, `WEFT_ACTOR` and `WEFT_NS` reach
 weft as the caller set them; `actor=` overrides `WEFT_ACTOR` for one call.
+With neither, a call made inside a Claude Code session is attributed to that
+session (`_default_actor`), and one from a plain terminal falls to weft's own
+default, the git email.
 
 Shapes this module relies on (checked against weft on 2026-11-02):
 - `add`, `ref add`, `release`, `ls`: `{"nodes": [node, ...]}`; `release` adds
@@ -231,10 +234,24 @@ def in_windows(at: Optional[datetime], windows: Optional[list[Window]]) -> bool:
 # --- plumbing ---------------------------------------------------------------
 
 
+def _default_actor() -> Optional[str]:
+    """The Claude Code session running this command, as a claim holder.
+
+    Without it every write an agent made, a sync's inferred refs included,
+    was recorded as the human's git email, so a person's sweep and an agent's
+    sync could not be told apart in the log. Claude Code sets the variable in
+    every Bash call, which reaches the CLI with no hook or install step; a
+    plain terminal has none. A command a person types through `!` inside a
+    session is attributed to the session; WEFT_ACTOR overrides that."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    return _holder(f"claude:{sid}") if sid else None
+
+
 def _run(args: list[str], *, timeout: Optional[float] = None, actor: Optional[str] = None) -> dict:
     timeout = TIMEOUT if timeout is None else timeout
     cmd = [seam.weft_bin(), *args, "--json"]
     env = dict(os.environ)
+    actor = actor or env.get("WEFT_ACTOR") or _default_actor()
     if actor:
         env["WEFT_ACTOR"] = actor
     try:
