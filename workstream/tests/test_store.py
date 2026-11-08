@@ -546,29 +546,33 @@ def test_actor_and_home_pass_through(tmp_path, monkeypatch):
     assert store._run(["ls"], actor="agent:override")["actor"] == "agent:override"
 
 
+SID = "5f9a501e-0000-4000-8000-000000000001"
+
+
 @pytest.mark.parametrize(
-    "weft_actor, sid, expected",
+    "weft_actor, sid, live, expected",
     [
-        (
-            None,
-            "5f9a501e-0000-4000-8000-000000000001",
-            "agent:claude:5f9a501e-0000-4000-8000-000000000001",
-        ),
-        # An explicit WEFT_ACTOR still wins over the session.
-        (
-            "user:someone@example.com",
-            "5f9a501e-0000-4000-8000-000000000001",
-            "user:someone@example.com",
-        ),
+        (None, SID, [SID], f"agent:claude:{SID}"),
+        # An explicit WEFT_ACTOR still wins over the session...
+        ("user:someone@example.com", SID, [SID], "user:someone@example.com"),
+        # ...and so does an empty one, which leaves weft to its git email.
+        ("", SID, [SID], ""),
         # A plain terminal leaves it unset, so weft falls back to the git email.
-        (None, None, ""),
+        (None, None, [], ""),
+        # An id inherited by a pane that outlived its session is not trusted.
+        (None, SID, ["0cab49de-4493-5070-863d-915ba50a111b"], ""),
     ],
 )
-def test_actor_defaults_to_the_calling_session(tmp_path, monkeypatch, weft_actor, sid, expected):
+def test_actor_defaults_to_the_calling_session(
+    tmp_path, monkeypatch, weft_actor, sid, live, expected
+):
     _fake_weft(tmp_path, monkeypatch, 'printf \'{"nodes": [], "actor": "%s"}\' "$WEFT_ACTOR"')
+    registry = [{"pid": 1_000_000 + i, "sessionId": s} for i, s in enumerate(live)]
+    monkeypatch.setattr(seam, "live_registry", lambda *a, **k: registry)
     for var, value in (("WEFT_ACTOR", weft_actor), ("CLAUDE_CODE_SESSION_ID", sid)):
         if value is None:
             monkeypatch.delenv(var, raising=False)
         else:
             monkeypatch.setenv(var, value)
+    monkeypatch.delenv("CLAUDE_PID", raising=False)
     assert store._run(["ls"])["actor"] == expected

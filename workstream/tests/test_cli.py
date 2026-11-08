@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 from collections import Counter
@@ -516,6 +517,9 @@ def test_session_end_records_per_workstream_then_skips(env, capsys, monkeypatch)
         assert fresh.id in [s["id"] for s in cap["sessions"]]
         names.add(cap["workstream"]["name"])
     assert names == {"default-track", "side-one"}
+    # The hook's weft writes name the ending session, from the payload.
+    log = Path(os.environ["WEFT_HOME"]) / "log.jsonl"
+    assert json.loads(log.read_text().splitlines()[-1])["by"] == f"agent:claude:{fresh.id}"
     # Written through a temp file and renamed; nothing half-written is left.
     assert not list(Path(d["recorded"][0]).parent.glob("*.tmp"))
     ws = store.get("default-track")
