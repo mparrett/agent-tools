@@ -1172,21 +1172,45 @@ def brief_line(b: Brief) -> str:
 def slug_for(
     ws: Workstream, sfs: list[SessionFrontier], root: Path, explicit: Optional[str] = None
 ) -> str:
-    """The project-docs slug: the one asked for, else the basename of the repo
-    the workstream's sessions worked in most, if a docs dir exists for it,
-    else `_shared`."""
+    """The project-docs slug: the one asked for; else the one the newest
+    capture was recorded under, so a slug chosen once with `--record --slug`
+    sticks; else the basename of the repo the workstream's sessions worked in
+    most, if a docs dir exists for it; else `_shared`.
+
+    The repo holding `root` is never counted. It is where notes about other
+    projects go, and it has a docs dir named after itself, so a session that
+    commits many notes would otherwise file its work under the docs repo."""
     if explicit:
         return explicit
+    recorded = _capture_slug(ws, root)
+    if recorded:
+        return recorded
+    docs = root.resolve()
     counts: dict[str, int] = {}
     for s in sfs:
         for r in s.facts.repos:
-            counts[os.path.basename(r.rstrip("/"))] = (
-                counts.get(os.path.basename(r.rstrip("/")), 0) + 1
-            )
+            rp = Path(r).resolve()
+            if rp == docs or rp in docs.parents:
+                continue
+            name = os.path.basename(r.rstrip("/"))
+            counts[name] = counts.get(name, 0) + 1
     for name, _ in sorted(counts.items(), key=lambda kv: -kv[1]):
         if (root / name).is_dir():
             return name
     return "_shared"
+
+
+def _capture_slug(ws: Workstream, root: Path) -> Optional[str]:
+    """The slug of the newest capture still on disk under `root`, read from
+    its path (`<slug>/workstreams/<name>/captures/<file>`)."""
+    newest = newest_capture(_capture_paths(ws))
+    if newest is None:
+        return None
+    try:
+        parts = Path(newest[0]).resolve().relative_to(root.resolve()).parts
+    except ValueError:
+        return None
+    return parts[0] if len(parts) >= 3 and parts[1] == "workstreams" else None
 
 
 def to_dict(fr: Frontier) -> dict:
