@@ -1,5 +1,8 @@
 """Reader for hooklog's `hook_events.log`: lifecycle, messages, workspaces.
 
+The log comes from claude-hook-logger (github.com/mparrett/claude-hook-logger)
+and is optional: callers get `None` without it and use transcript evidence alone.
+
 hooklog appends one `{"timestamp", "hook_data"}` line per Claude Code hook
 event and rotates `hook_events.log` -> `.1` (kept plain so it can be grepped)
 -> `.N.gz`. Its timestamps are naive local time across zone changes, so every
