@@ -368,6 +368,50 @@ def test_slug_for(tmp_path):
     assert F.slug_for(w, sfs, tmp_path, explicit="pinned") == "pinned"
 
 
+def test_slug_for_skips_the_docs_repo(tmp_path):
+    docs_repo = tmp_path / "notes"
+    root = docs_repo / "docs"
+    (docs_repo / ".git").mkdir(parents=True)
+    (root / "notes").mkdir(parents=True)
+    (root / "orchard").mkdir()
+    (root / tmp_path.name).mkdir()
+    sfs = [
+        sf(repos=[str(docs_repo), str(docs_repo), "/a/orchard"]),
+        sf(sid=S2, repos=[str(docs_repo)]),
+    ]
+    assert F.slug_for(ws(), sfs, root) == "orchard"
+    # Only the repo holding the docs root is skipped, not its ancestors.
+    outside = [sf(repos=[str(tmp_path), str(tmp_path), "/a/orchard"])]
+    assert F.slug_for(ws(), outside, root) == tmp_path.name
+
+    # A capture already filed under the docs repo's slug does not pin it.
+    cap = root / "notes" / "workstreams" / "w" / "captures" / "a.json"
+    cap.parent.mkdir(parents=True)
+    cap.write_text("{}")
+    assert F.slug_for(ws("mixer-seam", f"frontier:{cap}"), sfs, root) == "orchard"
+
+
+def test_slug_for_follows_the_newest_capture(tmp_path):
+    (tmp_path / "orchard").mkdir()
+    sfs = [sf(repos=["/a/orchard"])]
+
+    def cap(slug, stamp, mtime):
+        p = tmp_path / slug / "workstreams" / "w" / "captures" / f"{stamp}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}")
+        os.utime(p, (mtime, mtime))
+        return f"frontier:{p}"
+
+    old, new = cap("orchard", "a", 1_000), cap("grove", "b", 2_000)
+    w = ws("mixer-seam", old, new)
+    assert F.slug_for(w, sfs, tmp_path) == "grove"
+    assert F.prose_path(w, sfs, tmp_path) == tmp_path / "grove" / "workstreams" / f"{w.name}.md"
+    # An explicit slug still wins; a capture gone from disk no longer counts.
+    assert F.slug_for(w, sfs, tmp_path, explicit="pinned") == "pinned"
+    Path(new.partition(":")[2]).unlink()
+    assert F.slug_for(w, sfs, tmp_path) == "orchard"
+
+
 def _frontier(sessions, name="mixer-seam") -> Frontier:
     w = ws(name)
     return Frontier(

@@ -1172,21 +1172,55 @@ def brief_line(b: Brief) -> str:
 def slug_for(
     ws: Workstream, sfs: list[SessionFrontier], root: Path, explicit: Optional[str] = None
 ) -> str:
-    """The project-docs slug: the one asked for, else the basename of the repo
-    the workstream's sessions worked in most, if a docs dir exists for it,
-    else `_shared`."""
+    """The project-docs slug: the one asked for; else the one the newest
+    capture was recorded under, so a slug chosen once with `--record --slug`
+    sticks; else the basename of the repo the workstream's sessions worked in
+    most, if a docs dir exists for it; else `_shared`.
+
+    The repo holding `root` is never counted. It is where notes about other
+    projects go, and it has a docs dir named after itself, so a session that
+    commits many notes would otherwise file its work under the docs repo."""
     if explicit:
         return explicit
+    docs_repo = _repo_holding(root)
+    # The docs repo's slug and `_shared` are fallbacks, not choices: a
+    # capture filed under either before this rule existed must not pin them.
+    recorded = _capture_slug(ws, root)
+    if recorded and recorded not in ("_shared", docs_repo.name if docs_repo else None):
+        return recorded
     counts: dict[str, int] = {}
     for s in sfs:
         for r in s.facts.repos:
-            counts[os.path.basename(r.rstrip("/"))] = (
-                counts.get(os.path.basename(r.rstrip("/")), 0) + 1
-            )
+            if docs_repo is not None and Path(r).resolve() == docs_repo:
+                continue
+            name = os.path.basename(r.rstrip("/"))
+            counts[name] = counts.get(name, 0) + 1
     for name, _ in sorted(counts.items(), key=lambda kv: -kv[1]):
         if (root / name).is_dir():
             return name
     return "_shared"
+
+
+def _repo_holding(root: Path) -> Optional[Path]:
+    """The git checkout that contains `root`, or None. Only that repo is left
+    out of the count; its ancestors (home, a projects dir) are not repos."""
+    for p in (root.resolve(), *root.resolve().parents):
+        if (p / ".git").exists():
+            return p
+    return None
+
+
+def _capture_slug(ws: Workstream, root: Path) -> Optional[str]:
+    """The slug of the newest capture still on disk under `root`, read from
+    its path (`<slug>/workstreams/<name>/captures/<file>`)."""
+    newest = newest_capture(_capture_paths(ws))
+    if newest is None:
+        return None
+    try:
+        parts = Path(newest[0]).resolve().relative_to(root.resolve()).parts
+    except ValueError:
+        return None
+    return parts[0] if len(parts) >= 3 and parts[1] == "workstreams" else None
 
 
 def to_dict(fr: Frontier) -> dict:
