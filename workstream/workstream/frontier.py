@@ -1182,15 +1182,16 @@ def slug_for(
     commits many notes would otherwise file its work under the docs repo."""
     if explicit:
         return explicit
+    docs_repo = _repo_holding(root)
+    # The docs repo's slug and `_shared` are fallbacks, not choices: a
+    # capture filed under either before this rule existed must not pin them.
     recorded = _capture_slug(ws, root)
-    if recorded:
+    if recorded and recorded not in ("_shared", docs_repo.name if docs_repo else None):
         return recorded
-    docs = root.resolve()
     counts: dict[str, int] = {}
     for s in sfs:
         for r in s.facts.repos:
-            rp = Path(r).resolve()
-            if rp == docs or rp in docs.parents:
+            if docs_repo is not None and Path(r).resolve() == docs_repo:
                 continue
             name = os.path.basename(r.rstrip("/"))
             counts[name] = counts.get(name, 0) + 1
@@ -1198,6 +1199,15 @@ def slug_for(
         if (root / name).is_dir():
             return name
     return "_shared"
+
+
+def _repo_holding(root: Path) -> Optional[Path]:
+    """The git checkout that contains `root`, or None. Only that repo is left
+    out of the count; its ancestors (home, a projects dir) are not repos."""
+    for p in (root.resolve(), *root.resolve().parents):
+        if (p / ".git").exists():
+            return p
+    return None
 
 
 def _capture_slug(ws: Workstream, root: Path) -> Optional[str]:

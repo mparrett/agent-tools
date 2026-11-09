@@ -371,13 +371,24 @@ def test_slug_for(tmp_path):
 def test_slug_for_skips_the_docs_repo(tmp_path):
     docs_repo = tmp_path / "notes"
     root = docs_repo / "docs"
+    (docs_repo / ".git").mkdir(parents=True)
     (root / "notes").mkdir(parents=True)
     (root / "orchard").mkdir()
+    (root / tmp_path.name).mkdir()
     sfs = [
         sf(repos=[str(docs_repo), str(docs_repo), "/a/orchard"]),
         sf(sid=S2, repos=[str(docs_repo)]),
     ]
     assert F.slug_for(ws(), sfs, root) == "orchard"
+    # Only the repo holding the docs root is skipped, not its ancestors.
+    outside = [sf(repos=[str(tmp_path), str(tmp_path), "/a/orchard"])]
+    assert F.slug_for(ws(), outside, root) == tmp_path.name
+
+    # A capture already filed under the docs repo's slug does not pin it.
+    cap = root / "notes" / "workstreams" / "w" / "captures" / "a.json"
+    cap.parent.mkdir(parents=True)
+    cap.write_text("{}")
+    assert F.slug_for(ws("mixer-seam", f"frontier:{cap}"), sfs, root) == "orchard"
 
 
 def test_slug_for_follows_the_newest_capture(tmp_path):
