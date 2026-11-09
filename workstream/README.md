@@ -8,9 +8,10 @@ rebuild that by searching transcripts and two sessions do not take the same
 PR.
 
 weft holds the identity: a `workstream` node whose refs are its sessions and
-anchors. This tool reads the transcript store, the hooklog and git for the
-evidence, and writes prose nowhere: the frontier a person steers by lives in
-project-docs and is written by an agent following the `workstream` skill.
+anchors. This tool reads the transcript store, git and, when present, the hook
+log for the evidence, and writes prose nowhere: the frontier a person steers by
+lives in project-docs and is written by an agent following the `workstream`
+skill.
 
 ```
 workstream match   [--session SID]                 ranked candidates, with the evidence
@@ -33,8 +34,8 @@ Every command takes `--json`. Refs: `claude:<sid>` · `agent:<parent>/<id>` ·
 
 ## Setup
 
-Four pieces, from the agent-tools checkout you run tools from (the read-only
-clone, where there is one):
+Four pieces, and an optional fifth, from the agent-tools checkout you run tools
+from (the read-only clone, where there is one):
 
 1. **`weft` on PATH**, built from [mparrett/weft](https://github.com/mparrett/weft).
    Everything here reads and writes the weft store. Every build of the public
@@ -62,6 +63,18 @@ clone, where there is one):
 4. **The skill**: `just link-skills ~/.claude/skills` links
    `claude-code-skills/workstream`, which tells a session when to attach and
    how to resume from a frontier.
+5. **Optional: a hook log**, from
+   [mparrett/claude-hook-logger](https://github.com/mparrett/claude-hook-logger),
+   registered on every hook event. It appends each event to
+   `~/logs/claude-hooks/hook_events.log`, which workstream reads for evidence
+   the transcripts don't hold: worktrees a session entered, its starts, ends
+   and compactions, and messages it exchanged with other sessions.
+
+   Without it nothing fails and nothing warns, but the evidence is thinner.
+   `sync` misses worktree and branch anchors that only the log recorded: a
+   worktree made by `just wt`, or an EnterWorktree whose path the transcript
+   does not carry. `match` ranks on fewer reasons, and `frontier` lists fewer
+   loose ends.
 
 Check it with `workstream ls` (lists open workstreams, or nothing on an empty
 store) and by starting a session: the candidate block appears under
