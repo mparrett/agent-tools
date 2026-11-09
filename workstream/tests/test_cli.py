@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -962,6 +963,36 @@ def test_sync_verbose_lists_every_skip(capsys):
     out = capsys.readouterr().out
     assert out.count("skipped wt:/w/alpha/wt/") == 5
     assert "--verbose lists them" not in out
+
+
+@needs_weft
+@pytest.mark.parametrize("argv", [["ls"], ["sync", "--dry-run"]])
+def test_ls_and_sync_say_when_there_is_no_hook_log(env, capsys, monkeypatch, tmp_path, argv):
+    monkeypatch.setenv("CLAUDE_HOOK_LOG_DIR", str(tmp_path / "no-log"))
+    code, out, err = run(capsys, *argv)
+    assert code == 0 and "no hook log under" in err and "no hook log" not in out
+    code, out, err = run(capsys, *argv, "--json")
+    assert code == 0 and "no hook log" not in err
+    json.loads(out)
+
+
+@needs_weft
+def test_no_hook_log_hint_when_the_log_is_current(env, capsys, monkeypatch, tmp_path):
+    (tmp_path / "hook_events.log").write_text("")
+    monkeypatch.setenv("CLAUDE_HOOK_LOG_DIR", str(tmp_path))
+    code, _, err = run(capsys, "ls")
+    assert code == 0 and "hook log" not in err
+
+
+@needs_weft
+def test_a_hook_log_that_stopped_growing_is_reported(env, capsys, monkeypatch, tmp_path):
+    log = tmp_path / "hook_events.log"
+    log.write_text("")
+    old = time.time() - 30 * 86400
+    os.utime(log, (old, old))
+    monkeypatch.setenv("CLAUDE_HOOK_LOG_DIR", str(tmp_path))
+    code, _, err = run(capsys, "ls")
+    assert code == 0 and "was last written 30 days ago" in err
 
 
 def _review_report():

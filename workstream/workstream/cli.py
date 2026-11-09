@@ -81,6 +81,36 @@ def _load_log(since=RECENT_WINDOW):
         return None
 
 
+HOOKLOG_STALE = timedelta(days=7)
+
+
+def _hooklog_hint() -> None:
+    """One stderr line when the hook log is missing or has stopped growing.
+    Nothing fails without it, so the readers stay quiet, which left a person
+    never learning that evidence only the log records was being missed. A
+    logger that was unregistered leaves its old files behind, so the newest
+    file's age is the test, not whether one exists. Only the commands a person
+    runs by hand say it, and never into --json."""
+    where = seam.hooklog_dir()
+    newest = None
+    for f in hooklog.log_files():
+        try:
+            newest = max(newest or 0.0, f.stat().st_mtime)
+        except OSError:
+            continue
+    if newest is None:
+        problem = f"no hook log under {where}"
+    else:
+        age = timedelta(seconds=time.time() - newest)
+        if age < HOOKLOG_STALE:
+            return
+        problem = f"the hook log under {where} was last written {age.days} days ago"
+    sys.stderr.write(
+        f"workstream: {problem}, so some worktrees and session events go unseen"
+        " (README: Setup, claude-hook-logger)\n"
+    )
+
+
 def _recent_facts(log, workstreams) -> list[sessions.SessionFacts]:
     """Full facts for every session attached anywhere, so overlap signals have
     something to compare against; the cheap pass leaves those fields empty."""
@@ -372,6 +402,8 @@ def cmd_sync(args) -> int:
         log=_load_log(),
         history=everything,
     )
+    if not args.json:
+        _hooklog_hint()
     if args.interactive:
         return _sync_interactive(targets, run, _console(args), verbose=args.verbose)
     report = sync.run(targets, dry_run=args.dry_run, **run)
@@ -837,6 +869,7 @@ def cmd_ls(args) -> int:
     wss = store.list_workstreams(args.since, include_closed=args.all)
     if args.json:
         return _emit_json([asdict(w) for w in wss])
+    _hooklog_hint()
     for ws in wss:
         n = sum(1 for r in ws.refs if r.partition(":")[0] in ("claude", "codex", "agent"))
         live = len(ws.canonical_holders())
