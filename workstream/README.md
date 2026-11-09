@@ -70,10 +70,11 @@ from (the read-only clone, where there is one):
    the transcripts don't hold: worktrees a session entered, its starts, ends
    and compactions, and messages it exchanged with other sessions.
 
-   Without it nothing fails and nothing warns. `sync` adds the same anchors
-   (worktrees come from the transcript too) but cannot name the entries it
-   skipped, `match` ranks on fewer reasons below its top candidate, and
-   `frontier` lists fewer loose ends.
+   Without it nothing fails and nothing warns, but the evidence is thinner.
+   `sync` misses worktree and branch anchors that only the log recorded: a
+   worktree made by `just wt`, or an EnterWorktree whose path the transcript
+   does not carry. `match` ranks on fewer reasons, and `frontier` lists fewer
+   loose ends.
 
 Check it with `workstream ls` (lists open workstreams, or nothing on an empty
 store) and by starting a session: the candidate block appears under

@@ -1,7 +1,9 @@
 """Reader for hooklog's `hook_events.log`: lifecycle, messages, workspaces.
 
 The log comes from claude-hook-logger (github.com/mparrett/claude-hook-logger)
-and is optional: callers get `None` without it and use transcript evidence alone.
+and is optional. A missing file loads as an empty `HookLog`, with a warning in
+`HookLog.warnings` that no command prints; callers that catch a failed load
+(cli._load_log, frontier.build) pass `None` on instead.
 
 hooklog appends one `{"timestamp", "hook_data"}` line per Claude Code hook
 event and rotates `hook_events.log` -> `.1` (kept plain so it can be grepped)
