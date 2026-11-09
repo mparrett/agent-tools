@@ -81,6 +81,19 @@ def _load_log(since=RECENT_WINDOW):
         return None
 
 
+def _hooklog_hint() -> None:
+    """One stderr line when no hook log exists. Nothing fails without it, so
+    the readers stay quiet, which left a person never learning that worktree
+    anchors only the log records were being missed. Only the commands a
+    person runs by hand say it, and never into --json."""
+    if hooklog.log_files():
+        return
+    sys.stderr.write(
+        f"workstream: no hook log under {seam.hooklog_dir()}; worktrees only it records"
+        " go unanchored (see Setup: claude-hook-logger)\n"
+    )
+
+
 def _recent_facts(log, workstreams) -> list[sessions.SessionFacts]:
     """Full facts for every session attached anywhere, so overlap signals have
     something to compare against; the cheap pass leaves those fields empty."""
@@ -372,6 +385,8 @@ def cmd_sync(args) -> int:
         log=_load_log(),
         history=everything,
     )
+    if not args.json:
+        _hooklog_hint()
     if args.interactive:
         return _sync_interactive(targets, run, _console(args), verbose=args.verbose)
     report = sync.run(targets, dry_run=args.dry_run, **run)
@@ -837,6 +852,7 @@ def cmd_ls(args) -> int:
     wss = store.list_workstreams(args.since, include_closed=args.all)
     if args.json:
         return _emit_json([asdict(w) for w in wss])
+    _hooklog_hint()
     for ws in wss:
         n = sum(1 for r in ws.refs if r.partition(":")[0] in ("claude", "codex", "agent"))
         live = len(ws.canonical_holders())

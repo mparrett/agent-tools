@@ -964,6 +964,23 @@ def test_sync_verbose_lists_every_skip(capsys):
     assert "--verbose lists them" not in out
 
 
+@needs_weft
+@pytest.mark.parametrize("argv", [["ls"], ["sync", "--dry-run"]])
+def test_ls_and_sync_say_when_there_is_no_hook_log(env, capsys, monkeypatch, tmp_path, argv):
+    monkeypatch.setenv("CLAUDE_HOOK_LOG_DIR", str(tmp_path / "no-log"))
+    code, out, err = run(capsys, *argv)
+    assert code == 0 and "no hook log under" in err and "no hook log" not in out
+    code, out, err = run(capsys, *argv, "--json")
+    assert code == 0 and "no hook log" not in err
+    json.loads(out)
+
+
+@needs_weft
+def test_no_hook_log_hint_when_the_log_exists(env, capsys):
+    code, _, err = run(capsys, "ls")
+    assert code == 0 and "no hook log" not in err
+
+
 def _review_report():
     from workstream import sync
 

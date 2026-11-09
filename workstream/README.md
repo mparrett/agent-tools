@@ -34,7 +34,7 @@ Every command takes `--json`. Refs: `claude:<sid>` · `agent:<parent>/<id>` ·
 
 ## Setup
 
-Four pieces, and an optional fifth, from the agent-tools checkout you run tools
+Four pieces, and a recommended fifth, from the agent-tools checkout you run tools
 from (the read-only clone, where there is one):
 
 1. **`weft` on PATH**, built from [mparrett/weft](https://github.com/mparrett/weft).
@@ -63,18 +63,19 @@ from (the read-only clone, where there is one):
 4. **The skill**: `just link-skills ~/.claude/skills` links
    `claude-code-skills/workstream`, which tells a session when to attach and
    how to resume from a frontier.
-5. **Optional: a hook log**, from
+5. **Recommended: a hook log**, from
    [mparrett/claude-hook-logger](https://github.com/mparrett/claude-hook-logger),
    registered on every hook event. It appends each event to
    `~/logs/claude-hooks/hook_events.log`, which workstream reads for evidence
    the transcripts don't hold: worktrees a session entered, its starts, ends
    and compactions, and messages it exchanged with other sessions.
 
-   Without it nothing fails and nothing warns, but the evidence is thinner.
+   Without it nothing fails, but the evidence is thinner.
    `sync` misses worktree and branch anchors that only the log recorded: a
    worktree made by `just wt`, or an EnterWorktree whose path the transcript
    does not carry. `match` ranks on fewer reasons, and `frontier` lists fewer
-   loose ends.
+   loose ends. `workstream ls` and `workstream sync` say so on stderr when no
+   log is found; `--json` output stays clean.
 
 Check it with `workstream ls` (lists open workstreams, or nothing on an empty
 store) and by starting a session: the candidate block appears under
