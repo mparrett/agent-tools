@@ -75,7 +75,7 @@ from (the read-only clone, where there is one):
    worktree made by `just wt`, or an EnterWorktree whose path the transcript
    does not carry. `match` ranks on fewer reasons, and `frontier` lists fewer
    loose ends. `workstream ls` and `workstream sync` say so on stderr when no
-   log is found; `--json` output stays clean.
+   log is found or none was written in a week; `--json` output stays clean.
 
 Check it with `workstream ls` (lists open workstreams, or nothing on an empty
 store) and by starting a session: the candidate block appears under
