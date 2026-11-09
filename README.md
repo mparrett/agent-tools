@@ -33,7 +33,7 @@ Most tools started life in sibling repos and were collected here.
 | [`board`](board/README.md) | A work board for people and agents sharing a repo: one markdown card per owner per piece of work on a branch that is never merged, with the branch's generated `README.md` as the board. Writes push straight to the branch and survive concurrent writers; contested and stale cards are marked. |
 | [`workstream`](workstream/README.md) | A durable identity for a piece of work across Claude Code sessions, subagents, Codex rollouts and the PRs, branches and worktrees they touch, held in weft. A SessionStart hook matches a new session to its workstream; `frontier` says where the last session stopped and what to resume; `sync` accrues anchors from the evidence sessions acted in; `close` is the human assertion that the work is done. |
 
-A companion hook, [`claude-hook-logger`](https://github.com/mparrett/claude-hook-logger), lives in its own repo because it is a compiled Go binary: it logs every Claude Code hook event to a rotating JSONL file in ~3 ms, and installs with `go install`.
+A companion hook, [`claude-hook-logger`](https://github.com/mparrett/claude-hook-logger), lives in its own repo because it is a compiled Go binary: it logs every Claude Code hook event to a rotating JSONL file and installs with `go install`.
 
 `claude-graph` is the exception to the single-script rule above: it reads
 `claude-ls.py` through an import seam, so it ships as a package with its own
