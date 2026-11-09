@@ -43,7 +43,7 @@ without one, it is:
 uv run --directory claude-graph claude-graph
 ```
 
-A companion hook, [`claude-hook-logger`](https://github.com/mparrett/claude-hook-logger), is not here at all: it lives in its own repo because it is a compiled Go binary: it logs every Claude Code hook event to a rotating JSONL file and installs with `go install`.
+A companion hook, [`claude-hook-logger`](https://github.com/mparrett/claude-hook-logger), lives in its own repo rather than here because it is a compiled Go binary. It logs every Claude Code hook event to a rotating JSONL file and installs with `go install`.
 
 ## Usage
 
