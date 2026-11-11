@@ -57,6 +57,15 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 [data-tip] { cursor: default; }
 .sess { cursor: copy; }
 svg a { cursor: pointer; }
+.pick { position: relative; }
+.menu { position: absolute; z-index: 5; top: calc(100% + 4px); left: 0; min-width: 300px; max-width: calc(100vw - 32px); max-height: 60vh; overflow: auto; background: var(--panel); border: 1px solid var(--faint); border-radius: 8px; padding: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
+.menu .bar { display: flex; gap: 6px; padding: 2px 4px 6px; border-bottom: 1px solid var(--grid); margin-bottom: 4px; }
+.menu label { display: flex; gap: 6px; align-items: center; padding: 3px 4px; color: var(--ink); border-radius: 4px; }
+.menu label:hover { background: var(--bg); }
+.menu label .n { color: var(--muted); font-size: 11px; }
+.menu .only { margin-left: auto; font-size: 11px; padding: 0 6px; }
+.labels .ws { font-weight: 600; padding: 0 10px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--faint); border-top: 1px solid var(--faint); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.labels .ws .caret { color: var(--muted); width: 10px; }
 @media (max-width: 640px) { .board { grid-template-columns: 110px 1fr; } .labels .row .d { display: none; } }
 </style>
 </head>
@@ -67,7 +76,10 @@ svg a { cursor: pointer; }
     <span class="sub" id="meta"></span>
   </header>
   <div class="controls">
-    <select id="pick" aria-label="Workstream"></select>
+    <div class="pick">
+      <button id="pickbtn" aria-haspopup="true" aria-expanded="false"></button>
+      <div class="menu" id="menu" hidden></div>
+    </div>
     <button id="zin" title="Zoom in">+</button>
     <button id="zout" title="Zoom out">−</button>
     <button id="zfit" title="Fit to width">Fit</button>
@@ -83,7 +95,7 @@ svg a { cursor: pointer; }
 <script>
 const DATA = JSON.parse(document.getElementById('data').textContent);
 
-const AXIS_H = 38, GROUP_H = 20, ANCHOR_H = 52, SESSION_H = 46;
+const AXIS_H = 38, WS_H = 30, GROUP_H = 20, ANCHOR_H = 52, SESSION_H = 46;
 const GAP_MS = 90 * 60e3;      // idle stretches longer than this collapse when compressing
 const BREAK_PX = 34, PAD_PX = 24;
 const NOW = Date.parse(DATA.generated_at);
@@ -107,7 +119,11 @@ let store = {};
 try { store = JSON.parse(localStorage.getItem('ws-timeline') || '{}'); } catch {}
 const save = () => { try { localStorage.setItem('ws-timeline', JSON.stringify(store)); } catch {} };
 
-const state = { idx: 0, compress: store.compress ?? true, tools: store.tools ?? false, zoom: 1 };
+// `sel` holds indices into DATA.workstreams, kept in DATA order; `collapsed` holds names.
+const state = { sel: [0], collapsed: new Set(), compress: store.compress ?? true, tools: store.tools ?? false, zoom: 1 };
+const nameOf = (i) => DATA.workstreams[i].frontier.workstream.name || DATA.workstreams[i].frontier.workstream.id;
+const models = new Map();
+const modelOf = (i) => models.get(i) || models.set(i, model(DATA.workstreams[i])).get(i);
 
 function model(show) {
   const F = show.frontier;
@@ -122,15 +138,19 @@ function model(show) {
 
   // Per-session extras drawn from the timeline, which carries 8-char ids in its prose.
   const extra = new Map(top.map((s) => [s.id, { opening: '', lifecycle: [], prompts: [] }]));
+  // Rows open with `claude:<id>`, `codex:<id>`, `agent:<parent>/<id>` or a
+  // bare 8-char id; a subagent's row belongs to its parent's lane.
   const ownerOf = (text) => {
-    const m = /^(?:[a-z]+:)?([0-9a-f]{8})/.exec(text);
+    const m = /^(?:[a-z]+:)?(?:[0-9a-f-]+\/)?([0-9a-f]{8})/.exec(text);
     const s = m && by8.get(m[1]);
-    return s ? extra.get(rowOf(s.id)) : null;
+    return s ? { e: extra.get(rowOf(s.id)), own: rowOf(s.id) === s.id } : null;
   };
   for (const [at, kind, text] of F.timeline || []) {
-    const e = ownerOf(text);
-    if (!e) continue;
-    if (kind === 'session') e.opening = text.replace(/^.*?started \([^)]*\):\s*/, '');
+    const o = ownerOf(text);
+    if (!o || !o.e) continue;
+    const e = o.e;
+    // Only the lane's own session names it; a subagent starting must not.
+    if (kind === 'session' && o.own) e.opening = text.replace(/^.*?started \([^)]*\):\s*/, '');
     if (kind === 'lifecycle') e.lifecycle.push({ t: ts(at), text });
     if (kind === 'prompt') e.prompts.push({ t: ts(at), text: text.replace(/^[0-9a-f]{8}:\s*/, '') });
   }
@@ -141,6 +161,8 @@ function model(show) {
     e.prompts = [...(s.human_prompts || []).map(([at, text]) => ({ t: ts(at), text })), ...e.prompts]
       .filter((p) => { const k = Math.round(p.t / 60e3); if (seen.has(k)) return false; seen.add(k); return true; })
       .sort((a, b) => a.t - b.t);
+    // A session that started before the timeline's window has no start row.
+    if (!e.opening && e.prompts.length) e.opening = e.prompts[0].text;
   }
 
   const anchors = (F.anchors || []).map((a) => {
@@ -158,18 +180,21 @@ function model(show) {
   return { F, top, subs, extra, anchors, repos, messages, byId };
 }
 
-function scaleFor(M, pph) {
+// One scale across every model drawn, so lanes from different workstreams line up.
+function scaleFor(Ms, pph) {
   const pts = [];
   const push = (t) => { if (!isNaN(t)) pts.push(t); };
-  for (const s of M.top) {
-    push(ts(s.started)); push(s.live ? NOW : ts(s.last_seen));
-    for (const p of M.extra.get(s.id).prompts) push(p.t);
-    for (const [at] of s.last_tools || []) push(ts(at));
-    for (const c of M.subs.get(s.id) || []) { push(ts(c.started)); push(ts(c.last_seen)); }
+  for (const M of Ms) {
+    for (const s of M.top) {
+      push(ts(s.started)); push(s.live ? NOW : ts(s.last_seen));
+      for (const p of M.extra.get(s.id).prompts) push(p.t);
+      for (const [at] of s.last_tools || []) push(ts(at));
+      for (const c of M.subs.get(s.id) || []) { push(ts(c.started)); push(ts(c.last_seen)); }
+    }
+    for (const a of M.anchors) push(a.t);
+    for (const m of M.messages) push(m.t);
+    for (const [at] of M.F.timeline || []) push(ts(at));
   }
-  for (const a of M.anchors) push(a.t);
-  for (const m of M.messages) push(m.t);
-  for (const [at] of M.F.timeline || []) push(ts(at));
   pts.sort((a, b) => a - b);
   const uniq = pts.filter((t, i) => i === 0 || t !== pts[i - 1]);
   if (!uniq.length) uniq.push(NOW);
@@ -196,8 +221,8 @@ function scaleFor(M, pph) {
   return { X, segs, width: x + PAD_PX + 60, t0, tEnd };
 }
 
-function activeHours(M) {
-  const s = scaleFor(M, 1);
+function activeHours(Ms) {
+  const s = scaleFor(Ms, 1);
   return Math.max(0.25, s.segs.filter((g) => !g.broken).reduce((h, g) => h + (g.t1 - g.t0) / 3.6e6, 0));
 }
 
@@ -233,36 +258,68 @@ function axis(sc, pph) {
 }
 
 function render() {
-  const show = DATA.workstreams[state.idx];
-  const M = model(show);
-  const W = M.F.workstream;
-  $('title').textContent = W.title || W.name;
-  const live = M.top.filter((s) => s.live).length;
-  $('meta').innerHTML = `<code>${esc(W.name)}</code> · ${esc(W.state)} · ${M.top.length} sessions${live ? ` · <span class="chip live">${live} live</span>` : ''} · as of ${esc(M.F.as_of)}`;
-  document.title = `${W.name} · Workstream Timeline`;
+  const Ms = state.sel.map(modelOf);
+  const multi = Ms.length > 1;
+  const sessionsOf = (M) => M.top.length, liveOf = (M) => M.top.filter((s) => s.live).length;
+  const nSess = Ms.reduce((n, M) => n + sessionsOf(M), 0), nLive = Ms.reduce((n, M) => n + liveOf(M), 0);
+  const liveChip = nLive ? ` · <span class="chip live">${nLive} live</span>` : '';
+  if (multi) {
+    $('title').textContent = `${Ms.length} workstreams`;
+    $('meta').innerHTML = `${nSess} sessions${liveChip} · generated ${esc(fmtTime(NOW))}`;
+    document.title = 'Workstream Timeline';
+  } else {
+    const W = Ms[0].F.workstream;
+    $('title').textContent = W.title || W.name;
+    $('meta').innerHTML = `<code>${esc(W.name)}</code> · ${esc(W.state)} · ${nSess} sessions${liveChip} · as of ${esc(Ms[0].F.as_of)}`;
+    document.title = `${W.name} · Workstream Timeline`;
+  }
+  pickLabel();
 
+  // Collapsed workstreams keep their header but leave the scale, so their
+  // activity does not stretch the axis.
+  const shown = Ms.filter((M) => !(multi && state.collapsed.has(M.F.workstream.name)));
+  const scaled = shown.length ? shown : Ms;
   const scrollEl = document.querySelector('.scroll');
   const avail = (scrollEl?.clientWidth || $('board').clientWidth - 260) - 2 * PAD_PX - 60;
-  const breaks = scaleFor(M, 1).segs.filter((g) => g.broken).length * BREAK_PX;
-  const fit = Math.max(4, (avail - breaks) / activeHours(M));
+  const breaks = scaleFor(scaled, 1).segs.filter((g) => g.broken).length * BREAK_PX;
+  const fit = Math.max(4, (avail - breaks) / activeHours(scaled));
   const pph = fit * state.zoom;
-  const sc = scaleFor(M, pph);
+  const sc = scaleFor(scaled, pph);
   const X = sc.X;
 
-  // Rows: anchor lanes per repo, then one lane per top-level session.
+  // Rows, per workstream: a header when several are shown, anchor lanes per
+  // repo, then one lane per top-level session. A session attached to two
+  // workstreams gets a lane in each, so lanes are keyed by workstream too.
   const rows = [];
-  if (M.repos.length) { rows.push({ kind: 'group', h: GROUP_H, text: 'Anchors' }); for (const r of M.repos) rows.push({ kind: 'repo', h: ANCHOR_H, repo: r }); }
-  rows.push({ kind: 'group', h: GROUP_H, text: 'Sessions' });
-  for (const s of M.top) rows.push({ kind: 'session', h: SESSION_H, s });
+  Ms.forEach((M, wi) => {
+    const name = M.F.workstream.name;
+    if (multi) {
+      rows.push({ kind: 'ws', h: WS_H, M });
+      if (state.collapsed.has(name)) return;
+    }
+    if (M.repos.length) { rows.push({ kind: 'group', h: GROUP_H, text: 'Anchors' }); for (const r of M.repos) rows.push({ kind: 'repo', h: ANCHOR_H, repo: r, M }); }
+    rows.push({ kind: 'group', h: GROUP_H, text: 'Sessions' });
+    for (const s of M.top) rows.push({ kind: 'session', h: SESSION_H, s, M, wi });
+  });
   let y = AXIS_H;
   const rowY = new Map();
-  for (const r of rows) { r.y = y; y += r.h; if (r.s) rowY.set(r.s.id, r.y + 15); }
+  for (const r of rows) { r.y = y; y += r.h; if (r.s) rowY.set(`${r.wi}:${r.s.id}`, r.y + 15); }
   const H = y + 8;
 
   const labels = [`<div style="height:${AXIS_H}px;border-bottom:1px solid var(--grid)"></div>`];
   const svg = [`<svg width="${sc.width}" height="${H}" xmlns="http://www.w3.org/2000/svg">`, axis(sc, pph)];
 
   for (const r of rows) {
+    const M = r.M;
+    if (r.kind === 'ws') {
+      const W = M.F.workstream, closed = state.collapsed.has(W.name), live = liveOf(M);
+      labels.push(`<div class="ws" style="height:${r.h}px" data-ws="${esc(W.name)}" data-tip="${esc(`${W.title}\n${W.name} · ${W.state}\n${closed ? 'click to expand' : 'click to collapse'}`)}">`
+        + `<span class="caret">${closed ? '▸' : '▾'}</span><span style="overflow:hidden;text-overflow:ellipsis">${esc(W.name)}</span>`
+        + `<span class="chip${live ? ' live' : ''}">${live ? `${live} live` : `${sessionsOf(M)}`}</span></div>`);
+      svg.push(`<rect x="0" y="${r.y}" width="100%" height="${r.h}" fill="var(--panel)"/><line x1="0" x2="100%" y1="${r.y}" y2="${r.y}" stroke="var(--faint)"/><line x1="0" x2="100%" y1="${r.y + r.h}" y2="${r.y + r.h}" stroke="var(--faint)"/>`);
+      svg.push(`<text class="wstitle" x="8" y="${r.y + 19}" style="fill:var(--ink);font-size:12px">${esc(short(W.title, 120))}</text>`);
+      continue;
+    }
     if (r.kind === 'group') {
       labels.push(`<div class="group" style="height:${r.h}px">${esc(r.text)}</div>`);
       svg.push(`<rect x="0" y="${r.y}" width="100%" height="${r.h}" fill="var(--bg)" opacity=".6"/>`);
@@ -322,10 +379,14 @@ function render() {
     }
   }
 
-  for (const m of M.messages) {
-    const x = X(m.t), ya = rowY.get(m.fromRow);
+  // Messages stay inside their workstream's lanes; a message between two
+  // workstreams shows in each one that holds both ends.
+  const messages = [];
+  Ms.forEach((M, wi) => { if (!(multi && state.collapsed.has(M.F.workstream.name))) for (const m of M.messages) messages.push({ m, wi }); });
+  for (const { m, wi } of messages) {
+    const x = X(m.t), ya = rowY.get(`${wi}:${m.fromRow}`);
     if (ya == null) continue;
-    const yb = m.toRow ? rowY.get(m.toRow) : null;
+    const yb = m.toRow ? rowY.get(`${wi}:${m.toRow}`) : null;
     const tip = esc(`${fmtTime(m.t)} message${m.how ? ` (${m.how})` : ''}\n${m.from.slice(0, 8)} → ${m.to ? m.to.slice(0, 8) : `${m.to_raw} (unresolved)`}\n${m.summary}`);
     if (yb == null || yb === ya) {
       svg.push(`<g data-tip="${tip}"><line x1="${x}" x2="${x}" y1="${ya}" y2="${ya - 13}" stroke="var(--message)" stroke-width="1.5" stroke-dasharray="${yb == null ? '2 2' : ''}"/><circle cx="${x}" cy="${ya - 14}" r="2.5" fill="var(--message)"/></g>`);
@@ -339,20 +400,38 @@ function render() {
   const left = document.querySelector('.scroll')?.scrollLeft;
   $('board').innerHTML = `<div class="labels">${labels.join('')}</div><div class="scroll">${svg.join('')}</div>`;
   const sc2 = document.querySelector('.scroll');
+  // Header titles ride along with horizontal scroll so they stay readable.
+  const pin = () => { for (const t of sc2.querySelectorAll('.wstitle')) t.setAttribute('x', sc2.scrollLeft + 8); };
+  sc2.addEventListener('scroll', pin, { passive: true });
   if (left != null && state.keepScroll) sc2.scrollLeft = left; else sc2.scrollLeft = sc2.scrollWidth;
   state.keepScroll = false;
+  pin();
 
-  details(M);
+  if (multi) summaries(Ms); else details(Ms[0]);
+}
+
+// Repeated lines (one per unresolved message, say) collapse to a count.
+const list = (items) => {
+  const counts = new Map();
+  for (const i of items) counts.set(i, (counts.get(i) || 0) + 1);
+  return `<ul>${[...counts].map(([i, n]) => `<li>${i}${n > 1 ? ` <span class="chip">×${n}</span>` : ''}</li>`).join('')}</ul>`;
+};
+
+function summaries(Ms) {
+  $('details').innerHTML = Ms.map((M) => {
+    const F = M.F, W = F.workstream, rec = F.recommendation;
+    const facts = [
+      rec ? `next: <b>${esc(rec.action)}</b> <code>${esc((rec.session_id || '').slice(0, 8))}</code>` : '',
+      `${(F.loose_ends || []).length} loose ends · ${(F.closure_blockers || []).length} closure blockers`,
+      `${M.anchors.length} anchors · ${(F.tasks || []).length} tasks`,
+    ].filter(Boolean);
+    return `<div class="card"><h2>${esc(W.name)}</h2><p style="margin:0 0 6px">${esc(W.title)}</p>${list(facts)}`
+      + `<button data-only="${esc(W.name)}" style="margin-top:6px">show only this</button></div>`;
+  }).join('');
 }
 
 function details(M) {
   const F = M.F, cards = [];
-  // Repeated lines (one per unresolved message, say) collapse to a count.
-  const list = (items) => {
-    const counts = new Map();
-    for (const i of items) counts.set(i, (counts.get(i) || 0) + 1);
-    return `<ul>${[...counts].map(([i, n]) => `<li>${i}${n > 1 ? ` <span class="chip">×${n}</span>` : ''}</li>`).join('')}</ul>`;
-  };
   const rec = F.recommendation;
   if (rec) cards.push(`<div class="card"><h2>Recommendation</h2><p style="margin:0 0 6px"><b>${esc(rec.action)}</b> <code>${esc((rec.session_id || '').slice(0, 8))}</code></p>${list((rec.why || []).map(esc))}</div>`);
   if ((F.loose_ends || []).length) cards.push(`<div class="card"><h2>Loose ends</h2>${list(F.loose_ends.map(esc))}</div>`);
@@ -374,16 +453,68 @@ function legend() {
     + `<span>generated ${esc(fmtTime(NOW))}</span>`;
 }
 
+function pickLabel() {
+  const n = state.sel.length;
+  $('pickbtn').textContent = `${n === 1 ? nameOf(state.sel[0]) : n === DATA.workstreams.length ? `all ${n} workstreams` : `${n} workstreams`} ▾`;
+}
+
+// The hash names what is shown: `#a,b`, or `#*` for every workstream.
+function selFromHash() {
+  const raw = decodeURIComponent(location.hash.slice(1));
+  if (raw === '*') return DATA.workstreams.map((_, i) => i);
+  const want = new Set(raw.split(',').filter(Boolean));
+  const sel = DATA.workstreams.map((_, i) => i).filter((i) => want.has(nameOf(i)));
+  return sel.length ? sel : [0];
+}
+
+function select(sel) {
+  state.sel = sel.length ? [...new Set(sel)].sort((a, b) => a - b) : [state.sel[0]];
+  state.zoom = 1;
+  const hash = state.sel.length === DATA.workstreams.length && DATA.workstreams.length > 1 ? '*' : state.sel.map(nameOf).join(',');
+  if (decodeURIComponent(location.hash.slice(1)) !== hash) history.replaceState(null, '', `#${encodeURIComponent(hash).replace(/%2C/g, ',')}`);
+  for (const box of $('menu').querySelectorAll('input[data-i]')) box.checked = state.sel.includes(+box.dataset.i);
+  render();
+}
+
 function init() {
-  const pick = $('pick');
-  pick.innerHTML = DATA.workstreams.map((w, i) => {
-    const W = w.frontier.workstream, n = (w.frontier.sessions || []).filter((s) => s.kind !== 'subagent').length;
-    return `<option value="${i}">${esc(W.name)} — ${n} session${n === 1 ? '' : 's'}</option>`;
-  }).join('');
-  const fromHash = DATA.workstreams.findIndex((w) => w.frontier.workstream.name === decodeURIComponent(location.hash.slice(1)));
-  state.idx = fromHash >= 0 ? fromHash : 0;
-  pick.value = state.idx;
-  pick.onchange = () => { state.idx = +pick.value; state.zoom = 1; location.hash = DATA.workstreams[state.idx].frontier.workstream.name; render(); };
+  const menu = $('menu'), btn = $('pickbtn');
+  menu.innerHTML = `<div class="bar"><button data-all>all</button><button data-none>first only</button></div>`
+    + DATA.workstreams.map((w, i) => {
+      const n = (w.frontier.sessions || []).filter((s) => s.kind !== 'subagent').length;
+      const live = (w.frontier.sessions || []).filter((s) => s.kind !== 'subagent' && s.live).length;
+      return `<label><input type="checkbox" data-i="${i}"><span>${esc(nameOf(i))}</span>`
+        + `<span class="n">${n} session${n === 1 ? '' : 's'}${live ? ` · ${live} live` : ''}</span>`
+        + `<button class="only" data-only-i="${i}" title="show only this one">only</button></label>`;
+    }).join('');
+  const open = (v) => { menu.hidden = !v; btn.setAttribute('aria-expanded', String(v)); };
+  btn.onclick = (ev) => { ev.stopPropagation(); open(menu.hidden); };
+  document.addEventListener('click', (ev) => { if (!menu.hidden && !ev.target.closest('.pick')) open(false); });
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') open(false); });
+  menu.addEventListener('change', (ev) => {
+    const i = +ev.target.dataset.i;
+    select(ev.target.checked ? [...state.sel, i] : state.sel.filter((j) => j !== i));
+  });
+  menu.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (t.matches('[data-all]')) select(DATA.workstreams.map((_, i) => i));
+    else if (t.matches('[data-none]')) select([0]);
+    else if (t.matches('[data-only-i]')) { ev.preventDefault(); select([+t.dataset.onlyI]); open(false); }
+  });
+  document.addEventListener('click', (ev) => {
+    const ws = ev.target.closest('[data-ws]');
+    if (ws) {
+      const n = ws.dataset.ws;
+      state.collapsed.has(n) ? state.collapsed.delete(n) : state.collapsed.add(n);
+      state.keepScroll = true;
+      render();
+      return;
+    }
+    const only = ev.target.closest('[data-only]');
+    if (only) { select(DATA.workstreams.map((_, i) => i).filter((i) => nameOf(i) === only.dataset.only)); scrollTo(0, 0); }
+  });
+  state.sel = selFromHash();
+  for (const box of menu.querySelectorAll('input[data-i]')) box.checked = state.sel.includes(+box.dataset.i);
+  window.onhashchange = () => select(selFromHash());
   $('compress').checked = state.compress;
   $('tools').checked = state.tools;
   $('compress').onchange = (e) => { state.compress = store.compress = e.target.checked; save(); render(); };
@@ -391,7 +522,6 @@ function init() {
   $('zin').onclick = () => { state.zoom *= 1.6; state.keepScroll = true; render(); };
   $('zout').onclick = () => { state.zoom = Math.max(0.1, state.zoom / 1.6); state.keepScroll = true; render(); };
   $('zfit').onclick = () => { state.zoom = 1; render(); };
-  window.onhashchange = () => { const i = DATA.workstreams.findIndex((w) => w.frontier.workstream.name === decodeURIComponent(location.hash.slice(1))); if (i >= 0 && i !== state.idx) { state.idx = i; pick.value = i; render(); } };
   let rz; window.onresize = () => { clearTimeout(rz); rz = setTimeout(render, 150); };
 
   const tip = $('tip');

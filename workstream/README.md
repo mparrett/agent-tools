@@ -36,8 +36,10 @@ Every command takes `--json`. Refs: `claude:<sid>` · `agent:<parent>/<id>` ·
 `timeline` writes a self-contained page (default
 `$XDG_CACHE_HOME/workstream/timeline.html`) with a lane per session, per-repo
 anchor lanes, messages drawn between sessions, and idle gaps over 90 minutes
-collapsed. It embeds each workstream's `show --json`, so it is a snapshot:
-rerun it to refresh.
+collapsed. Any set of the embedded workstreams can be shown together on one
+time axis, each under a header that folds it away; the URL hash names the set
+(`#a,b`, or `#*` for all). It embeds each workstream's `show --json`, so it is
+a snapshot: rerun it to refresh.
 
 ## Setup
 
