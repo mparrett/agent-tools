@@ -13,6 +13,9 @@ regex, then enrich the selected set with comments and PR metadata. Writes:
   <data>/enrich.json                 per node: comments (author, date, body), PR
                                      base/head/merged/reviews/closing issues
 
+A relative `data_dir` in the config is relative to the config file; `--data` is
+relative to the cwd.
+
 `--preview` stops after the search and writes nothing. Scoring reads only the
 title, labels and body, all of which the search already returned, so a preview
 costs two `gh search` calls per repo whatever the theme selects (each paginates
@@ -107,6 +110,12 @@ def split_pages(text):
 
 def repo_slug(repo):
     return repo.replace("/", "__")
+
+
+def config_relative(cfg_file, path):
+    """Paths written in the config resolve against the config's directory, not the
+    shell's cwd: a build run from another checkout otherwise writes into that one."""
+    return os.path.join(os.path.dirname(os.path.abspath(cfg_file)), os.path.expanduser(path))
 
 
 def load_config(path):
@@ -311,7 +320,7 @@ def main():
     data = (
         sys.argv[sys.argv.index("--data") + 1]
         if "--data" in sys.argv
-        else cfg.get("data_dir", "data")
+        else config_relative(sys.argv[1], cfg.get("data_dir", "data"))
     )
     os.makedirs(data, exist_ok=True)
     rx = re.compile(cfg["relevance"], re.I)

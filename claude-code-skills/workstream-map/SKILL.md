@@ -169,6 +169,10 @@ reports state changes and new references.
 }
 ```
 
+Relative `data_dir`, `out_html`, `out_md` and `notes_dir` resolve against the config
+file's directory, so the scripts can run from any cwd; a `--data` argument resolves
+against the cwd. The page's `data.json` and `inventory.md` land beside `out_html`.
+
 Node ids are `owner/name#N`. Labels drop the repo for `primary_repo` and keep the short
 repo name for the others (`xsofy#147`). At most 8 lanes; the palette is the validated
 categorical set from the dataviz skill.

@@ -5,7 +5,9 @@ Usage: build.py <config.json> [--data DIR] [--date YYYY-MM-DD]
 
 Reads <data>/items-*.json, selected.json, enrich.json (from fetch.py) and the
 config's judgment tables (lanes, overrides, start_here, notes_dir), then writes
-the HTML map (out_html) and the markdown inventory (out_md). Node id is
+the HTML map (out_html) and the markdown inventory (out_md). Paths in the
+config (data_dir, out_html, out_md, notes_dir) are relative to the config file;
+--data is relative to the cwd. Node id is
 "owner/name#N"; edges are #-references found in bodies and comments, both
 directions, restricted to nodes in the map.
 """
@@ -61,6 +63,12 @@ def script_json(obj):
     """JSON for an inline <script>: `</script>` in a title would end the data script
     and start an attacker's, so escape the characters that can form tags."""
     return json.dumps(obj).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def config_relative(cfg_file, path):
+    """Paths written in the config resolve against the config's directory, not the
+    shell's cwd: a build run from another checkout otherwise writes into that one."""
+    return os.path.join(os.path.dirname(os.path.abspath(cfg_file)), os.path.expanduser(path))
 
 
 def write_text(path, text):
@@ -119,9 +127,15 @@ def report(nodes, lane_reason, cited_outside, cfg, lanes, items, top=10):
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    cfg = json.load(open(sys.argv[1]))
+    cfg_file = sys.argv[1]
+    cfg = json.load(open(cfg_file))
     argv = sys.argv
-    data = argv[argv.index("--data") + 1] if "--data" in argv else cfg.get("data_dir", "data")
+    # --data is a command-line path, so it stays relative to the cwd like any other
+    data = (
+        argv[argv.index("--data") + 1]
+        if "--data" in argv
+        else config_relative(cfg_file, cfg.get("data_dir", "data"))
+    )
     # "2026-09-15 04:30 UTC" by default; --date accepts any string (tests pass a bare date)
     today = (
         argv[argv.index("--date") + 1]
@@ -147,7 +161,8 @@ def main():
 
     # optional: notes that mention a node (e.g. an agent memory dir)
     notes = collections.defaultdict(set)
-    notes_dir = os.path.expanduser(cfg.get("notes_dir", "") or "")
+    notes_dir = cfg.get("notes_dir", "") or ""
+    notes_dir = notes_dir and config_relative(cfg_file, notes_dir)
     if notes_dir and os.path.isdir(notes_dir):
         res = make_ref_resolver(repos)
         for path in glob.glob(os.path.join(notes_dir, "*.md")):
@@ -311,7 +326,7 @@ def main():
                 f"| [{n['label']}]({n['url']}) | {'PR' if n['pr'] else 'issue'} | {n['state']} | {n['created']} | {md_cell(n['author'])} | {md_cell(n['title'][:90])} | {rel} | {md_cell(', '.join(n['notes'][:3]))} |"
             )
         md.append("")
-    out_md = write_text(cfg["out_md"], "\n".join(md))
+    out_md = write_text(config_relative(cfg_file, cfg["out_md"]), "\n".join(md))
 
     # ---- HTML
     tpl = open(os.path.join(HERE, "..", "template.html")).read()
@@ -324,7 +339,7 @@ def main():
         .replace("__SUBTITLE__", html.escape(cfg.get("subtitle", "")))
         .replace("__TODAY__", html.escape(today))
     )
-    out_html = write_text(cfg["out_html"], page)
+    out_html = write_text(config_relative(cfg_file, cfg["out_html"]), page)
     # agent-consumable copies next to the page, under fixed names the header links to
     side = os.path.dirname(out_html)
     write_text(os.path.join(side, "data.json"), json.dumps(out, indent=1))

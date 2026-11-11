@@ -235,6 +235,34 @@ def _build_into(d, **out):
     return d, r
 
 
+def test_config_paths_resolve_against_the_config_not_the_cwd(tmp_path):
+    """A build run from another checkout wrote the page, inventory and data.json into
+    that checkout. Paths in the config belong to the config's directory."""
+    cfg_dir, elsewhere = tmp_path / "map", tmp_path / "elsewhere"
+    (cfg_dir / "data").mkdir(parents=True)
+    elsewhere.mkdir()
+    d = cfg_dir / "data"
+    json.dump({1: item(1, "alpha only")}, open(d / "items-o__main.json", "w"))
+    json.dump({9: item(9, "beta")}, open(d / "items-o__side.json", "w"))
+    json.dump({"o/main": [1], "o/side": [9]}, open(d / "selected.json", "w"))
+    json.dump(
+        {"o/main#1": {"comments": [], "pr": None}, "o/side#9": {"comments": [], "pr": None}},
+        open(d / "enrich.json", "w"),
+    )
+    cfg = dict(CONFIG, data_dir="data", out_html="out/map.html", out_md="out/map.md")
+    json.dump(cfg, open(cfg_dir / "config.json", "w"))
+    r = subprocess.run(
+        [sys.executable, str(BUILD), str(cfg_dir / "config.json"), "--date", "2026-09-15"],
+        capture_output=True,
+        text=True,
+        cwd=elsewhere,
+    )
+    assert r.returncode == 0, r.stderr
+    out = cfg_dir / "out"
+    assert {p.name for p in out.iterdir()} == {"map.html", "map.md", "data.json", "inventory.md"}
+    assert list(elsewhere.iterdir()) == [], "nothing lands in the cwd"
+
+
 def test_the_report_names_the_nodes_no_lane_rule_matched(built):
     """#4 matches no lane regex and lands in default_lane; #1 matched and #3 is an
     override, so neither is a config question and neither belongs in the list."""
