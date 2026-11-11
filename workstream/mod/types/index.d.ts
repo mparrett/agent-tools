@@ -13,9 +13,12 @@ export type FrontierView = {
   asOf: string | null
 }
 
+// owner: this session holds the workstream's live canonical claim
+export type Attachment = { name: string; owner: boolean }
+
 export type WorkstreamView = {
   // null until the first lookup answers; [] means attached to none
-  attached: string[] | null
+  attached: Attachment[] | null
   frontiers: FrontierView[]
   error: string | null
   isLoading: boolean

@@ -1,8 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { FrontierView, WorkstreamView } from '../types'
-import { asOfLabel, attachedNames, badgeText, frontierView, touchesWorkstream } from './model'
+import type { Attachment, FrontierView, WorkstreamView } from '../types'
+import { asOfLabel, attachments, badgeMode, badgeText, frontierView, roleLabel, touchesWorkstream } from './model'
+import type { BadgeMode } from './model'
 
 const PANE = 'workstream'
 const COMMAND = 'workstream-pane'
@@ -14,7 +15,11 @@ const FRONTIER_EVERY_MS = 5 * 60_000
 
 const INITIAL: WorkstreamView = { attached: null, frontiers: [], error: null, isLoading: false }
 // Change the tag when WorkstreamView's fields change: a value outlives a reload.
-const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-1' })
+const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-2' })
+
+// Where the badge goes, from the `badge` option. Options are fixed for an
+// activation; a change reloads the plugin and runs `register` again.
+let mode: BadgeMode = 'status'
 
 // The CLI beside this mod, not one found on PATH: a session started without an
 // interactive parent shell may not have ~/bin on PATH, and this copy always
@@ -35,16 +40,16 @@ async function isPaneOpen($: EngineInterface): Promise<boolean> {
 
 async function refresh($: EngineInterface, withFrontier: boolean): Promise<void> {
   await update($, view, v => ({ ...v, isLoading: true }))
-  let attached: string[] | null = null
+  let attached: Attachment[] | null = null
   let frontiers: FrontierView[] | undefined
   let error: string | null = null
   try {
     const sid = await $.session.id()
-    attached = attachedNames(await cli($, ['ls', '--session', sid, '--json']))
+    attached = attachments(await cli($, ['ls', '--session', sid, '--json']))
     if (withFrontier) {
       // Built aside and kept only whole: one failed frontier keeps the last good list.
       const fresh: FrontierView[] = []
-      for (const name of attached) {
+      for (const { name } of attached) {
         fresh.push(frontierView(await cli($, ['frontier', name, '--json'])))
       }
       frontiers = fresh
@@ -58,7 +63,9 @@ async function refresh($: EngineInterface, withFrontier: boolean): Promise<void>
     error,
     isLoading: false,
   }))
-  $.ui.status(badgeText(next.attached, next.error))
+  // The engine draws every plugin status line as a pinned warning (⚠, yellow);
+  // the band is the opt-in for a quieter badge. The band redraws on the write above.
+  $.ui.status(mode === 'status' ? badgeText(next.attached, next.error) : undefined)
 }
 
 // One refresh at a time: a timer firing while a slow frontier runs would
@@ -83,7 +90,9 @@ function kick($: EngineInterface, withFrontier: boolean): Promise<void> {
   return mine
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  mode = badgeMode(options.badge)
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: COMMAND,
@@ -122,6 +131,34 @@ export const register: Register = on => {
     if (touchesWorkstream(e.command)) void kick($, await isPaneOpen($))
     return ran
   }).catch(($, e, next) => next(e))
+
+  // Two colors: dim chrome and roles, the names in the theme's suggestion color.
+  // Store errors are the one thing drawn as a warning.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (mode !== 'band' || e.props.hasSurvey) return next(e)
+    const v = await read($, view)
+    if (v.attached === null && !v.error) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row">
+        <Text color="inactive">◆ ws </Text>
+        {v.attached === null ? (
+          <Text color="warning">unknown (store unreadable)</Text>
+        ) : v.attached.length === 0 ? (
+          <Text color="inactive">none</Text>
+        ) : (
+          v.attached.map((a, i) => (
+            <Text>
+              {i > 0 ? <Text color="inactive">, </Text> : null}
+              <Text color="suggestion">{a.name}</Text>
+              <Text color="inactive"> · {roleLabel(a)}</Text>
+            </Text>
+          ))
+        )}
+        {v.attached !== null && v.error ? <Text color="warning"> (stale: store unreadable)</Text> : null}
+      </Box>
+    )
+  })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)

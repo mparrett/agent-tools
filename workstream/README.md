@@ -57,10 +57,13 @@ from (the read-only clone, where there is one):
 2. **The command**: `just link ~/bin` symlinks `bin/workstream` (and every
    other tool in `bin/`) into `~/bin`; it skips what is already linked.
 3. **The hooks**, through the `workstream` plugin in `workstream/mod/`. It
-   registers both hooks, and adds a status-line badge naming the session's
-   workstreams (`workstream: <name>`, `workstream: none`) and a side pane with their frontier
-   (`/workstream-pane`; it opens by itself for an attached session where the
-   terminal is wide enough). Install it from the checkout's own marketplace:
+   registers both hooks, and adds a badge naming the session's workstreams and
+   its role in each (`workstream: <name> (owner)`, `(helping)`, `none`) and a
+   side pane with their frontier (`/workstream-pane`; it opens by itself for an
+   attached session where the terminal is wide enough). Claude Code draws a
+   plugin's status line as a yellow warning, so the `badge` option in `/config`
+   can move it to a one-row band above the prompt (`band`) or drop it (`off`).
+   Install it from the checkout's own marketplace:
 
    ```sh
    claude plugin marketplace add <checkout>
