@@ -15,7 +15,9 @@ const FRONTIER_EVERY_MS = 5 * 60_000
 
 const INITIAL: WorkstreamView = { attached: null, frontiers: [], error: null, isLoading: false }
 // Change the tag when WorkstreamView's fields change: a value outlives a reload.
-const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-2' })
+const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-3' })
+// Workstreams whose next-step instructions are unfolded in the pane, by id.
+const expanded = atom({ plugin: 'workstream', key: 'expanded' } as const, [] as string[], { shape: 'expanded-1' })
 
 // Where the badge goes, from the `badge` option. Options are fixed for an
 // activation; a change reloads the plugin and runs `register` again.
@@ -163,6 +165,13 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const v = await read($, view)
+    const open = await read($, expanded)
+    const toggle = (id: string) =>
+      // Ids no longer shown are dropped here, so the list cannot outgrow the pane.
+      update($, expanded, xs => {
+        const shown = xs.filter(x => x !== id && v.frontiers.some(f => f.id === x))
+        return xs.includes(id) ? shown : [...shown, id]
+      })
     const header = (
       <Box flexDirection="row" justifyContent="space-between">
         <Text dimColor>{v.isLoading ? 'refreshing…' : asOfLabel(v.frontiers[0]?.asOf ?? null)}</Text>
@@ -204,36 +213,68 @@ export const register: Register = (on, options) => {
             </Text>
             <Text>{f.title}</Text>
             {f.next && (
-              <Text>
-                <Text color="suggestion">next: {f.next.action}</Text>
-                {f.next.how ? <Text dimColor> · {f.next.how}</Text> : null}
-              </Text>
+              <Box flexDirection="row" justifyContent="space-between">
+                <Text>
+                  <Text color="suggestion">
+                    next: {f.next.action}
+                    {f.next.session ? ` ${f.next.session}` : ''}
+                  </Text>
+                  {f.next.why ? <Text dimColor> · {f.next.why}</Text> : null}
+                </Text>
+                {f.next.how || f.next.facts.length ? (
+                  <Button
+                    key={`how:${f.id}`}
+                    label={open.includes(f.id) ? 'how ▾' : 'how ▸'}
+                    onPress={() => toggle(f.id)}
+                  />
+                ) : null}
+              </Box>
             )}
-            {f.looseEnds.length > 0 && <Text weight="semibold">loose ends</Text>}
-            {f.looseEnds.map(l => (
-              <Text color="warning">  • {l}</Text>
-            ))}
-            {f.anchors.length > 0 && <Text weight="semibold">anchors</Text>}
-            {f.anchors.map(a => (
-              <Text>
-                {'  '}
-                <Text dimColor>{a.status.padEnd(9)}</Text>
-                {a.ref}
-              </Text>
-            ))}
-            <Text weight="semibold">sessions</Text>
-            {f.sessions.map(s => (
-              <Text>
-                {'  '}
-                {s.id} <Text dimColor>{s.role}</Text>
-                {s.live ? <Text color="success"> live</Text> : null}
-              </Text>
-            ))}
+            {f.next && open.includes(f.id) && (
+              <Box flexDirection="column">
+                {f.next.how ? <Text dimColor>  {f.next.how}</Text> : null}
+                {f.next.facts.map(x => (
+                  <Text dimColor>  • {x}</Text>
+                ))}
+              </Box>
+            )}
+            {f.looseEnds.length > 0 && (
+              <Box flexDirection="column" marginTop={1}>
+                <Text weight="semibold">loose ends</Text>
+                {f.looseEnds.map(l => (
+                  <Text color="warning">  • {l}</Text>
+                ))}
+              </Box>
+            )}
+            {f.anchors.length > 0 && (
+              <Box flexDirection="column" marginTop={1}>
+                <Text weight="semibold">anchors</Text>
+                {f.anchors.map(a => (
+                  <Text>
+                    {'  '}
+                    <Text dimColor>{a.status.padEnd(9)}</Text>
+                    {a.ref}
+                  </Text>
+                ))}
+              </Box>
+            )}
+            <Box flexDirection="column" marginTop={1}>
+              <Text weight="semibold">sessions</Text>
+              {f.sessions.map(s => (
+                <Text>
+                  {'  '}
+                  {s.id} <Text dimColor>{s.role}</Text>
+                  {s.live ? <Text color="success"> live</Text> : null}
+                </Text>
+              ))}
+            </Box>
             {f.prose && (
-              <Text dimColor>
-                prose: {f.prose.path}
-                {f.prose.exists ? '' : ' (not written yet)'}
-              </Text>
+              <Box marginTop={1}>
+                <Text dimColor>
+                  prose: {f.prose.path}
+                  {f.prose.exists ? '' : ' (not written yet)'}
+                </Text>
+              </Box>
             )}
           </Box>
         ))}

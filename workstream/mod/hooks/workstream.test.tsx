@@ -10,9 +10,12 @@ const FRONTIER = JSON.stringify({
   loose_ends: ['5d5c9a2e (canonical) has no recorded frontier'],
   anchors: [{ ref: 'gh:o/r#7', status: 'open' }],
   sessions: [{ id: '5d5c9a2e-6027-4916-bd97-eebadc8905d2', role: 'canonical', live: true }],
-  recommendation: { action: 'message' },
+  recommendation: { action: 'fresh', why: ['canonical session 5d5c9a2e is live'] },
   options: {
-    message: { how: 'SendMessage to "demo-session"' },
+    default: 'message',
+    default_why: 'canonical session 5d5c9a2e is live',
+    session_id: '5d5c9a2e-6027-4916-bd97-eebadc8905d2',
+    message: { how: 'SendMessage to "demo-session"', facts: ['last prompt 3m ago'] },
     fresh: { data: { prose_frontier: '/docs/demo.md', prose_exists: false } },
   },
 })
@@ -59,10 +62,27 @@ test('the badge says attached with a role, none, or unknown', () => {
 
 test('a frontier flattens to what the pane draws', () => {
   const f = frontierView(FRONTIER)
+  expect(f.id).toBe('abc123def4567890')
   expect(f.name).toBe('demo')
-  expect(f.next).toEqual({ action: 'message', how: 'SendMessage to "demo-session"' })
+  expect(f.next).toEqual({
+    action: 'message',
+    session: '5d5c9a2e',
+    why: 'canonical session 5d5c9a2e is live',
+    how: 'SendMessage to "demo-session"',
+    facts: ['last prompt 3m ago'],
+  })
   expect(f.sessions).toEqual([{ id: '5d5c9a2e', role: 'canonical', live: true }])
   expect(f.prose).toEqual({ path: '/docs/demo.md', exists: false })
+})
+
+test('an older frontier without options.default falls back to the recommendation', () => {
+  const d = JSON.parse(FRONTIER)
+  delete d.options.default
+  delete d.options.default_why
+  const f = frontierView(JSON.stringify(d))
+  expect(f.next?.action).toBe('fresh')
+  expect(f.next?.session).toBe('')
+  expect(f.next?.why).toBe('canonical session 5d5c9a2e is live')
 })
 
 test('the pane stamps the local time the frontier was read', () => {
@@ -126,6 +146,17 @@ test('an attached session gets the badge and a pane with its frontier', async ($
     expect(await ui.find({ type: 'Text', text: /gh:o\/r#7/ })).toBeDefined()
     await ui.unmount()
   }
+
+  // The agent's instructions stay folded behind `how` until pressed.
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /next: message 5d5c9a2e/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SendMessage to/ })).toBeUndefined()
+  await ui.press({ key: 'how:abc123def4567890' })
+  expect(await ui.find({ type: 'Text', text: /SendMessage to/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /last prompt 3m ago/ })).toBeDefined()
+  await ui.press({ key: 'how:abc123def4567890' })
+  expect(await ui.find({ type: 'Text', text: /SendMessage to/ })).toBeUndefined()
+  await ui.unmount()
 })
 
 const ok = (stdout: string) => ({

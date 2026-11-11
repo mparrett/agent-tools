@@ -45,15 +45,30 @@ export function asOfLabel(asOf: string | null): string {
 export function frontierView(json: string): FrontierView {
   const d = obj(JSON.parse(json))
   const ws = obj(d.workstream)
-  const rec = obj(d.recommendation)
-  const action = str(rec.action)
-  const option = obj(obj(d.options)[action])
-  const fresh = obj(obj(obj(d.options).fresh).data)
+  const options = obj(d.options)
+  // `options.default` names the real choice; `recommendation.action` folds
+  // `message` into `fresh` for older readers, so it is only the fallback.
+  const action = str(options.default) || str(obj(d.recommendation).action)
+  const option = obj(options[action])
+  const fresh = obj(obj(options.fresh).data)
+  // Only resume and message act on a particular session.
+  const target = action === 'resume' || action === 'message' ? str(options.session_id).slice(0, 8) : ''
   return {
+    id: str(ws.id),
     name: str(ws.name) || str(ws.id).slice(0, 12),
     title: str(ws.title),
     state: str(ws.state),
-    next: action ? { action, how: str(option.how) } : null,
+    next: action
+      ? {
+          action,
+          session: target,
+          // `why` is written for the person; `how` and `facts` are the agent's
+          // instructions, which the pane keeps folded until asked.
+          why: str(options.default_why) || arr(obj(d.recommendation).why).map(str).filter(Boolean)[0] || '',
+          how: str(option.how),
+          facts: arr(option.facts).map(str).filter(Boolean),
+        }
+      : null,
     looseEnds: arr(d.loose_ends).map(str),
     anchors: arr(d.anchors).map(a => ({ ref: str(obj(a).ref), status: str(obj(a).status) })),
     sessions: arr(d.sessions).map(s => {

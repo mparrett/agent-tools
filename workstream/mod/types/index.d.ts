@@ -2,10 +2,11 @@
 // a person reads at a glance, flattened so the drawing needs no knowledge of
 // the CLI's shapes.
 export type FrontierView = {
+  id: string
   name: string
   title: string
   state: string
-  next: { action: string; how: string } | null
+  next: { action: string; session: string; why: string; how: string; facts: string[] } | null
   looseEnds: string[]
   anchors: { ref: string; status: string }[]
   sessions: { id: string; role: string; live: boolean }[]
@@ -26,6 +27,6 @@ export type WorkstreamView = {
 
 declare module 'claude-code' {
   interface PluginState {
-    workstream: { view: Shaped<WorkstreamView> }
+    workstream: { view: Shaped<WorkstreamView>; expanded: Shaped<string[]> }
   }
 }
