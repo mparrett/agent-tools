@@ -8,14 +8,12 @@ const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : [])
 
 // `workstream ls --session SID --json` → what the badge shows: each workstream
 // by name (an unnamed one by its short id, as the CLI prints it), and whether
-// this session owns it. Owning is holding a live canonical claim; an
-// `--ancillary` attach takes none, which is what makes it "helping".
-export function attachments(lsJson: string, sid: string): Attachment[] {
-  const me = `agent:claude:${sid}`
+// this session owns it. The CLI decides ownership (`owned`: a live canonical
+// claim; an `--ancillary` attach takes none) so the badge and the CLI agree.
+export function attachments(lsJson: string): Attachment[] {
   return arr(JSON.parse(lsJson)).map(w => {
     const o = obj(w)
-    const owner = arr(o.claims).some(c => obj(c).live === true && str(obj(c).holder) === me)
-    return { name: str(o.name) || str(o.id).slice(0, 12), owner }
+    return { name: str(o.name) || str(o.id).slice(0, 12), owner: o.owned === true }
   })
 }
 
@@ -24,7 +22,9 @@ export const roleLabel = (a: Attachment): string => (a.owner ? 'owner' : 'helpin
 // The engine already heads the status line with the plugin's name, "workstream:"
 export function badgeText(attached: Attachment[] | null, error: string | null): string | undefined {
   if (attached === null) return error ? 'unknown (store unreadable)' : undefined
-  return attached.length ? attached.map(a => `${a.name} (${roleLabel(a)})`).join(', ') : 'none'
+  const text = attached.length ? attached.map(a => `${a.name} (${roleLabel(a)})`).join(', ') : 'none'
+  // A failed refresh keeps the last list; say so rather than pass it off as current.
+  return error ? `${text} (stale: store unreadable)` : text
 }
 
 export type BadgeMode = 'status' | 'band' | 'off'

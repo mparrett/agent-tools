@@ -919,17 +919,24 @@ def cmd_close(args) -> int:
 
 def cmd_ls(args) -> int:
     wss = store.list_workstreams(args.since, include_closed=args.all)
+    extra: dict[str, dict] = {}
     if args.session:
         # Membership as `match` counts it ("already attached"), without match's
         # transcript scan: the workstream mod polls this for its status badge.
         # A prefix is matched against member ids, not resolved through the store.
-        wss = [
-            w
-            for w in wss
-            if any(s.startswith(args.session) for s in attribution.Membership.of(w).sessions)
-        ]
+        matched = []
+        for w in wss:
+            sids = [s for s in attribution.Membership.of(w).sessions if s.startswith(args.session)]
+            if sids:
+                matched.append(w)
+                # `owned`: the session holds the live canonical claim (owner, not
+                # helper). Decided here, from the holder format store writes, so
+                # the badge cannot drift from what attach and frontier call canonical.
+                holders = w.canonical_holders()
+                extra[w.id] = {"owned": any(store._holder(f"claude:{s}") in holders for s in sids)}
+        wss = matched
     if args.json:
-        return _emit_json([asdict(w) for w in wss])
+        return _emit_json([{**asdict(w), **extra.get(w.id, {})} for w in wss])
     _hooklog_hint()
     for ws in wss:
         n = sum(1 for r in ws.refs if r.partition(":")[0] in ("claude", "codex", "agent"))

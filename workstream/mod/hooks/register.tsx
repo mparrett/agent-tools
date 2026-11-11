@@ -45,7 +45,7 @@ async function refresh($: EngineInterface, withFrontier: boolean): Promise<void>
   let error: string | null = null
   try {
     const sid = await $.session.id()
-    attached = attachments(await cli($, ['ls', '--session', sid, '--json']), sid)
+    attached = attachments(await cli($, ['ls', '--session', sid, '--json']))
     if (withFrontier) {
       // Built aside and kept only whole: one failed frontier keeps the last good list.
       const fresh: FrontierView[] = []
@@ -155,6 +155,7 @@ export const register: Register = (on, options) => {
             </Text>
           ))
         )}
+        {v.attached !== null && v.error ? <Text color="warning"> (stale: store unreadable)</Text> : null}
       </Box>
     )
   })

@@ -339,6 +339,17 @@ def test_ls_session_filters_to_its_workstreams(env, capsys):
     assert run_json(capsys, "ls", "--session", env["fresh"].id) == []
 
 
+@needs_weft
+def test_ls_session_says_whether_the_session_owns_each(env, capsys):
+    fresh = env["fresh"]
+    assert run(capsys, "attach", "default-track", "--ancillary", "--session", fresh.id)[0] == 0
+    [row] = run_json(capsys, "ls", "--session", fresh.id[:8])
+    assert row["owned"] is False
+    assert run(capsys, "attach", "default-track", "--session", fresh.id)[0] == 0
+    [row] = run_json(capsys, "ls", "--session", fresh.id[:8])
+    assert row["owned"] is True
+
+
 # --- tasks and close ---------------------------------------------------------
 
 

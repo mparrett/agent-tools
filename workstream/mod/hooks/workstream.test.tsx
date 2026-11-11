@@ -19,20 +19,19 @@ const FRONTIER = JSON.stringify({
 const LS = JSON.stringify([{ id: 'abc123def4567890', name: 'demo' }, { id: 'ffff0000eeee1111', name: null }])
 
 const SID = '5d5c9a2e-6027-4916-bd97-eebadc8905d2'
-const claim = (holder: string, live: boolean) => ({ holder, live })
 
 test('ls JSON gives names, an unnamed one by its short id, and who owns each', () => {
-  expect(attachments(LS, SID)).toEqual([
+  expect(attachments(LS)).toEqual([
     { name: 'demo', owner: false },
     { name: 'ffff0000eeee', owner: false },
   ])
+  // The CLI decides ownership; only a literal true counts.
   const owned = JSON.stringify([
-    { id: 'a', name: 'mine', claims: [claim(`agent:claude:${SID}`, true)] },
-    // An expired claim of ours is not ownership; neither is someone else's live one.
-    { id: 'b', name: 'lapsed', claims: [claim(`agent:claude:${SID}`, false)] },
-    { id: 'c', name: 'theirs', claims: [claim('agent:claude:other', true)] },
+    { id: 'a', name: 'mine', owned: true },
+    { id: 'b', name: 'theirs', owned: false },
+    { id: 'c', name: 'old-cli' },
   ])
-  expect(attachments(owned, SID).map(a => a.owner)).toEqual([true, false, false])
+  expect(attachments(owned).map(a => a.owner)).toEqual([true, false, false])
 })
 
 test('the badge option falls back to the status line', () => {
@@ -55,6 +54,7 @@ test('the badge says attached with a role, none, or unknown', () => {
   expect(badgeText([], null)).toBe('none')
   expect(badgeText(null, 'boom')).toBe('unknown (store unreadable)')
   expect(badgeText(null, null)).toBeUndefined()
+  expect(badgeText([{ name: 'a', owner: true }], 'boom')).toBe('a (owner) (stale: store unreadable)')
 })
 
 test('a frontier flattens to what the pane draws', () => {
@@ -233,7 +233,7 @@ function stubStart(on: On, ls: string, statuses: (string | undefined)[]) {
 test('badge "band" draws above the prompt and leaves the status line empty', { options: { badge: 'band' } }, async ($, on) => {
   const clock = mock.clock(on)
   const statuses: (string | undefined)[] = []
-  stubStart(on, JSON.stringify([{ id: 'a', name: 'demo', claims: [claim(`agent:claude:${SID}`, true)] }]), statuses)
+  stubStart(on, JSON.stringify([{ id: 'a', name: 'demo', owned: true }]), statuses)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.settle()
   expect(statuses.every(t => t === undefined)).toBe(true)
