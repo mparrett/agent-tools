@@ -243,5 +243,19 @@ def test_preview_writes_nothing_and_costs_two_calls_per_repo(monkeypatch, capsys
     assert "wrote nothing" in capsys.readouterr().out
 
 
+def test_fetch_writes_data_dir_beside_the_config_not_the_cwd(monkeypatch, tmp_path):
+    cfg_dir, elsewhere = tmp_path / "map", tmp_path / "elsewhere"
+    cfg_dir.mkdir()
+    elsewhere.mkdir()
+    json.dump(dict(PREVIEW_CFG, data_dir="data"), open(cfg_dir / "config.json", "w"))
+    monkeypatch.setattr(fetch, "search", lambda repo, user: dict(PREVIEW_ITEMS))
+    monkeypatch.setattr(fetch, "enrich_one", lambda repo, n, is_pr: {"comments": [], "pr": None})
+    monkeypatch.setattr(sys, "argv", ["fetch.py", str(cfg_dir / "config.json")])
+    monkeypatch.chdir(elsewhere)
+    fetch.main()
+    assert (cfg_dir / "data" / "selected.json").exists()
+    assert list(elsewhere.iterdir()) == [], "nothing lands in the cwd"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

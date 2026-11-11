@@ -80,9 +80,9 @@ preview and the fetch runs once.
      that repo. Set `body_cap` to 2 so a title hit is required. The histogram is the
      tell — a pile at exactly 3 with no title hits means the cap is doing the selecting.
 3. **Fetch once**, when the preview stops changing:
-   `python3 scripts/fetch.py config.json --data data/`. One to two API calls per
+   `python3 scripts/fetch.py config.json`, which writes to `data_dir`. One to two API calls per
    selected node; 200 nodes is two to three minutes.
-4. **Build and read the report.** `python3 scripts/build.py config.json --data data/`
+4. **Build and read the report.** `python3 scripts/build.py config.json`
    prints per-lane counts and then four lists, each naming the config table that fixes
    it:
    - *`include` entries not in the fetched data* — a wrong number, a deleted item, or
@@ -169,6 +169,10 @@ reports state changes and new references.
 }
 ```
 
+Relative `data_dir`, `out_html`, `out_md` and `notes_dir` resolve against the config
+file's directory, so the scripts can run from any cwd; a `--data` argument resolves
+against the cwd. The page's `data.json` and `inventory.md` land beside `out_html`.
+
 Node ids are `owner/name#N`. Labels drop the repo for `primary_repo` and keep the short
 repo name for the others (`xsofy#147`). At most 8 lanes; the palette is the validated
 categorical set from the dataviz skill.
@@ -180,6 +184,10 @@ nooga/xsofy, 175 nodes, 7 lanes, 2026-09-15); copy it and replace the judgment t
 `examples/xsofy-shell.json` is the second run, a different theme on a game repo
 (69 nodes, 4 lanes): note its `body_cap` of 2, word-bounded lane regexes, and the
 specific-first lane order, all of which the first pass on that repo got wrong.
+
+Copy an example next to where the map should live before running it. Its relative
+paths resolve against the config's own directory, so running one in place writes
+`data/` and the map into the skill directory.
 
 ## Gotchas
 

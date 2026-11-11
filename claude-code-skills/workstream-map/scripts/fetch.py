@@ -13,6 +13,9 @@ regex, then enrich the selected set with comments and PR metadata. Writes:
   <data>/enrich.json                 per node: comments (author, date, body), PR
                                      base/head/merged/reviews/closing issues
 
+A relative `data_dir` in the config is relative to the config file; `--data` is
+relative to the cwd.
+
 `--preview` stops after the search and writes nothing. Scoring reads only the
 title, labels and body, all of which the search already returned, so a preview
 costs two `gh search` calls per repo whatever the theme selects (each paginates
@@ -38,6 +41,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import laning  # noqa: E402
+from cfgpaths import config_relative  # noqa: E402
 
 
 class FetchError(RuntimeError):
@@ -311,7 +315,7 @@ def main():
     data = (
         sys.argv[sys.argv.index("--data") + 1]
         if "--data" in sys.argv
-        else cfg.get("data_dir", "data")
+        else config_relative(sys.argv[1], cfg.get("data_dir", "data"))
     )
     os.makedirs(data, exist_ok=True)
     rx = re.compile(cfg["relevance"], re.I)
@@ -347,7 +351,7 @@ def main():
     json.dump(enrich, open(f"{data}/enrich.json", "w"))
     for repo, nums in unresolved.items():
         print(f"warning: `include` numbers not found in {repo}: {sorted(nums)}")
-    print("done")
+    print("done; data in", os.path.abspath(data))
 
 
 if __name__ == "__main__":
