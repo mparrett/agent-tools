@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { FrontierView, WorkstreamView } from '../types'
 import { asOfLabel, attachedNames, badgeText, frontierView, touchesWorkstream } from './model'
@@ -42,10 +42,12 @@ async function refresh($: EngineInterface, withFrontier: boolean): Promise<void>
     const sid = await $.session.id()
     attached = attachedNames(await cli($, ['ls', '--session', sid, '--json']))
     if (withFrontier) {
-      frontiers = []
+      // Built aside and kept only whole: one failed frontier keeps the last good list.
+      const fresh: FrontierView[] = []
       for (const name of attached) {
-        frontiers.push(frontierView(await cli($, ['frontier', name, '--json'])))
+        fresh.push(frontierView(await cli($, ['frontier', name, '--json'])))
       }
+      frontiers = fresh
     }
   } catch (err) {
     error = err instanceof Error ? err.message : String(err)
@@ -63,12 +65,22 @@ async function refresh($: EngineInterface, withFrontier: boolean): Promise<void>
 // otherwise start a second one against the same store. A module variable is
 // enough: a reload drops the timers that could overlap with it.
 let running: Promise<void> | null = null
+let runningHasFrontier = false
+let timers: Timer[] = []
 
 function kick($: EngineInterface, withFrontier: boolean): Promise<void> {
-  running ??= refresh($, withFrontier).finally(() => {
-    running = null
-  })
-  return running
+  if (running && (runningHasFrontier || !withFrontier)) return running
+  // A frontier asked for while a badge-only refresh runs is queued after it,
+  // not folded into it: the person pressed refresh or opened the pane.
+  const mine: Promise<void> = (running ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(() => refresh($, withFrontier))
+    .finally(() => {
+      if (running === mine) running = null
+    })
+  running = mine
+  runningHasFrontier = withFrontier
+  return mine
 }
 
 export const register: Register = on => {
@@ -77,10 +89,14 @@ export const register: Register = on => {
       name: COMMAND,
       description: "Open the workstream pane: this session's workstreams and their frontier",
     })
-    $.clock.every(BADGE_EVERY_MS, () => void kick($, false))
-    $.clock.every(FRONTIER_EVERY_MS, async () => {
-      if (await isPaneOpen($)) void kick($, true)
-    })
+    // Whatever started before is stopped first, so a second start never doubles the polling.
+    for (const t of timers) t.cancel()
+    timers = [
+      $.clock.every(BADGE_EVERY_MS, () => void kick($, false)),
+      $.clock.every(FRONTIER_EVERY_MS, async () => {
+        if (await isPaneOpen($)) void kick($, true)
+      }),
+    ]
     // Not awaited: the first prompt need not wait on the store.
     void kick($, false).then(async () => {
       const { attached } = await read($, view)

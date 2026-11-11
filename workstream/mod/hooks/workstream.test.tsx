@@ -98,3 +98,77 @@ test('an attached session gets the badge and a pane with its frontier', async ($
     await ui.unmount()
   }
 })
+
+const ok = (stdout: string) => ({
+  value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+})
+const frontierOf = (name: string) =>
+  FRONTIER.replace('"name":"demo"', `"name":"${name}"`).replace('gh:o/r#7', `gh:o/r#${name}`)
+
+test('refresh pressed during a badge-only refresh still reads the frontier', async ($, on) => {
+  const clock = mock.clock(on)
+  let lsCalls = 0
+  let frontierCalls = 0
+  on('session.id', () => ({ value: 'sid' }))
+  on('process.run', async (_, e) => {
+    if (e.argv.includes('ls')) {
+      lsCalls += 1
+      // The first lookup is slow and finds nothing, so start opens no pane.
+      if (lsCalls === 1) {
+        await clock.sleep(500)
+        return ok('[]')
+      }
+      return ok(JSON.stringify([{ id: 'x', name: 'demo' }]))
+    }
+    frontierCalls += 1
+    return ok(FRONTIER)
+  })
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('command.register', () => ({ value: { command: 'workstream-pane' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // A press resolves once the work it started has; that work sleeps on the mocked clock.
+  const pressed = ui.press({ key: 'refresh' })
+  await clock.advance(1000)
+  await pressed
+  expect(frontierCalls).toBe(1)
+  expect(await ui.find({ type: 'Text', text: /gh:o\/r#7/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('one failed frontier keeps the last good list', async ($, on) => {
+  const clock = mock.clock(on)
+  let failB = false
+  on('session.id', () => ({ value: 'sid' }))
+  on('process.run', (_, e) => {
+    if (e.argv.includes('ls'))
+      return ok(JSON.stringify([{ id: 'a', name: 'alpha' }, { id: 'b', name: 'beta' }]))
+    if (e.argv.includes('beta') && failB)
+      return { value: { exitCode: 1, stdout: '', stderr: 'gh timed out', isStdoutTruncated: false, isStderrTruncated: false } }
+    return ok(frontierOf(e.argv.includes('beta') ? 'beta' : 'alpha'))
+  })
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('command.register', () => ({ value: { command: 'workstream-pane' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /gh:o\/r#beta/ })).toBeDefined()
+
+  failB = true
+  await ui.press({ key: 'refresh' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /gh timed out/ })).toBeDefined()
+  // The next badge-only refresh clears the error; both frontiers must still be there.
+  await clock.advance(60_000)
+  expect(await ui.find({ type: 'Text', text: /gh:o\/r#alpha/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /gh:o\/r#beta/ })).toBeDefined()
+  await ui.unmount()
+})
