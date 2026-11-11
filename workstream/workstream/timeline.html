@@ -156,10 +156,11 @@ function model(show) {
   }
   for (const s of top) {
     const e = extra.get(s.id);
-    // human_prompts holds only the latest few; merge with the timeline's and dedupe by minute.
+    // The timeline's prompt rows repeat the newest of human_prompts; drop exact
+    // repeats only, so two prompts in the same minute both keep their tick.
     const seen = new Set();
     e.prompts = [...(s.human_prompts || []).map(([at, text]) => ({ t: ts(at), text })), ...e.prompts]
-      .filter((p) => { const k = Math.round(p.t / 60e3); if (seen.has(k)) return false; seen.add(k); return true; })
+      .filter((p) => { const k = `${p.t}\u0000${p.text}`; if (seen.has(k)) return false; seen.add(k); return true; })
       .sort((a, b) => a.t - b.t);
     // A session that started before the timeline's window has no start row.
     if (!e.opening && e.prompts.length) e.opening = e.prompts[0].text;
@@ -446,7 +447,7 @@ function details(M) {
 function legend() {
   const items = [
     ['var(--canonical)', 'canonical session'], ['var(--ancillary)', 'ancillary session'], ['var(--subagent)', 'subagent'],
-    ['var(--prompt)', 'prompt'], ['var(--compact)', 'lifecycle (compaction, resume)'], ['var(--claim)', 'canonical claim'],
+    ['var(--prompt)', 'prompt'], ['var(--compact)', 'latest lifecycle event (compaction, resume)'], ['var(--claim)', 'canonical claim'],
     ['var(--message)', 'message'], ['var(--merged)', 'merged PR'], ['var(--open)', 'open PR'], ['var(--break)', 'idle gap (compressed)'],
   ];
   $('legend').innerHTML = items.map(([c, t]) => `<span><i style="background:${c};border:1px solid var(--faint)"></i>${esc(t)}</span>`).join('')
@@ -458,9 +459,12 @@ function pickLabel() {
   $('pickbtn').textContent = `${n === 1 ? nameOf(state.sel[0]) : n === DATA.workstreams.length ? `all ${n} workstreams` : `${n} workstreams`} ▾`;
 }
 
+// A hand-edited hash can hold a bad escape (`#%E0`); read it raw then.
+const hashText = () => { const h = location.hash.slice(1); try { return decodeURIComponent(h); } catch { return h; } };
+
 // The hash names what is shown: `#a,b`, or `#*` for every workstream.
 function selFromHash() {
-  const raw = decodeURIComponent(location.hash.slice(1));
+  const raw = hashText();
   if (raw === '*') return DATA.workstreams.map((_, i) => i);
   const want = new Set(raw.split(',').filter(Boolean));
   const sel = DATA.workstreams.map((_, i) => i).filter((i) => want.has(nameOf(i)));
@@ -471,7 +475,7 @@ function select(sel) {
   state.sel = sel.length ? [...new Set(sel)].sort((a, b) => a - b) : [state.sel[0]];
   state.zoom = 1;
   const hash = state.sel.length === DATA.workstreams.length && DATA.workstreams.length > 1 ? '*' : state.sel.map(nameOf).join(',');
-  if (decodeURIComponent(location.hash.slice(1)) !== hash) history.replaceState(null, '', `#${encodeURIComponent(hash).replace(/%2C/g, ',')}`);
+  if (hashText() !== hash) history.replaceState(null, '', `#${encodeURIComponent(hash).replace(/%2C/g, ',')}`);
   for (const box of $('menu').querySelectorAll('input[data-i]')) box.checked = state.sel.includes(+box.dataset.i);
   render();
 }

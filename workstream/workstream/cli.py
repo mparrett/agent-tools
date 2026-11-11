@@ -725,8 +725,10 @@ def cmd_timeline(args) -> int:
         wss = [store.get(name, nodes) for name in args.ws]
     else:
         listed = store.list_workstreams(args.since or RECENT_WINDOW, include_closed=args.all)
-        # `ls` carries no children; `get` fills in what `show` would see.
-        wss = [store.get(w.id, nodes) for w in _newest_first(listed)]
+        # `ls` carries no children; `get` fills in what `show` would see. By
+        # name where there is one: `get` tries `ws:<name>` first, so an id
+        # costs a failed lookup before it resolves.
+        wss = [store.get(w.name or w.id, nodes) for w in _newest_first(listed)]
     if not wss:
         sys.stderr.write("workstream: no workstreams to draw\n")
         return 1

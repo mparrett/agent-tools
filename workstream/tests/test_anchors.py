@@ -248,6 +248,17 @@ def test_gh_cache_put_from_many_threads_on_one_key(tmp_path):
     assert not list((tmp_path / "cache" / "gh").glob("*.tmp"))
 
 
+def test_gh_cache_put_failure_leaves_no_temp_file(tmp_path, monkeypatch):
+    def fail(self, target):
+        raise OSError("no room")
+
+    monkeypatch.setattr(Path, "replace", fail)
+    assert anchors._cache_put("acme__widget__8", 1.0, {"state": "OPEN"}) == (
+        "cache write failed (OSError)"
+    )
+    assert not list((tmp_path / "cache" / "gh").glob("*.tmp"))
+
+
 def test_gh_cache_hit_then_expiry(tmp_path):
     gh = FakeGh(pr=PR_JSON)
     t0 = 2_000_000.0
