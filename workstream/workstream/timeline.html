@@ -123,7 +123,7 @@ function model(show) {
   // Per-session extras drawn from the timeline, which carries 8-char ids in its prose.
   const extra = new Map(top.map((s) => [s.id, { opening: '', lifecycle: [], prompts: [] }]));
   const ownerOf = (text) => {
-    const m = /^(?:claude:)?([0-9a-f]{8})/.exec(text);
+    const m = /^(?:[a-z]+:)?([0-9a-f]{8})/.exec(text);
     const s = m && by8.get(m[1]);
     return s ? extra.get(rowOf(s.id)) : null;
   };

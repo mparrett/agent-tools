@@ -317,12 +317,16 @@ def test_timeline_to_stdout(env, capsys):
     assert timeline.extract(out)["workstreams"][0]["workstream"]["name"] == "default-track"
 
 
-def test_timeline_render_keeps_a_closing_tag_inside_the_data():
-    show = {"workstream": {"name": "x", "title": "</script><b>"}, "frontier": {}}
+@pytest.mark.parametrize("title", ["</script><b>", "<!-- header <script src=x>"])
+def test_timeline_render_keeps_markup_inside_the_data(title):
+    show = {"workstream": {"name": "x", "title": title}, "frontier": {}}
     html = timeline.render([show], datetime(2026, 1, 2, tzinfo=timezone.utc))
-    assert "</script><b>" not in html
+    start = html.index('<script id="data" type="application/json">') + len(
+        '<script id="data" type="application/json">'
+    )
+    assert "<" not in html[start : html.index("</script>", start)]
     bundle = timeline.extract(html)
-    assert bundle["workstreams"][0]["workstream"]["title"] == "</script><b>"
+    assert bundle["workstreams"][0]["workstream"]["title"] == title
     assert bundle["generated_at"] == "2026-01-02T00:00:00+00:00"
 
 

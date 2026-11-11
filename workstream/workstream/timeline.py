@@ -28,9 +28,10 @@ def render(shows: list[dict], generated_at: datetime) -> str:
     """`shows` are `show --json` payloads, in the order the picker lists them."""
     template = resources.files("workstream").joinpath("timeline.html").read_text()
     bundle = {"generated_at": generated_at.isoformat(timespec="seconds"), "workstreams": shows}
-    # `</` inside the JSON would end the <script> element early; `<\/` is the
-    # same string to JSON.parse.
-    payload = json.dumps(bundle, separators=(",", ":"), default=str).replace("</", "<\\/")
+    # Inside <script>, `</script` ends the element and `<!--` then `<script`
+    # stops the real end tag from closing it. With no `<` left, neither can
+    # happen; `<` is the same string to JSON.parse.
+    payload = json.dumps(bundle, separators=(",", ":"), default=str).replace("<", "\\u003c")
     return template.replace(MARKER, payload, 1)
 
 

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -484,7 +485,9 @@ def _cache_put(key: str, now: float, payload: dict) -> str | None:
     cache = gh_cache_dir() / f"{key}.json"
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache.with_suffix(".tmp")
+        # One temp file per writer: `workstream timeline` builds frontiers on
+        # threads, and two of them can probe the same anchor.
+        tmp = cache.with_name(f"{cache.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_text(json.dumps({**payload, "fetched_at": now}), encoding="utf-8")
         tmp.replace(cache)
     except OSError as e:
