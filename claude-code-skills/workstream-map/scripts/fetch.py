@@ -41,6 +41,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import laning  # noqa: E402
+from cfgpaths import config_relative  # noqa: E402
 
 
 class FetchError(RuntimeError):
@@ -110,12 +111,6 @@ def split_pages(text):
 
 def repo_slug(repo):
     return repo.replace("/", "__")
-
-
-def config_relative(cfg_file, path):
-    """Paths written in the config resolve against the config's directory, not the
-    shell's cwd: a build run from another checkout otherwise writes into that one."""
-    return os.path.join(os.path.dirname(os.path.abspath(cfg_file)), os.path.expanduser(path))
 
 
 def load_config(path):
@@ -356,7 +351,7 @@ def main():
     json.dump(enrich, open(f"{data}/enrich.json", "w"))
     for repo, nums in unresolved.items():
         print(f"warning: `include` numbers not found in {repo}: {sorted(nums)}")
-    print("done")
+    print("done; data in", os.path.abspath(data))
 
 
 if __name__ == "__main__":

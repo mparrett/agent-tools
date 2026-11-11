@@ -26,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import laning  # noqa: E402
+from cfgpaths import config_relative  # noqa: E402
 
 # Validated categorical palette (dataviz skill, light mode); at most 8 lanes.
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7", "#eda100", "#e87ba4", "#008300", "#e34948"]
@@ -63,12 +64,6 @@ def script_json(obj):
     """JSON for an inline <script>: `</script>` in a title would end the data script
     and start an attacker's, so escape the characters that can form tags."""
     return json.dumps(obj).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-
-
-def config_relative(cfg_file, path):
-    """Paths written in the config resolve against the config's directory, not the
-    shell's cwd: a build run from another checkout otherwise writes into that one."""
-    return os.path.join(os.path.dirname(os.path.abspath(cfg_file)), os.path.expanduser(path))
 
 
 def write_text(path, text):
