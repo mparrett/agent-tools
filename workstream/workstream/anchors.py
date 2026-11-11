@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -482,12 +483,16 @@ def _cache_put(key: str, now: float, payload: dict) -> str | None:
     """Write `payload` stamped with `now`, atomically. Returns a warning on
     failure rather than raising: a cold cache only costs a later gh call."""
     cache = gh_cache_dir() / f"{key}.json"
+    # One temp file per writer: `workstream timeline` builds frontiers on
+    # threads, and two of them can probe the same anchor.
+    tmp = cache.with_name(f"{cache.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache.with_suffix(".tmp")
         tmp.write_text(json.dumps({**payload, "fetched_at": now}), encoding="utf-8")
         tmp.replace(cache)
     except OSError as e:
+        # The name is unique per writer, so no later write would replace it.
+        tmp.unlink(missing_ok=True)
         return f"cache write failed ({e.__class__.__name__})"
     return None
 

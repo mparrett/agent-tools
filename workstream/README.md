@@ -21,6 +21,7 @@ workstream attach  --none "<reason>"               this session is not a workstr
 workstream sync    [ws...] [--session SID] [--ancillary] [--dry-run]   anchors from what owning sessions wrote to
 workstream sync    --interactive [ws...] [--verbose]   review each change before it is written
 workstream show    <ws> [--local]                  sessions, anchors, messages, UTC timeline
+workstream timeline [ws...] [--since 14d] [--all] [-o PATH|-] [--open]   the same, drawn as one HTML page
 workstream frontier <ws> [--record] [--full] [--local]   concise state, loose ends, ways to pick it up
 workstream retire  <sid>...                        capture the frontier, release the claims
 workstream hook    [--event SessionStart|SessionEnd]   hook bodies (below); stdin payload, JSON out
@@ -31,6 +32,14 @@ workstream ls      [--since 7d] [--all] [--session SID]   --all includes closed;
 Every command takes `--json`. Refs: `claude:<sid>` · `agent:<parent>/<id>` ·
 `codex:<id>` · `gh:o/r#N` · `branch:<repo>@<name>` · `wt:<path>` ·
 `file:<path>` · `frontier:<path>`.
+
+`timeline` writes a self-contained page (default
+`$XDG_CACHE_HOME/workstream/timeline.html`) with a lane per session, per-repo
+anchor lanes, messages drawn between sessions, and idle gaps over 90 minutes
+collapsed. Any set of the embedded workstreams can be shown together on one
+time axis, each under a header that folds it away; the URL hash names the set
+(`#a,b`, or `#*` for all). It embeds each workstream's `show --json`, so it is
+a snapshot: rerun it to refresh.
 
 ## Setup
 

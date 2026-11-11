@@ -233,6 +233,32 @@ def test_gh_both_fail_warns_and_does_not_cache(tmp_path):
     assert not (tmp_path / "cache" / "gh" / "acme__widget__404.json").exists()
 
 
+def test_gh_cache_put_from_many_threads_on_one_key(tmp_path):
+    # `workstream timeline` builds frontiers on threads; two can write one key.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def put(i: int):
+        return anchors._cache_put("acme__widget__7", float(i), {"state": "OPEN", "pad": "x" * 4096})
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        warnings = list(pool.map(put, range(200)))
+    assert warnings == [None] * 200
+    cached = json.loads((tmp_path / "cache" / "gh" / "acme__widget__7.json").read_text())
+    assert cached["state"] == "OPEN"
+    assert not list((tmp_path / "cache" / "gh").glob("*.tmp"))
+
+
+def test_gh_cache_put_failure_leaves_no_temp_file(tmp_path, monkeypatch):
+    def fail(self, target):
+        raise OSError("no room")
+
+    monkeypatch.setattr(Path, "replace", fail)
+    assert anchors._cache_put("acme__widget__8", 1.0, {"state": "OPEN"}) == (
+        "cache write failed (OSError)"
+    )
+    assert not list((tmp_path / "cache" / "gh").glob("*.tmp"))
+
+
 def test_gh_cache_hit_then_expiry(tmp_path):
     gh = FakeGh(pr=PR_JSON)
     t0 = 2_000_000.0

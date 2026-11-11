@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workstream Timeline</title>
+<style>
+:root {
+  --bg: #fbfaf7; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a66; --faint: #d9d6cf; --grid: #ecebe6;
+  --canonical: #2f6fdb; --ancillary: #7a8aa6; --subagent: #b39a5c; --prompt: #1d1d1b; --tool: #9a978f;
+  --compact: #d9822b; --claim: #2a9d6e; --message: #b8459a; --merged: #7b4fd6; --open: #2a9d6e;
+  --closed: #a33; --other: #8c8a84; --break: #f1efe9; --live: #2a9d6e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --panel: #1f1f1d; --ink: #e8e6e0; --muted: #9b998f; --faint: #3a3935; --grid: #2a2a27;
+    --canonical: #6c9cf0; --ancillary: #8090ab; --subagent: #c9ad6a; --prompt: #e8e6e0; --tool: #6f6d67;
+    --compact: #f0a050; --claim: #4fc08f; --message: #e07ac6; --merged: #a585f0; --open: #4fc08f;
+    --closed: #e06a6a; --other: #8c8a84; --break: #1c1c1a; --live: #4fc08f;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161615; --panel: #1f1f1d; --ink: #e8e6e0; --muted: #9b998f; --faint: #3a3935; --grid: #2a2a27;
+  --canonical: #6c9cf0; --ancillary: #8090ab; --subagent: #c9ad6a; --prompt: #e8e6e0; --tool: #6f6d67;
+  --compact: #f0a050; --claim: #4fc08f; --message: #e07ac6; --merged: #a585f0; --open: #4fc08f;
+  --closed: #e06a6a; --other: #8c8a84; --break: #1c1c1a; --live: #4fc08f;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.45 ui-sans-serif, -apple-system, "Segoe UI", sans-serif; }
+main { padding: 16px; max-width: 100%; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; margin-bottom: 12px; }
+h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.sub { color: var(--muted); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+select, button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--faint); border-radius: 6px; padding: 4px 8px; }
+button { cursor: pointer; }
+label { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); }
+.chip { display: inline-block; padding: 0 6px; border-radius: 9px; font-size: 11px; border: 1px solid var(--faint); color: var(--muted); }
+.chip.live { color: var(--live); border-color: var(--live); }
+.board { display: grid; grid-template-columns: minmax(150px, 260px) 1fr; background: var(--panel); border: 1px solid var(--faint); border-radius: 8px; overflow: hidden; }
+.labels { border-right: 1px solid var(--faint); }
+.labels .row { padding: 4px 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; display: flex; flex-direction: column; justify-content: center; border-bottom: 1px solid var(--grid); }
+.labels .row .t { font-weight: 600; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.labels .row .d { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.labels .group { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); background: var(--bg); padding: 0 10px; display: flex; align-items: center; border-bottom: 1px solid var(--grid); }
+.scroll { overflow-x: auto; overflow-y: hidden; }
+svg text { fill: var(--muted); font-size: 11px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 10px 0; color: var(--muted); font-size: 12px; }
+.legend i { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: -1px; border-radius: 2px; }
+.details { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 14px; }
+.card { background: var(--panel); border: 1px solid var(--faint); border-radius: 8px; padding: 10px 12px; }
+.card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+.card ul { margin: 0; padding-left: 16px; }
+.card li { margin: 2px 0; overflow-wrap: anywhere; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+#tip { position: fixed; pointer-events: none; max-width: 420px; background: var(--ink); color: var(--bg); padding: 6px 8px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; display: none; z-index: 10; }
+[data-tip] { cursor: default; }
+.sess { cursor: copy; }
+svg a { cursor: pointer; }
+.pick { position: relative; }
+.menu { position: absolute; z-index: 5; top: calc(100% + 4px); left: 0; min-width: 300px; max-width: calc(100vw - 32px); max-height: 60vh; overflow: auto; background: var(--panel); border: 1px solid var(--faint); border-radius: 8px; padding: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
+.menu .bar { display: flex; gap: 6px; padding: 2px 4px 6px; border-bottom: 1px solid var(--grid); margin-bottom: 4px; }
+.menu label { display: flex; gap: 6px; align-items: center; padding: 3px 4px; color: var(--ink); border-radius: 4px; }
+.menu label:hover { background: var(--bg); }
+.menu label .n { color: var(--muted); font-size: 11px; }
+.menu .only { margin-left: auto; font-size: 11px; padding: 0 6px; }
+.labels .ws { font-weight: 600; padding: 0 10px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--faint); border-top: 1px solid var(--faint); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.labels .ws .caret { color: var(--muted); width: 10px; }
+@media (max-width: 640px) { .board { grid-template-columns: 110px 1fr; } .labels .row .d { display: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Workstreams</h1>
+    <span class="sub" id="meta"></span>
+  </header>
+  <div class="controls">
+    <div class="pick">
+      <button id="pickbtn" aria-haspopup="true" aria-expanded="false"></button>
+      <div class="menu" id="menu" hidden></div>
+    </div>
+    <button id="zin" title="Zoom in">+</button>
+    <button id="zout" title="Zoom out">−</button>
+    <button id="zfit" title="Fit to width">Fit</button>
+    <label><input type="checkbox" id="compress" checked> compress idle gaps</label>
+    <label><input type="checkbox" id="tools"> tool calls</label>
+  </div>
+  <div class="board" id="board"></div>
+  <div class="legend" id="legend"></div>
+  <div class="details" id="details"></div>
+</main>
+<div id="tip"></div>
+<script id="data" type="application/json">/*__DATA__*/</script>
+<script>
+const DATA = JSON.parse(document.getElementById('data').textContent);
+
+const AXIS_H = 38, WS_H = 30, GROUP_H = 20, ANCHOR_H = 52, SESSION_H = 46;
+const GAP_MS = 90 * 60e3;      // idle stretches longer than this collapse when compressing
+const BREAK_PX = 34, PAD_PX = 24;
+const NOW = Date.parse(DATA.generated_at);
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// workstream stamps look like "2026-11-07T17:38:56Z (09:38 -08:00)"; the ISO part is enough.
+const ts = (s) => (s ? Date.parse(String(s).split(' ')[0]) : NaN);
+const fmtTime = (t) => new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const fmtDur = (ms) => {
+  const m = Math.round(ms / 60e3);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h${m % 60 ? ` ${m % 60}m` : ''}`;
+  return `${Math.floor(h / 24)}d${h % 24 ? ` ${h % 24}h` : ''}`;
+};
+const kfmt = (n) => (n == null ? '?' : n >= 1000 ? `${Math.round(n / 1000)}K` : String(n));
+const short = (s, n = 90) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+
+let store = {};
+try { store = JSON.parse(localStorage.getItem('ws-timeline') || '{}'); } catch {}
+const save = () => { try { localStorage.setItem('ws-timeline', JSON.stringify(store)); } catch {} };
+
+// `sel` holds indices into DATA.workstreams, kept in DATA order; `collapsed` holds names.
+const state = { sel: [0], collapsed: new Set(), compress: store.compress ?? true, tools: store.tools ?? false, zoom: 1 };
+const nameOf = (i) => DATA.workstreams[i].frontier.workstream.name || DATA.workstreams[i].frontier.workstream.id;
+const models = new Map();
+const modelOf = (i) => models.get(i) || models.set(i, model(DATA.workstreams[i])).get(i);
+
+function model(show) {
+  const F = show.frontier;
+  const sessions = F.sessions || [];
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  const by8 = new Map(sessions.map((s) => [s.id.slice(0, 8), s]));
+  const isTop = (s) => s.kind !== 'subagent' || !byId.has(s.parent_id);
+  const top = sessions.filter(isTop).sort((a, b) => ts(a.started) - ts(b.started));
+  const subs = new Map();
+  for (const s of sessions) if (!isTop(s)) (subs.get(s.parent_id) || subs.set(s.parent_id, []).get(s.parent_id)).push(s);
+  const rowOf = (id) => { const s = byId.get(id); return s && !isTop(s) ? s.parent_id : id; };
+
+  // Per-session extras drawn from the timeline, which carries 8-char ids in its prose.
+  const extra = new Map(top.map((s) => [s.id, { opening: '', lifecycle: [], prompts: [] }]));
+  // Rows open with `claude:<id>`, `codex:<id>`, `agent:<parent>/<id>` or a
+  // bare 8-char id; a subagent's row belongs to its parent's lane.
+  const ownerOf = (text) => {
+    const m = /^(?:[a-z]+:)?(?:[0-9a-f-]+\/)?([0-9a-f]{8})/.exec(text);
+    const s = m && by8.get(m[1]);
+    return s ? { e: extra.get(rowOf(s.id)), own: rowOf(s.id) === s.id } : null;
+  };
+  for (const [at, kind, text] of F.timeline || []) {
+    const o = ownerOf(text);
+    if (!o || !o.e) continue;
+    const e = o.e;
+    // Only the lane's own session names it; a subagent starting must not.
+    if (kind === 'session' && o.own) e.opening = text.replace(/^.*?started \([^)]*\):\s*/, '');
+    if (kind === 'lifecycle') e.lifecycle.push({ t: ts(at), text });
+    if (kind === 'prompt') e.prompts.push({ t: ts(at), text: text.replace(/^[0-9a-f]{8}:\s*/, '') });
+  }
+  for (const s of top) {
+    const e = extra.get(s.id);
+    // The timeline's prompt rows repeat the newest of human_prompts; drop exact
+    // repeats only, so two prompts in the same minute both keep their tick.
+    const seen = new Set();
+    e.prompts = [...(s.human_prompts || []).map(([at, text]) => ({ t: ts(at), text })), ...e.prompts]
+      .filter((p) => { const k = `${p.t}\u0000${p.text}`; if (seen.has(k)) return false; seen.add(k); return true; })
+      .sort((a, b) => a.t - b.t);
+    // A session that started before the timeline's window has no start row.
+    if (!e.opening && e.prompts.length) e.opening = e.prompts[0].text;
+  }
+
+  const anchors = (F.anchors || []).map((a) => {
+    const l = a.liveness || {};
+    const t = ts(l.merged_at) || ts(l.updated_at);
+    const m = /^(?:gh:)?([^#@]+)[#@](.+)$/.exec(a.value || a.ref) || [];
+    const repo = (m[1] || a.scheme || 'other').replace(/^.*\//, '');
+    const label = a.scheme === 'gh' ? `#${m[2]}` : (m[2] || a.ref);
+    return { ...a, t, repo, label };
+  });
+  const repos = [...new Set(anchors.filter((a) => !isNaN(a.t)).map((a) => a.repo))].sort();
+
+  const messages = (F.messages || []).map((m) => ({ ...m, t: ts(m.at), fromRow: rowOf(m.from), toRow: m.to ? rowOf(m.to) : null }));
+
+  return { F, top, subs, extra, anchors, repos, messages, byId };
+}
+
+// One scale across every model drawn, so lanes from different workstreams line up.
+function scaleFor(Ms, pph) {
+  const pts = [];
+  const push = (t) => { if (!isNaN(t)) pts.push(t); };
+  for (const M of Ms) {
+    for (const s of M.top) {
+      push(ts(s.started)); push(s.live ? NOW : ts(s.last_seen));
+      for (const p of M.extra.get(s.id).prompts) push(p.t);
+      for (const [at] of s.last_tools || []) push(ts(at));
+      for (const c of M.subs.get(s.id) || []) { push(ts(c.started)); push(ts(c.last_seen)); }
+    }
+    for (const a of M.anchors) push(a.t);
+    for (const m of M.messages) push(m.t);
+    for (const [at] of M.F.timeline || []) push(ts(at));
+  }
+  pts.sort((a, b) => a - b);
+  const uniq = pts.filter((t, i) => i === 0 || t !== pts[i - 1]);
+  if (!uniq.length) uniq.push(NOW);
+
+  const segs = [];
+  let x = PAD_PX;
+  for (let i = 0; i < uniq.length - 1; i++) {
+    const t0 = uniq[i], t1 = uniq[i + 1];
+    const broken = state.compress && t1 - t0 > GAP_MS;
+    const w = broken ? BREAK_PX : ((t1 - t0) / 3.6e6) * pph;
+    segs.push({ t0, t1, x0: x, x1: x + w, broken });
+    x += w;
+  }
+  const t0 = uniq[0], tEnd = uniq[uniq.length - 1];
+  const X = (t) => {
+    if (isNaN(t)) return NaN;
+    if (t <= t0) return PAD_PX;
+    if (t >= tEnd) return x;
+    let lo = 0, hi = segs.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (segs[mid].t1 < t) lo = mid + 1; else hi = mid; }
+    const s = segs[lo];
+    return s.x0 + ((t - s.t0) / (s.t1 - s.t0 || 1)) * (s.x1 - s.x0);
+  };
+  return { X, segs, width: x + PAD_PX + 60, t0, tEnd };
+}
+
+function activeHours(Ms) {
+  const s = scaleFor(Ms, 1);
+  return Math.max(0.25, s.segs.filter((g) => !g.broken).reduce((h, g) => h + (g.t1 - g.t0) / 3.6e6, 0));
+}
+
+function axis(sc, pph) {
+  const out = [];
+  const steps = [0.25, 0.5, 1, 2, 3, 6, 12, 24, 48, 168];
+  const step = (steps.find((h) => h * pph >= 64) || 168) * 3.6e6;
+  // Break bands go down first so labels and grid lines paint over them.
+  for (const g of sc.segs) if (g.broken) {
+    out.push(`<rect x="${g.x0}" y="0" width="${g.x1 - g.x0}" height="100%" fill="var(--break)" data-tip="idle ${esc(fmtDur(g.t1 - g.t0))}"/>`);
+    out.push(`<path d="M${g.x0 + 9},${AXIS_H - 2} l4,-5 l4,5 l4,-5 l4,5" fill="none" stroke="var(--muted)"/>`);
+  }
+  let lastDay = '', lastEnd = -1e9;
+  const label = (t, x, strong) => {
+    const d = new Date(t);
+    const day = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+    const hm = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    out.push(`<line x1="${x}" x2="${x}" y1="${AXIS_H - 6}" y2="100%" stroke="var(--grid)"/>`);
+    const withDay = day !== lastDay || strong;
+    if (x < lastEnd) return;
+    if (withDay) out.push(`<text x="${x + 3}" y="13" style="fill:var(--ink)">${esc(day)}</text>`);
+    out.push(`<text x="${x + 3}" y="27">${esc(hm)}</text>`);
+    lastDay = day; lastEnd = x + (withDay ? 84 : 62);
+  };
+  for (const g of sc.segs) {
+    if (g.broken) continue;
+    if (g === sc.segs[0] || sc.segs[sc.segs.indexOf(g) - 1].broken) label(g.t0, g.x0, true);
+    for (let t = Math.ceil(g.t0 / step) * step; t < g.t1; t += step) {
+      if (t > g.t0) label(t, sc.X(t), false);
+    }
+  }
+  return out.join('');
+}
+
+function render() {
+  const Ms = state.sel.map(modelOf);
+  const multi = Ms.length > 1;
+  const sessionsOf = (M) => M.top.length, liveOf = (M) => M.top.filter((s) => s.live).length;
+  const nSess = Ms.reduce((n, M) => n + sessionsOf(M), 0), nLive = Ms.reduce((n, M) => n + liveOf(M), 0);
+  const liveChip = nLive ? ` · <span class="chip live">${nLive} live</span>` : '';
+  if (multi) {
+    $('title').textContent = `${Ms.length} workstreams`;
+    $('meta').innerHTML = `${nSess} sessions${liveChip} · generated ${esc(fmtTime(NOW))}`;
+    document.title = 'Workstream Timeline';
+  } else {
+    const W = Ms[0].F.workstream;
+    $('title').textContent = W.title || W.name;
+    $('meta').innerHTML = `<code>${esc(W.name)}</code> · ${esc(W.state)} · ${nSess} sessions${liveChip} · as of ${esc(Ms[0].F.as_of)}`;
+    document.title = `${W.name} · Workstream Timeline`;
+  }
+  pickLabel();
+
+  // Collapsed workstreams keep their header but leave the scale, so their
+  // activity does not stretch the axis.
+  const shown = Ms.filter((M) => !(multi && state.collapsed.has(M.F.workstream.name)));
+  const scaled = shown.length ? shown : Ms;
+  const scrollEl = document.querySelector('.scroll');
+  const avail = (scrollEl?.clientWidth || $('board').clientWidth - 260) - 2 * PAD_PX - 60;
+  const breaks = scaleFor(scaled, 1).segs.filter((g) => g.broken).length * BREAK_PX;
+  const fit = Math.max(4, (avail - breaks) / activeHours(scaled));
+  const pph = fit * state.zoom;
+  const sc = scaleFor(scaled, pph);
+  const X = sc.X;
+
+  // Rows, per workstream: a header when several are shown, anchor lanes per
+  // repo, then one lane per top-level session. A session attached to two
+  // workstreams gets a lane in each, so lanes are keyed by workstream too.
+  const rows = [];
+  Ms.forEach((M, wi) => {
+    const name = M.F.workstream.name;
+    if (multi) {
+      rows.push({ kind: 'ws', h: WS_H, M });
+      if (state.collapsed.has(name)) return;
+    }
+    if (M.repos.length) { rows.push({ kind: 'group', h: GROUP_H, text: 'Anchors' }); for (const r of M.repos) rows.push({ kind: 'repo', h: ANCHOR_H, repo: r, M }); }
+    rows.push({ kind: 'group', h: GROUP_H, text: 'Sessions' });
+    for (const s of M.top) rows.push({ kind: 'session', h: SESSION_H, s, M, wi });
+  });
+  let y = AXIS_H;
+  const rowY = new Map();
+  for (const r of rows) { r.y = y; y += r.h; if (r.s) rowY.set(`${r.wi}:${r.s.id}`, r.y + 15); }
+  const H = y + 8;
+
+  const labels = [`<div style="height:${AXIS_H}px;border-bottom:1px solid var(--grid)"></div>`];
+  const svg = [`<svg width="${sc.width}" height="${H}" xmlns="http://www.w3.org/2000/svg">`, axis(sc, pph)];
+
+  for (const r of rows) {
+    const M = r.M;
+    if (r.kind === 'ws') {
+      const W = M.F.workstream, closed = state.collapsed.has(W.name), live = liveOf(M);
+      labels.push(`<div class="ws" style="height:${r.h}px" data-ws="${esc(W.name)}" data-tip="${esc(`${W.title}\n${W.name} · ${W.state}\n${closed ? 'click to expand' : 'click to collapse'}`)}">`
+        + `<span class="caret">${closed ? '▸' : '▾'}</span><span style="overflow:hidden;text-overflow:ellipsis">${esc(W.name)}</span>`
+        + `<span class="chip${live ? ' live' : ''}">${live ? `${live} live` : `${sessionsOf(M)}`}</span></div>`);
+      svg.push(`<rect x="0" y="${r.y}" width="100%" height="${r.h}" fill="var(--panel)"/><line x1="0" x2="100%" y1="${r.y}" y2="${r.y}" stroke="var(--faint)"/><line x1="0" x2="100%" y1="${r.y + r.h}" y2="${r.y + r.h}" stroke="var(--faint)"/>`);
+      svg.push(`<text class="wstitle" x="8" y="${r.y + 19}" style="fill:var(--ink);font-size:12px">${esc(short(W.title, 120))}</text>`);
+      continue;
+    }
+    if (r.kind === 'group') {
+      labels.push(`<div class="group" style="height:${r.h}px">${esc(r.text)}</div>`);
+      svg.push(`<rect x="0" y="${r.y}" width="100%" height="${r.h}" fill="var(--bg)" opacity=".6"/>`);
+      continue;
+    }
+    svg.push(`<line x1="0" x2="100%" y1="${r.y + r.h}" y2="${r.y + r.h}" stroke="var(--grid)"/>`);
+    if (r.kind === 'repo') {
+      const list = M.anchors.filter((a) => a.repo === r.repo && !isNaN(a.t)).sort((a, b) => a.t - b.t);
+      labels.push(`<div class="row" style="height:${r.h}px"><span class="t">${esc(r.repo)}</span><span class="d">${list.length} anchors</span></div>`);
+      // Stack labels on up to three levels so clustered PRs stay legible.
+      const levelEnd = [-1e9, -1e9, -1e9];
+      for (const a of list) {
+        const x = X(a.t), half = a.label.length * 3.6 + 2;
+        let lv = levelEnd.findIndex((end) => x - half >= end);
+        if (lv < 0) lv = levelEnd.indexOf(Math.min(...levelEnd));
+        levelEnd[lv] = x + half;
+        const ty = r.y + r.h - 18 - lv * 11;
+        const color = { merged: 'var(--merged)', open: 'var(--open)', closed: 'var(--closed)' }[a.status] || 'var(--other)';
+        const l = a.liveness || {};
+        const tip = `${a.ref}\n${a.status}${l.head_ref ? ` · ${l.head_ref}` : ''}\n${l.merged_at ? 'merged' : 'updated'} ${fmtTime(a.t)}${(a.warnings || []).length ? '\n⚠ ' + a.warnings.join('\n⚠ ') : ''}`;
+        const mark = `<g data-tip="${esc(tip)}"><circle cx="${x}" cy="${r.y + r.h - 9}" r="5" fill="${color}"/><text x="${x}" y="${ty}" text-anchor="middle" style="fill:${color};font-weight:600">${esc(a.label)}</text></g>`;
+        const pr = /^gh:([^#]+)#(\d+)$/.exec(a.ref);
+        svg.push(pr ? `<a href="https://github.com/${esc(pr[1])}/pull/${pr[2]}" target="_blank" rel="noopener">${mark}</a>` : mark);
+      }
+      continue;
+    }
+    const s = r.s, e = M.extra.get(s.id);
+    const role = s.role || s.kind;
+    const color = { canonical: 'var(--canonical)', subagent: 'var(--subagent)' }[role] || 'var(--ancillary)';
+    const t0 = ts(s.started), t1 = s.live ? NOW : ts(s.last_seen);
+    const x0 = X(t0), x1 = Math.max(X(t1), x0 + 3), by = r.y + 9;
+    const sub = M.subs.get(s.id) || [];
+    labels.push(`<div class="row sess" style="height:${r.h}px" data-sid="${esc(s.id)}" data-tip="${esc(`${s.id} (click to copy)\n${role} · ${s.model || s.kind}\nstarted ${fmtTime(t0)}\npeak ctx ${kfmt(s.peak_context)} · ${s.compaction_count || 0} compactions${sub.length ? ` · ${sub.length} subagents` : ''}\n${(s.prs || []).length} PRs\n\n${short(e.opening, 400)}`)}">`
+      + `<span class="t" style="color:${color}">${esc(s.id.slice(0, 8))} <span class="chip${s.live ? ' live' : ''}">${esc(s.live ? 'live' : role)}</span></span>`
+      + `<span class="d">${esc(short(e.opening, 80) || '—')}</span></div>`);
+
+    for (const iv of s.intervals || []) {
+      const a = ts(iv.at), b = Math.min(ts(iv.released_at) || Infinity, ts(iv.expires) || Infinity, NOW);
+      svg.push(`<rect x="${X(a)}" y="${by + 13}" width="${Math.max(2, X(b) - X(a))}" height="3" rx="1.5" fill="var(--claim)" data-tip="${esc(`canonical claim from ${fmtTime(a)}${iv.released_at ? `\nreleased ${fmtTime(ts(iv.released_at))}` : `\nexpires ${iv.expires}`}\n${iv.note || ''}`)}"/>`);
+    }
+    svg.push(`<rect x="${x0}" y="${by}" width="${x1 - x0}" height="10" rx="5" fill="${color}" opacity=".38" data-tip="${esc(`${s.id.slice(0, 8)} · ${fmtTime(t0)} → ${s.live ? 'now (live)' : fmtTime(t1)}`)}"/>`);
+    if (s.live) svg.push(`<circle cx="${x1}" cy="${by + 5}" r="4" fill="var(--live)"><animate attributeName="opacity" values="1;.3;1" dur="2s" repeatCount="indefinite"/></circle>`);
+    if (state.tools) for (const [at, tool, cmd] of s.last_tools || []) {
+      svg.push(`<circle cx="${X(ts(at))}" cy="${by + 5}" r="1.8" fill="var(--tool)" data-tip="${esc(`${fmtTime(ts(at))} ${tool}\n${cmd}`)}"/>`);
+    }
+    for (const p of e.prompts) {
+      const x = X(p.t);
+      svg.push(`<rect x="${x - 1}" y="${by - 3}" width="2" height="16" fill="var(--prompt)" data-tip="${esc(`${fmtTime(p.t)} prompt\n${short(p.text, 400)}`)}"/>`);
+    }
+    for (const l of e.lifecycle) {
+      const x = X(l.t);
+      svg.push(`<path d="M${x},${by - 1} l6,6 l-6,6 l-6,-6z" fill="var(--compact)" data-tip="${esc(`${fmtTime(l.t)}\n${l.text}`)}"/>`);
+    }
+    for (const c of sub) {
+      const a = X(ts(c.started)), b = Math.max(X(ts(c.last_seen)), a + 2);
+      svg.push(`<rect x="${a}" y="${by + 20}" width="${b - a}" height="6" rx="1" fill="var(--subagent)" data-tip="${esc(`subagent ${c.id.slice(0, 8)}\n${fmtTime(ts(c.started))} · ${fmtDur(ts(c.last_seen) - ts(c.started))}\npeak ctx ${kfmt(c.peak_context)}`)}"/>`);
+    }
+  }
+
+  // Messages stay inside their workstream's lanes; a message between two
+  // workstreams shows in each one that holds both ends.
+  const messages = [];
+  Ms.forEach((M, wi) => { if (!(multi && state.collapsed.has(M.F.workstream.name))) for (const m of M.messages) messages.push({ m, wi }); });
+  for (const { m, wi } of messages) {
+    const x = X(m.t), ya = rowY.get(`${wi}:${m.fromRow}`);
+    if (ya == null) continue;
+    const yb = m.toRow ? rowY.get(`${wi}:${m.toRow}`) : null;
+    const tip = esc(`${fmtTime(m.t)} message${m.how ? ` (${m.how})` : ''}\n${m.from.slice(0, 8)} → ${m.to ? m.to.slice(0, 8) : `${m.to_raw} (unresolved)`}\n${m.summary}`);
+    if (yb == null || yb === ya) {
+      svg.push(`<g data-tip="${tip}"><line x1="${x}" x2="${x}" y1="${ya}" y2="${ya - 13}" stroke="var(--message)" stroke-width="1.5" stroke-dasharray="${yb == null ? '2 2' : ''}"/><circle cx="${x}" cy="${ya - 14}" r="2.5" fill="var(--message)"/></g>`);
+    } else {
+      const dir = yb > ya ? 1 : -1;
+      svg.push(`<g data-tip="${tip}"><line x1="${x}" x2="${x}" y1="${ya}" y2="${yb - dir * 5}" stroke="var(--message)" stroke-width="1.5" opacity=".75"/><path d="M${x - 3.5},${yb - dir * 7} l3.5,${dir * 6} l3.5,${-dir * 6}z" fill="var(--message)"/><circle cx="${x}" cy="${ya}" r="2.5" fill="var(--message)"/></g>`);
+    }
+  }
+  svg.push('</svg>');
+
+  const left = document.querySelector('.scroll')?.scrollLeft;
+  $('board').innerHTML = `<div class="labels">${labels.join('')}</div><div class="scroll">${svg.join('')}</div>`;
+  const sc2 = document.querySelector('.scroll');
+  // Header titles ride along with horizontal scroll so they stay readable.
+  const pin = () => { for (const t of sc2.querySelectorAll('.wstitle')) t.setAttribute('x', sc2.scrollLeft + 8); };
+  sc2.addEventListener('scroll', pin, { passive: true });
+  if (left != null && state.keepScroll) sc2.scrollLeft = left; else sc2.scrollLeft = sc2.scrollWidth;
+  state.keepScroll = false;
+  pin();
+
+  if (multi) summaries(Ms); else details(Ms[0]);
+}
+
+// Repeated lines (one per unresolved message, say) collapse to a count.
+const list = (items) => {
+  const counts = new Map();
+  for (const i of items) counts.set(i, (counts.get(i) || 0) + 1);
+  return `<ul>${[...counts].map(([i, n]) => `<li>${i}${n > 1 ? ` <span class="chip">×${n}</span>` : ''}</li>`).join('')}</ul>`;
+};
+
+function summaries(Ms) {
+  $('details').innerHTML = Ms.map((M) => {
+    const F = M.F, W = F.workstream, rec = F.recommendation;
+    const facts = [
+      rec ? `next: <b>${esc(rec.action)}</b> <code>${esc((rec.session_id || '').slice(0, 8))}</code>` : '',
+      `${(F.loose_ends || []).length} loose ends · ${(F.closure_blockers || []).length} closure blockers`,
+      `${M.anchors.length} anchors · ${(F.tasks || []).length} tasks`,
+    ].filter(Boolean);
+    return `<div class="card"><h2>${esc(W.name)}</h2><p style="margin:0 0 6px">${esc(W.title)}</p>${list(facts)}`
+      + `<button data-only="${esc(W.name)}" style="margin-top:6px">show only this</button></div>`;
+  }).join('');
+}
+
+function details(M) {
+  const F = M.F, cards = [];
+  const rec = F.recommendation;
+  if (rec) cards.push(`<div class="card"><h2>Recommendation</h2><p style="margin:0 0 6px"><b>${esc(rec.action)}</b> <code>${esc((rec.session_id || '').slice(0, 8))}</code></p>${list((rec.why || []).map(esc))}</div>`);
+  if ((F.loose_ends || []).length) cards.push(`<div class="card"><h2>Loose ends</h2>${list(F.loose_ends.map(esc))}</div>`);
+  if ((F.closure_blockers || []).length) cards.push(`<div class="card"><h2>Closure blockers</h2>${list(F.closure_blockers.map(esc))}</div>`);
+  const untimed = M.anchors.filter((a) => isNaN(a.t));
+  if (untimed.length) cards.push(`<div class="card"><h2>Anchors without a time</h2>${list(untimed.map((a) => `<code>${esc(a.ref)}</code> · ${esc(a.status)}`))}</div>`);
+  if ((F.tasks || []).length) cards.push(`<div class="card"><h2>Tasks</h2>${list(F.tasks.map((t) => esc(typeof t === 'string' ? t : JSON.stringify(t))))}</div>`);
+  if ((F.warnings || []).length) cards.push(`<div class="card"><h2>Warnings</h2>${list(F.warnings.map(esc))}</div>`);
+  $('details').innerHTML = cards.join('');
+}
+
+function legend() {
+  const items = [
+    ['var(--canonical)', 'canonical session'], ['var(--ancillary)', 'ancillary session'], ['var(--subagent)', 'subagent'],
+    ['var(--prompt)', 'prompt'], ['var(--compact)', 'latest lifecycle event (compaction, resume)'], ['var(--claim)', 'canonical claim'],
+    ['var(--message)', 'message'], ['var(--merged)', 'merged PR'], ['var(--open)', 'open PR'], ['var(--break)', 'idle gap (compressed)'],
+  ];
+  $('legend').innerHTML = items.map(([c, t]) => `<span><i style="background:${c};border:1px solid var(--faint)"></i>${esc(t)}</span>`).join('')
+    + `<span>generated ${esc(fmtTime(NOW))}</span>`;
+}
+
+function pickLabel() {
+  const n = state.sel.length;
+  $('pickbtn').textContent = `${n === 1 ? nameOf(state.sel[0]) : n === DATA.workstreams.length ? `all ${n} workstreams` : `${n} workstreams`} ▾`;
+}
+
+// A hand-edited hash can hold a bad escape (`#%E0`); read it raw then.
+const hashText = () => { const h = location.hash.slice(1); try { return decodeURIComponent(h); } catch { return h; } };
+
+// The hash names what is shown: `#a,b`, or `#*` for every workstream.
+function selFromHash() {
+  const raw = hashText();
+  if (raw === '*') return DATA.workstreams.map((_, i) => i);
+  const want = new Set(raw.split(',').filter(Boolean));
+  const sel = DATA.workstreams.map((_, i) => i).filter((i) => want.has(nameOf(i)));
+  return sel.length ? sel : [0];
+}
+
+function select(sel) {
+  state.sel = sel.length ? [...new Set(sel)].sort((a, b) => a - b) : [state.sel[0]];
+  state.zoom = 1;
+  const hash = state.sel.length === DATA.workstreams.length && DATA.workstreams.length > 1 ? '*' : state.sel.map(nameOf).join(',');
+  if (hashText() !== hash) history.replaceState(null, '', `#${encodeURIComponent(hash).replace(/%2C/g, ',')}`);
+  for (const box of $('menu').querySelectorAll('input[data-i]')) box.checked = state.sel.includes(+box.dataset.i);
+  render();
+}
+
+function init() {
+  const menu = $('menu'), btn = $('pickbtn');
+  menu.innerHTML = `<div class="bar"><button data-all>all</button><button data-none>first only</button></div>`
+    + DATA.workstreams.map((w, i) => {
+      const n = (w.frontier.sessions || []).filter((s) => s.kind !== 'subagent').length;
+      const live = (w.frontier.sessions || []).filter((s) => s.kind !== 'subagent' && s.live).length;
+      return `<label><input type="checkbox" data-i="${i}"><span>${esc(nameOf(i))}</span>`
+        + `<span class="n">${n} session${n === 1 ? '' : 's'}${live ? ` · ${live} live` : ''}</span>`
+        + `<button class="only" data-only-i="${i}" title="show only this one">only</button></label>`;
+    }).join('');
+  const open = (v) => { menu.hidden = !v; btn.setAttribute('aria-expanded', String(v)); };
+  btn.onclick = (ev) => { ev.stopPropagation(); open(menu.hidden); };
+  document.addEventListener('click', (ev) => { if (!menu.hidden && !ev.target.closest('.pick')) open(false); });
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') open(false); });
+  menu.addEventListener('change', (ev) => {
+    const i = +ev.target.dataset.i;
+    select(ev.target.checked ? [...state.sel, i] : state.sel.filter((j) => j !== i));
+  });
+  menu.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (t.matches('[data-all]')) select(DATA.workstreams.map((_, i) => i));
+    else if (t.matches('[data-none]')) select([0]);
+    else if (t.matches('[data-only-i]')) { ev.preventDefault(); select([+t.dataset.onlyI]); open(false); }
+  });
+  document.addEventListener('click', (ev) => {
+    const ws = ev.target.closest('[data-ws]');
+    if (ws) {
+      const n = ws.dataset.ws;
+      state.collapsed.has(n) ? state.collapsed.delete(n) : state.collapsed.add(n);
+      state.keepScroll = true;
+      render();
+      return;
+    }
+    const only = ev.target.closest('[data-only]');
+    if (only) { select(DATA.workstreams.map((_, i) => i).filter((i) => nameOf(i) === only.dataset.only)); scrollTo(0, 0); }
+  });
+  state.sel = selFromHash();
+  for (const box of menu.querySelectorAll('input[data-i]')) box.checked = state.sel.includes(+box.dataset.i);
+  window.onhashchange = () => select(selFromHash());
+  $('compress').checked = state.compress;
+  $('tools').checked = state.tools;
+  $('compress').onchange = (e) => { state.compress = store.compress = e.target.checked; save(); render(); };
+  $('tools').onchange = (e) => { state.tools = store.tools = e.target.checked; save(); state.keepScroll = true; render(); };
+  $('zin').onclick = () => { state.zoom *= 1.6; state.keepScroll = true; render(); };
+  $('zout').onclick = () => { state.zoom = Math.max(0.1, state.zoom / 1.6); state.keepScroll = true; render(); };
+  $('zfit').onclick = () => { state.zoom = 1; render(); };
+  let rz; window.onresize = () => { clearTimeout(rz); rz = setTimeout(render, 150); };
+
+  const tip = $('tip');
+  document.addEventListener('click', (ev) => {
+    const row = ev.target.closest('[data-sid]');
+    if (!row) return;
+    navigator.clipboard?.writeText(row.dataset.sid).then(() => {
+      tip.textContent = `copied ${row.dataset.sid}`;
+      tip.style.display = 'block';
+    }, () => {});
+  });
+  document.addEventListener('mousemove', (ev) => {
+    const el = ev.target.closest('[data-tip]');
+    if (!el) { tip.style.display = 'none'; return; }
+    tip.textContent = el.getAttribute('data-tip');
+    tip.style.display = 'block';
+    const r = tip.getBoundingClientRect();
+    tip.style.left = Math.min(ev.clientX + 14, innerWidth - r.width - 8) + 'px';
+    tip.style.top = (ev.clientY + 16 + r.height > innerHeight ? ev.clientY - r.height - 10 : ev.clientY + 16) + 'px';
+  });
+  legend();
+  render();
+}
+init();
+</script>
+</body>
+</html>
