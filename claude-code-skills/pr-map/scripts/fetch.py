@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pull the facts for a workstream map.
+"""Pull the facts for a PR map.
 
 Usage: fetch.py <config.json> [--data DIR]
        fetch.py <config.json> --preview [--near N]

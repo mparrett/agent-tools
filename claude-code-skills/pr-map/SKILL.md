@@ -1,5 +1,5 @@
 ---
-name: workstream-map
+name: pr-map
 description: >-
   Build a navigable map of a person's work across a complex repo (or a few
   related ones) — every issue and PR they authored, reviewed, or commented on in a
@@ -7,12 +7,16 @@ description: >-
   "start here" list and a markdown inventory. Use when the user asks for "an inventory
   / map / graph of all my perf (or auth, or CI, ...) issues and PRs", "how does all of
   this connect", "something I can hand the team so they don't get lost", or wants to
-  see which epics, trackers, and PRs a workstream hangs off. Historical and relational;
+  see which epics, trackers, and PRs a theme hangs off. Historical and relational;
   for the live board of what is open and what to review next, use pr-dashboard, and for
   the delta since last look, pr-watch.
 ---
 
-# Workstream map
+# PR map
+
+(Formerly `workstream-map`; renamed so "workstream" means only the `workstream` CLI's
+entity. With pr-dashboard and pr-watch it covers what is open, what changed, and the
+history of a theme.)
 
 Turn months of scattered issues and PRs into one picture a teammate can navigate: lanes
 for the sub-themes, time flowing down, every `#`-reference drawn as an edge, hubs

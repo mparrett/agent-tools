@@ -3,7 +3,7 @@
 # dependencies = ["pytest"]
 # ///
 """Unit tests for scripts/build.py, on a synthetic data directory. Run via
-`uv run --with pytest claude-code-skills/workstream-map/test_build.py` (or `just test`).
+`uv run --with pytest claude-code-skills/pr-map/test_build.py` (or `just test`).
 
 They pin the parts that went wrong while the first map was built: an open PR's
 `closedAt` of 0001-01-01 leaking into the panel, a `#N` inside a URL path

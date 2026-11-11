@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a workstream map from fetched data.
+"""Render a PR map from fetched data.
 
 Usage: build.py <config.json> [--data DIR] [--date YYYY-MM-DD]
 
