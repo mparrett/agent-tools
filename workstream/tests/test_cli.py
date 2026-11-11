@@ -282,6 +282,15 @@ def test_ls(env, capsys):
     assert [w["name"] for w in run_json(capsys, "ls")] == ["default-track"]
 
 
+@needs_weft
+def test_ls_session_filters_to_its_workstreams(env, capsys):
+    member = next(
+        r.partition(":")[2] for r in store.get("default-track").refs if r.startswith("claude:")
+    )
+    assert [w["name"] for w in run_json(capsys, "ls", "--session", member[:8])] == ["default-track"]
+    assert run_json(capsys, "ls", "--session", env["fresh"].id) == []
+
+
 # --- tasks and close ---------------------------------------------------------
 
 

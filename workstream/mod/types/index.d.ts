@@ -1,0 +1,28 @@
+// One workstream as the pane draws it: the parts of `workstream frontier --json`
+// a person reads at a glance, flattened so the drawing needs no knowledge of
+// the CLI's shapes.
+export type FrontierView = {
+  name: string
+  title: string
+  state: string
+  next: { action: string; how: string } | null
+  looseEnds: string[]
+  anchors: { ref: string; status: string }[]
+  sessions: { id: string; role: string; live: boolean }[]
+  prose: { path: string; exists: boolean } | null
+  asOf: string | null
+}
+
+export type WorkstreamView = {
+  // null until the first lookup answers; [] means attached to none
+  attached: string[] | null
+  frontiers: FrontierView[]
+  error: string | null
+  isLoading: boolean
+}
+
+declare module 'claude-code' {
+  interface PluginState {
+    workstream: { view: Shaped<WorkstreamView> }
+  }
+}

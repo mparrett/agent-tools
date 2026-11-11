@@ -228,6 +228,8 @@ test:
     uv run --directory claude-reel pytest -q
     uv run --directory claude-graph pytest -q
     uv run --directory workstream pytest -q
+    # CI has no claude CLI; the mod's suite runs wherever one is installed.
+    @if command -v claude >/dev/null; then claude plugin test workstream/mod; else echo "skip workstream/mod: no claude CLI"; fi
     uv run --with pytest --with playwright htmldiff/test_htmldiff.py
     uv run --with pytest --with playwright usage-viz/test_usage_viz.py
     uv run --with pytest claude-code-skills/pr-shepherd/test_review_target.py

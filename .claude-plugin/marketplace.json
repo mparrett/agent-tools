@@ -1,0 +1,6 @@
+{
+  "name": "agent-tools",
+  "description": "Claude Code plugins that ship beside the agent-tools CLIs",
+  "owner": { "name": "Matt Parrett" },
+  "plugins": [{ "name": "workstream", "source": "./workstream/mod" }]
+}

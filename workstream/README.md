@@ -25,7 +25,7 @@ workstream frontier <ws> [--record] [--full] [--local]   concise state, loose en
 workstream retire  <sid>...                        capture the frontier, release the claims
 workstream hook    [--event SessionStart|SessionEnd]   hook bodies (below); stdin payload, JSON out
 workstream close   <ws> [--note TEXT] [--force]    mark it done once nothing is left open
-workstream ls      [--since 7d] [--all]            --all includes closed workstreams
+workstream ls      [--since 7d] [--all] [--session SID]   --all includes closed; --session: only its workstreams
 ```
 
 Every command takes `--json`. Refs: `claude:<sid>` · `agent:<parent>/<id>` ·
@@ -47,9 +47,26 @@ from (the read-only clone, where there is one):
    `weft help | head -1` prints (`go install` leaves it at `0.0.0-dev`).
 2. **The command**: `just link ~/bin` symlinks `bin/workstream` (and every
    other tool in `bin/`) into `~/bin`; it skips what is already linked.
-3. **The hooks**, in `~/.claude/settings.json`. Both are stdlib-only
-   scripts run by whatever `python3` the hook's PATH finds (no uv), and both
-   exit 0 on any error so a broken store never blocks a session:
+3. **The hooks**, through the `workstream` plugin in `workstream/mod/`. It
+   registers both hooks, and adds a status-line badge naming the session's
+   workstreams (`ws: <name>`, `ws: none`) and a side pane with their frontier
+   (`/workstream-pane`; it opens by itself for an attached session where the
+   terminal is wide enough). Install it from the checkout's own marketplace:
+
+   ```sh
+   claude plugin marketplace add <checkout>
+   claude plugin install workstream@agent-tools
+   ```
+
+   The plugin is read from the checkout in place, not copied: the hooks and
+   the CLI live beside it, and the CLI loads `claude-ls` from the checkout too,
+   so install from a local folder, not from GitHub. Remove any hand-wired
+   entries below when you switch, or each hook runs twice.
+
+   Both hooks are stdlib-only scripts run by whatever `python3` the hook's
+   PATH finds (no uv), and both exit 0 on any error so a broken store never
+   blocks a session. Without the plugin, register them by hand in
+   `~/.claude/settings.json`:
 
    ```json
    "SessionStart": [{"matcher": "*", "hooks": [{"type": "command",
