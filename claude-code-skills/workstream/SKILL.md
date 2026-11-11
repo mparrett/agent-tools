@@ -37,6 +37,10 @@ obvious to nobody but itself.
 4. If this session is not a workstream (a question, a one-off lookup):
    `workstream attach --none "<reason>"`. That is a recorded answer, not a
    skipped step; the hook stops asking.
+5. Say it. After any attach, tell the user in one line which workstream you
+   attached to and whether as owner or helper (`--ancillary`), or that you
+   recorded `--none` and why. The attach is otherwise invisible to them, and
+   which session owns what is what they need to know when several run at once.
 
 A canonical attach also runs `workstream sync` for this session: the PRs it opened,
 merged, reviewed or commented on, the branches it committed or pushed, and

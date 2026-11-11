@@ -1115,7 +1115,8 @@ def cmd_hook(args) -> int:
         return _emit_json({"block": "", "attached": [], "unassociated": unassoc})
     lines = [
         f"Workstream candidates for this session from `workstream match` as of {Instant.now().iso()}; "
-        "attach before doing work so the next session can find it:"
+        "attach before doing work so the next session can find it, then tell the user "
+        "in one line which workstream you attached to and whether as owner or helper:"
     ]
     for c in ranked[:3]:
         lines.append(f"- {c.ws.name or c.ws.id[:12]}: {c.ws.title} ({c.score:.2f})")

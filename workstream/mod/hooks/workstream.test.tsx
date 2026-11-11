@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
+import type { On } from 'claude-code'
 
-import { asOfLabel, attachedNames, badgeText, frontierView, touchesWorkstream } from './model'
+import { asOfLabel, attachments, badgeMode, badgeText, frontierView, touchesWorkstream } from './model'
 
 // Trimmed from a real `workstream frontier --json`: only the fields the pane reads.
 const FRONTIER = JSON.stringify({
@@ -17,12 +18,40 @@ const FRONTIER = JSON.stringify({
 })
 const LS = JSON.stringify([{ id: 'abc123def4567890', name: 'demo' }, { id: 'ffff0000eeee1111', name: null }])
 
-test('ls JSON gives names, an unnamed one by its short id', () => {
-  expect(attachedNames(LS)).toEqual(['demo', 'ffff0000eeee'])
+const SID = '5d5c9a2e-6027-4916-bd97-eebadc8905d2'
+const claim = (holder: string, live: boolean) => ({ holder, live })
+
+test('ls JSON gives names, an unnamed one by its short id, and who owns each', () => {
+  expect(attachments(LS, SID)).toEqual([
+    { name: 'demo', owner: false },
+    { name: 'ffff0000eeee', owner: false },
+  ])
+  const owned = JSON.stringify([
+    { id: 'a', name: 'mine', claims: [claim(`agent:claude:${SID}`, true)] },
+    // An expired claim of ours is not ownership; neither is someone else's live one.
+    { id: 'b', name: 'lapsed', claims: [claim(`agent:claude:${SID}`, false)] },
+    { id: 'c', name: 'theirs', claims: [claim('agent:claude:other', true)] },
+  ])
+  expect(attachments(owned, SID).map(a => a.owner)).toEqual([true, false, false])
 })
 
-test('the badge says attached, none, or unknown', () => {
-  expect(badgeText(['a', 'b'], null)).toBe('a, b')
+test('the badge option falls back to the status line', () => {
+  expect(badgeMode('band')).toBe('band')
+  expect(badgeMode('off')).toBe('off')
+  expect(badgeMode(undefined)).toBe('status')
+  expect(badgeMode('bogus')).toBe('status')
+})
+
+test('the badge says attached with a role, none, or unknown', () => {
+  expect(
+    badgeText(
+      [
+        { name: 'a', owner: true },
+        { name: 'b', owner: false },
+      ],
+      null,
+    ),
+  ).toBe('a (owner), b (helping)')
   expect(badgeText([], null)).toBe('none')
   expect(badgeText(null, 'boom')).toBe('unknown (store unreadable)')
   expect(badgeText(null, null)).toBeUndefined()
@@ -88,7 +117,7 @@ test('an attached session gets the badge and a pane with its frontier', async ($
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   // The start hook refreshes without blocking the session; let it land.
   await clock.settle()
-  expect(statuses).toContain('demo')
+  expect(statuses).toContain('demo (helping)')
   expect(opened).toBe(1)
 
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -170,5 +199,58 @@ test('one failed frontier keeps the last good list', async ($, on) => {
   await clock.advance(60_000)
   expect(await ui.find({ type: 'Text', text: /gh:o\/r#alpha/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /gh:o\/r#beta/ })).toBeDefined()
+  await ui.unmount()
+})
+
+const BAND = {
+  plugin: 'workstream',
+  component: 'AbovePrompt',
+  requestId: 'band',
+  props: {
+    hasSurvey: false,
+    isCollapsed: false,
+    isWorking: false,
+    maxRows: 10,
+    bodyColumns: 100,
+    scroll: { offset: 0, bodyRows: 10 },
+    view: {},
+  },
+} as const
+
+function stubStart(on: On, ls: string, statuses: (string | undefined)[]) {
+  on('session.id', () => ({ value: SID }))
+  on('process.run', (_, e) => ok(e.argv.includes('ls') ? ls : FRONTIER))
+  on('ui.status', (_, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('command.register', () => ({ value: { command: 'workstream-pane' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+}
+
+test('badge "band" draws above the prompt and leaves the status line empty', { options: { badge: 'band' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const statuses: (string | undefined)[] = []
+  stubStart(on, JSON.stringify([{ id: 'a', name: 'demo', claims: [claim(`agent:claude:${SID}`, true)] }]), statuses)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(statuses.every(t => t === undefined)).toBe(true)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'demo' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: / · owner/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the default leaves the band to others', async ($, on) => {
+  const clock = mock.clock(on)
+  const statuses: (string | undefined)[] = []
+  stubStart(on, LS, statuses)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(statuses).toContain('demo (helping), ffff0000eeee (helping)')
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /◆ ws/ })).toBeUndefined()
   await ui.unmount()
 })

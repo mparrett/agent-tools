@@ -1,1 +1,16 @@
-{ "name": "workstream", "version": "0.1.0", "description": "Workstream hooks, a status-line badge naming the attached workstream, and a side pane with its frontier", "types": "./types/index.d.ts" }
+{
+  "name": "workstream",
+  "version": "0.2.0",
+  "description": "Workstream hooks, a badge naming the attached workstream and this session's role, and a side pane with its frontier",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "badge": {
+      "type": "string",
+      "title": "Workstream badge",
+      "description": "\"status\" (default): a pinned status line, which Claude Code draws as a yellow warning. \"band\": a one-row badge in the band above the prompt, in quieter colors. \"off\": no badge; the pane and hooks still work.",
+      "required": false,
+      "default": "status",
+      "options": ["status", "band", "off"]
+    }
+  }
+}

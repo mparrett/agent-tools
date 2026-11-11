@@ -1,4 +1,4 @@
-import type { FrontierView } from '../types'
+import type { Attachment, FrontierView } from '../types'
 
 type Json = Record<string, unknown>
 
@@ -6,19 +6,33 @@ const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 const obj = (v: unknown): Json => (v && typeof v === 'object' ? (v as Json) : {})
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : [])
 
-// `workstream ls --json` → the names a badge shows; an unnamed workstream by its
-// short id, as the CLI prints it
-export function attachedNames(lsJson: string): string[] {
+// `workstream ls --session SID --json` → what the badge shows: each workstream
+// by name (an unnamed one by its short id, as the CLI prints it), and whether
+// this session owns it. Owning is holding a live canonical claim; an
+// `--ancillary` attach takes none, which is what makes it "helping".
+export function attachments(lsJson: string, sid: string): Attachment[] {
+  const me = `agent:claude:${sid}`
   return arr(JSON.parse(lsJson)).map(w => {
     const o = obj(w)
-    return str(o.name) || str(o.id).slice(0, 12)
+    const owner = arr(o.claims).some(c => obj(c).live === true && str(obj(c).holder) === me)
+    return { name: str(o.name) || str(o.id).slice(0, 12), owner }
   })
 }
 
+export const roleLabel = (a: Attachment): string => (a.owner ? 'owner' : 'helping')
+
 // The engine already heads the status line with the plugin's name, "workstream:"
-export function badgeText(attached: string[] | null, error: string | null): string | undefined {
+export function badgeText(attached: Attachment[] | null, error: string | null): string | undefined {
   if (attached === null) return error ? 'unknown (store unreadable)' : undefined
-  return attached.length ? attached.join(', ') : 'none'
+  return attached.length ? attached.map(a => `${a.name} (${roleLabel(a)})`).join(', ') : 'none'
+}
+
+export type BadgeMode = 'status' | 'band' | 'off'
+
+// The `badge` option; a missing or unknown value keeps the status line, which
+// is what the plugin did before the option existed.
+export function badgeMode(value: unknown): BadgeMode {
+  return value === 'band' || value === 'off' ? value : 'status'
 }
 
 // "2026-11-11T00:54:06Z (16:54 -08:00)", the CLI's Instant.iso(), → "as of 16:54"
