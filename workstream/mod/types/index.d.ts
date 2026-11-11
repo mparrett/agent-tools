@@ -2,6 +2,7 @@
 // a person reads at a glance, flattened so the drawing needs no knowledge of
 // the CLI's shapes.
 export type FrontierView = {
+  id: string
   name: string
   title: string
   state: string

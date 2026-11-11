@@ -62,6 +62,7 @@ test('the badge says attached with a role, none, or unknown', () => {
 
 test('a frontier flattens to what the pane draws', () => {
   const f = frontierView(FRONTIER)
+  expect(f.id).toBe('abc123def4567890')
   expect(f.name).toBe('demo')
   expect(f.next).toEqual({
     action: 'message',
@@ -150,10 +151,10 @@ test('an attached session gets the badge and a pane with its frontier', async ($
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /next: message 5d5c9a2e/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /SendMessage to/ })).toBeUndefined()
-  await ui.press({ key: 'how:demo' })
+  await ui.press({ key: 'how:abc123def4567890' })
   expect(await ui.find({ type: 'Text', text: /SendMessage to/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /last prompt 3m ago/ })).toBeDefined()
-  await ui.press({ key: 'how:demo' })
+  await ui.press({ key: 'how:abc123def4567890' })
   expect(await ui.find({ type: 'Text', text: /SendMessage to/ })).toBeUndefined()
   await ui.unmount()
 })

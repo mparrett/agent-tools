@@ -15,8 +15,8 @@ const FRONTIER_EVERY_MS = 5 * 60_000
 
 const INITIAL: WorkstreamView = { attached: null, frontiers: [], error: null, isLoading: false }
 // Change the tag when WorkstreamView's fields change: a value outlives a reload.
-const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-2' })
-// Workstreams whose next-step instructions are unfolded in the pane, by name.
+const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-3' })
+// Workstreams whose next-step instructions are unfolded in the pane, by id.
 const expanded = atom({ plugin: 'workstream', key: 'expanded' } as const, [] as string[], { shape: 'expanded-1' })
 
 // Where the badge goes, from the `badge` option. Options are fixed for an
@@ -166,8 +166,12 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const v = await read($, view)
     const open = await read($, expanded)
-    const toggle = (name: string) =>
-      update($, expanded, xs => (xs.includes(name) ? xs.filter(x => x !== name) : [...xs, name]))
+    const toggle = (id: string) =>
+      // Ids no longer shown are dropped here, so the list cannot outgrow the pane.
+      update($, expanded, xs => {
+        const shown = xs.filter(x => x !== id && v.frontiers.some(f => f.id === x))
+        return xs.includes(id) ? shown : [...shown, id]
+      })
     const header = (
       <Box flexDirection="row" justifyContent="space-between">
         <Text dimColor>{v.isLoading ? 'refreshing…' : asOfLabel(v.frontiers[0]?.asOf ?? null)}</Text>
@@ -219,14 +223,14 @@ export const register: Register = (on, options) => {
                 </Text>
                 {f.next.how || f.next.facts.length ? (
                   <Button
-                    key={`how:${f.name}`}
-                    label={open.includes(f.name) ? 'how ▾' : 'how ▸'}
-                    onPress={() => toggle(f.name)}
+                    key={`how:${f.id}`}
+                    label={open.includes(f.id) ? 'how ▾' : 'how ▸'}
+                    onPress={() => toggle(f.id)}
                   />
                 ) : null}
               </Box>
             )}
-            {f.next && open.includes(f.name) && (
+            {f.next && open.includes(f.id) && (
               <Box flexDirection="column">
                 {f.next.how ? <Text dimColor>  {f.next.how}</Text> : null}
                 {f.next.facts.map(x => (

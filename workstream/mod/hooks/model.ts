@@ -54,6 +54,7 @@ export function frontierView(json: string): FrontierView {
   // Only resume and message act on a particular session.
   const target = action === 'resume' || action === 'message' ? str(options.session_id).slice(0, 8) : ''
   return {
+    id: str(ws.id),
     name: str(ws.name) || str(ws.id).slice(0, 12),
     title: str(ws.title),
     state: str(ws.state),
