@@ -867,6 +867,15 @@ def cmd_close(args) -> int:
 
 def cmd_ls(args) -> int:
     wss = store.list_workstreams(args.since, include_closed=args.all)
+    if args.session:
+        # Membership as `match` counts it ("already attached"), without match's
+        # transcript scan: the workstream mod polls this for its status badge.
+        # A prefix is matched against member ids, not resolved through the store.
+        wss = [
+            w
+            for w in wss
+            if any(s.startswith(args.session) for s in attribution.Membership.of(w).sessions)
+        ]
     if args.json:
         return _emit_json([asdict(w) for w in wss])
     _hooklog_hint()
@@ -1174,6 +1183,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("ls", help="list workstreams (closed ones only with --all)")
     sp.add_argument("--since")
     sp.add_argument("--all", action="store_true", help="include closed workstreams")
+    sp.add_argument("--session", help="only workstreams this session id (or prefix) is attached to")
     common(sp)
     sp.set_defaults(fn=cmd_ls)
 

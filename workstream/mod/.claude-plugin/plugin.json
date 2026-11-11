@@ -1,0 +1,1 @@
+{ "name": "workstream", "version": "0.1.0", "description": "Workstream hooks, a status-line badge naming the attached workstream, and a side pane with its frontier", "types": "./types/index.d.ts" }
