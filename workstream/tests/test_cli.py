@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from workstream import cli, seam, store
+from workstream import cli, seam, store, timeline
 
 TESTS = Path(__file__).resolve().parent
 
@@ -280,6 +280,50 @@ def test_ls(env, capsys):
     [line] = [x for x in out.splitlines() if x.startswith("default-track")]
     assert "2 sessions" in line and "1 live" in line
     assert [w["name"] for w in run_json(capsys, "ls")] == ["default-track"]
+
+
+@needs_weft
+def test_timeline_embeds_what_show_reports(env, capsys, tmp_path):
+    out = tmp_path / "t.html"
+    d = run_json(capsys, "timeline", "default-track", "-o", str(out))
+    assert d["path"] == str(out) and d["workstreams"] == ["default-track"]
+    [embedded] = timeline.extract(out.read_text())["workstreams"]
+    shown = run_json(capsys, "show", "default-track")
+    assert embedded["workstream"]["name"] == "default-track"
+    assert {s["id"] for s in embedded["frontier"]["sessions"]} == {
+        s["id"] for s in shown["frontier"]["sessions"]
+    }
+    assert {a["ref"] for a in embedded["frontier"]["anchors"]} == {
+        a["ref"] for a in shown["frontier"]["anchors"]
+    }
+
+
+@needs_weft
+def test_timeline_defaults_to_recent_open_workstreams(env, capsys, monkeypatch, tmp_path):
+    monkeypatch.setenv("WORKSTREAM_CACHE_DIR", str(tmp_path / "cache"))
+    code, out, err = run(capsys, "timeline")
+    assert code == 0, err
+    page = tmp_path / "cache" / "timeline.html"
+    assert out.startswith(str(page)) and "(1 workstream)" in out
+    names = [w["workstream"]["name"] for w in timeline.extract(page.read_text())["workstreams"]]
+    assert names == ["default-track"]
+
+
+@needs_weft
+def test_timeline_to_stdout(env, capsys):
+    code, out, err = run(capsys, "timeline", "default-track", "-o", "-")
+    assert code == 0, err
+    assert out.startswith("<!doctype html>")
+    assert timeline.extract(out)["workstreams"][0]["workstream"]["name"] == "default-track"
+
+
+def test_timeline_render_keeps_a_closing_tag_inside_the_data():
+    show = {"workstream": {"name": "x", "title": "</script><b>"}, "frontier": {}}
+    html = timeline.render([show], datetime(2026, 1, 2, tzinfo=timezone.utc))
+    assert "</script><b>" not in html
+    bundle = timeline.extract(html)
+    assert bundle["workstreams"][0]["workstream"]["title"] == "</script><b>"
+    assert bundle["generated_at"] == "2026-01-02T00:00:00+00:00"
 
 
 @needs_weft

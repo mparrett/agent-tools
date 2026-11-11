@@ -1,4 +1,4 @@
-"""`workstream`: match, attach, sync, show, frontier, retire, close, ls, hook."""
+"""`workstream`: match, attach, sync, show, timeline, frontier, retire, close, ls, hook."""
 
 from __future__ import annotations
 
@@ -8,14 +8,17 @@ import os
 import re
 import sys
 import time
+import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
 from rich.markup import escape
 
-from workstream import attribution, frontier, hooklog, seam, sessions, store, sync
+from workstream import attribution, frontier, hooklog, seam, sessions, store, sync, timeline
 from workstream.clock import Instant
 
 RECENT_WINDOW = "14d"
@@ -26,6 +29,7 @@ HOOK_WINDOW = "1d"
 # The SessionEnd wrapper kills the CLI at 20 s; stop starting captures a few
 # seconds before that, so the JSON still gets written and the run exits 0.
 SESSION_END_BUDGET_S = 17.0
+TIMELINE_WORKERS = 6
 
 
 def _console(args) -> Console:
@@ -692,16 +696,62 @@ def _recent_sessions(log):
         return []
 
 
+def _show_dict(ws: store.Workstream, fr: frontier.Frontier) -> dict:
+    return {
+        "workstream": asdict(ws),
+        "frontier": frontier.to_dict(fr),
+        "ref_sources": store.ref_sources(ws),
+    }
+
+
 def cmd_show(args) -> int:
     ws = store.get(args.ws)
     log = _load_log()
     fr = frontier.build(ws, log=log, recent=_recent_sessions(log))
-    sources = store.ref_sources(ws)
     if args.json:
-        return _emit_json(
-            {"workstream": asdict(ws), "frontier": frontier.to_dict(fr), "ref_sources": sources}
+        return _emit_json(_show_dict(ws, fr))
+    _print_show(_console(args), ws, fr, args.local, store.ref_sources(ws))
+    return 0
+
+
+def _newest_first(wss: list[store.Workstream]) -> list[store.Workstream]:
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    return sorted(wss, key=lambda w: w.touched.utc if w.touched else floor, reverse=True)
+
+
+def cmd_timeline(args) -> int:
+    nodes = store.export_nodes()
+    if args.ws:
+        wss = [store.get(name, nodes) for name in args.ws]
+    else:
+        listed = store.list_workstreams(args.since or RECENT_WINDOW, include_closed=args.all)
+        # `ls` carries no children; `get` fills in what `show` would see.
+        wss = [store.get(w.id, nodes) for w in _newest_first(listed)]
+    if not wss:
+        sys.stderr.write("workstream: no workstreams to draw\n")
+        return 1
+    log = _load_log()
+    recent = _recent_sessions(log)
+    # A frontier build spends most of its time in subprocesses and file scans,
+    # which release the GIL. The shared memo caches tolerate concurrent misses:
+    # the worst case is the same entry computed twice.
+    with ThreadPoolExecutor(max_workers=TIMELINE_WORKERS) as pool:
+        shows = list(
+            pool.map(lambda ws: _show_dict(ws, frontier.build(ws, log=log, recent=recent)), wss)
         )
-    _print_show(_console(args), ws, fr, args.local, sources)
+    html = timeline.render(shows, datetime.now(timezone.utc))
+    if args.output == "-":
+        sys.stdout.write(html)
+        return 0
+    path = Path(args.output).expanduser() if args.output else timeline.default_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html)
+    if args.open:
+        webbrowser.open(path.resolve().as_uri())
+    names = [w.name or w.id for w in wss]
+    if args.json:
+        return _emit_json({"path": str(path), "bytes": len(html.encode()), "workstreams": names})
+    print(f"{path}  ({len(names)} workstream{'' if len(names) == 1 else 's'})")
     return 0
 
 
@@ -1149,6 +1199,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("ws")
     common(sp, local=True)
     sp.set_defaults(fn=cmd_show)
+
+    sp = sub.add_parser(
+        "timeline", help="write an HTML timeline of workstreams' sessions, messages and anchors"
+    )
+    sp.add_argument(
+        "ws", nargs="*", help="workstreams to draw (default: open ones touched within --since)"
+    )
+    sp.add_argument(
+        "--since", help=f"recency window when no workstream is named (default {RECENT_WINDOW})"
+    )
+    sp.add_argument("--all", action="store_true", help="include closed workstreams")
+    sp.add_argument(
+        "-o",
+        "--output",
+        help="file to write, or - for stdout (default: $XDG_CACHE_HOME/workstream/timeline.html)",
+    )
+    sp.add_argument("--open", action="store_true", help="open the page in the default browser")
+    common(sp)
+    sp.set_defaults(fn=cmd_timeline)
 
     sp = sub.add_parser("frontier", help="where the work stopped, loose ends, resume-or-fresh")
     sp.add_argument("ws")
