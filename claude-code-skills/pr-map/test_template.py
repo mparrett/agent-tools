@@ -3,7 +3,7 @@
 # dependencies = ["pytest", "playwright"]
 # ///
 """Layout tests for template.html. Run via
-`uv run --with pytest --with playwright claude-code-skills/workstream-map/test_template.py`
+`uv run --with pytest --with playwright claude-code-skills/pr-map/test_template.py`
 (or `just test`). Needs network for d3 from cdnjs, like the page itself.
 
 The template is a fixed renderer fed by placeholders build.py fills. These fill

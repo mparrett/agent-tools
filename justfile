@@ -237,9 +237,9 @@ test:
     uv run claude-code-skills/pr-dashboard/test_collect.py
     uv run claude-code-skills/pr-dashboard/test_render.py
     uv run --with pytest --with playwright claude-code-skills/pr-dashboard/test_template.py
-    uv run --with pytest claude-code-skills/workstream-map/test_build.py
-    uv run --with pytest claude-code-skills/workstream-map/test_fetch.py
-    uv run --with pytest --with playwright claude-code-skills/workstream-map/test_template.py
+    uv run --with pytest claude-code-skills/pr-map/test_build.py
+    uv run --with pytest claude-code-skills/pr-map/test_fetch.py
+    uv run --with pytest --with playwright claude-code-skills/pr-map/test_template.py
     uv run --with pytest --with playwright --directory preview-diff pytest -q
     uv run skill-lint/test_skill_lint.py
     uv run board/test_board.py

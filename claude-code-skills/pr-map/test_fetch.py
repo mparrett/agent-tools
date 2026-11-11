@@ -3,7 +3,7 @@
 # dependencies = ["pytest"]
 # ///
 """Unit tests for the offline parts of scripts/fetch.py. Run via
-`uv run --with pytest claude-code-skills/workstream-map/test_fetch.py` (or `just test`).
+`uv run --with pytest claude-code-skills/pr-map/test_fetch.py` (or `just test`).
 
 No network: the `gh` calls are stubbed. They pin the page splitter, which used
 to cut on `][` and lose every comment on a page holding reference-style
