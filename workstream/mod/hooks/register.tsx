@@ -171,11 +171,13 @@ export const register: Register = (on, options) => {
     const v = await read($, view)
     const flips = await read($, flipped)
     const isOpen = (id: string, fold: Fold) => FOLDS[fold] !== flips.includes(`${id}:${fold}`)
-    const toggle = (id: string, fold: Fold) => {
+    const toggle = async (id: string, fold: Fold) => {
       const k = `${id}:${fold}`
-      // Workstreams no longer shown are dropped here, so the list cannot outgrow the pane.
+      // Workstreams no longer shown are dropped here, so the list cannot outgrow
+      // the pane; against the view as it is now, not as this render saw it.
+      const now = await read($, view)
       return update($, flipped, xs => {
-        const kept = xs.filter(x => x !== k && v.frontiers.some(f => x.startsWith(`${f.id}:`)))
+        const kept = xs.filter(x => x !== k && now.frontiers.some(f => x.startsWith(`${f.id}:`)))
         return xs.includes(k) ? kept : [...kept, k]
       })
     }
@@ -279,19 +281,20 @@ export const register: Register = (on, options) => {
                   </Text>
                 )),
               )}
-            {section(
-              f.id,
-              'sessions',
-              'sessions',
-              f.sessions.length,
-              f.sessions.map(s => (
-                <Text>
-                  {'  '}
-                  {s.id} <Text dimColor>{s.role}</Text>
-                  {s.live ? <Text color="success"> live</Text> : null}
-                </Text>
-              )),
-            )}
+            {f.sessions.length > 0 &&
+              section(
+                f.id,
+                'sessions',
+                'sessions',
+                f.sessions.length,
+                f.sessions.map(s => (
+                  <Text>
+                    {'  '}
+                    {s.id} <Text dimColor>{s.role}</Text>
+                    {s.live ? <Text color="success"> live</Text> : null}
+                  </Text>
+                )),
+              )}
             {f.prose && (
               <Box marginTop={1}>
                 <Text dimColor>
