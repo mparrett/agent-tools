@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { asOfLabel, attachments, badgeMode, badgeText, frontierView, touchesWorkstream } from './model'
+import { asOfLabel, attachments, badgeMode, colorSlots, badgeText, frontierView, touchesWorkstream } from './model'
 
 // Trimmed from a real `workstream frontier --json`: only the fields the pane reads.
 const FRONTIER = JSON.stringify({
@@ -85,6 +85,16 @@ test('an older frontier without options.default falls back to the recommendation
   expect(f.next?.why).toBe('canonical session 5d5c9a2e is live')
 })
 
+test('each workstream keeps its color as others come and go, and shown ones never share', () => {
+  const a = colorSlots(['aaaa', 'bbbb', 'cccc'], 6)
+  expect(new Set(a.values()).size).toBe(3)
+  expect(colorSlots(['x', 'x'], 6).size).toBe(1)
+  const b = colorSlots(['bbbb'], 6)
+  const c = colorSlots(['cccc', 'bbbb'], 6)
+  expect(c.get('bbbb')).toBe(b.get('bbbb'))
+  expect(colorSlots(['q', 'r', 's', 't', 'u', 'v', 'w'], 6).size).toBe(7)
+})
+
 test('the pane stamps the local time the frontier was read', () => {
   expect(asOfLabel('2026-11-11T00:54:06Z (16:54 -08:00)')).toBe('as of 16:54')
   expect(asOfLabel(null)).toBe('')
@@ -165,6 +175,15 @@ test('an attached session gets the badge and a pane with its frontier', async ($
   expect(await ui.find({ type: 'Text', text: /no recorded frontier/ })).toBeDefined()
   await ui.press({ key: 'anchors:abc123def4567890' })
   expect(await ui.find({ type: 'Text', text: /gh:o\/r#7/ })).toBeDefined()
+
+  // The workstream's header folds the whole block down to itself.
+  expect((await ui.find({ key: 'ws:abc123def4567890' }))?.text).toMatch(/^▾ ◆ demo \[open\] ─+$/)
+  await ui.press({ key: 'ws:abc123def4567890' })
+  expect((await ui.find({ key: 'ws:abc123def4567890' }))?.text).toMatch(/^▸ ◆ demo \[open\] ─+$/)
+  expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /no recorded frontier/ })).toBeUndefined()
+  await ui.press({ key: 'ws:abc123def4567890' })
+  expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeDefined()
   await ui.unmount()
 })
 
