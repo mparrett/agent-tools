@@ -87,3 +87,22 @@ export function touchesWorkstream(command: string): boolean {
   // In command position only (start, or after ; & |), so `rg workstream attach` is not one
   return /(^|[;&|])\s*(\S*\/)?workstream\s+(attach|close|retire|sync|frontier\s.*--record)/.test(command)
 }
+
+// A color index for each workstream id, out of `n`: from a hash of the id, so a
+// workstream keeps its color as others attach or detach, then the next free
+// slot on a collision, so the ones shown together never share one (until
+// there are more than `n`). Ids claim slots in sorted order, not drawn order,
+// so only a collision with an id sorting earlier moves a workstream's color.
+export function colorSlots(ids: string[], n: number): Map<string, number> {
+  const slots = new Map<string, number>()
+  const taken = new Set<number>()
+  for (const id of [...new Set(ids)].sort()) {
+    let h = 0
+    for (const c of id) h = (h * 31 + c.charCodeAt(0)) >>> 0
+    let slot = h % n
+    for (let k = 0; k < n && taken.has(slot); k++) slot = (slot + 1) % n
+    taken.add(slot)
+    slots.set(id, slot)
+  }
+  return slots
+}

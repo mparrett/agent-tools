@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { asOfLabel, attachments, badgeMode, badgeText, frontierView, touchesWorkstream } from './model'
+import { asOfLabel, attachments, badgeMode, colorSlots, badgeText, frontierView, touchesWorkstream } from './model'
 
 // Trimmed from a real `workstream frontier --json`: only the fields the pane reads.
 const FRONTIER = JSON.stringify({
@@ -83,6 +83,16 @@ test('an older frontier without options.default falls back to the recommendation
   expect(f.next?.action).toBe('fresh')
   expect(f.next?.session).toBe('')
   expect(f.next?.why).toBe('canonical session 5d5c9a2e is live')
+})
+
+test('each workstream keeps its color as others come and go, and shown ones never share', () => {
+  const a = colorSlots(['aaaa', 'bbbb', 'cccc'], 6)
+  expect(new Set(a.values()).size).toBe(3)
+  expect(colorSlots(['x', 'x'], 6).size).toBe(1)
+  const b = colorSlots(['bbbb'], 6)
+  const c = colorSlots(['cccc', 'bbbb'], 6)
+  expect(c.get('bbbb')).toBe(b.get('bbbb'))
+  expect(colorSlots(['q', 'r', 's', 't', 'u', 'v', 'w'], 6).size).toBe(7)
 })
 
 test('the pane stamps the local time the frontier was read', () => {

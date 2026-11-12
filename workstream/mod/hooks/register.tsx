@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
 
 import type { Attachment, FrontierView, WorkstreamView } from '../types'
+import { colorSlots } from './model'
 import { asOfLabel, attachments, badgeMode, badgeText, frontierView, roleLabel, touchesWorkstream } from './model'
 import type { BadgeMode } from './model'
 
@@ -20,8 +21,8 @@ const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { sha
 // the sections do; the agent-facing instructions behind `how` do not.
 const FOLDS = { ws: true, how: false, loose: true, anchors: true, sessions: true } as const
 type Fold = keyof typeof FOLDS
-// One theme color per workstream shown, in order, so blocks read apart once
-// some are folded; the strongest first, since one or two is the usual count.
+// Theme colors for telling workstreams apart once some are folded; each keeps
+// its own (colorSlots), and its next-step line is drawn in it too.
 const WS_COLORS = ['claude', 'suggestion', 'merged', 'planMode', 'ide', 'remember'] as const
 // `${workstream id}:${fold}` for each fold flipped from its default.
 const flipped = atom({ plugin: 'workstream', key: 'flipped' } as const, [] as string[], { shape: 'flipped-1' })
@@ -229,17 +230,22 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    const slots = colorSlots(
+      v.frontiers.map(f => f.id),
+      WS_COLORS.length,
+    )
     return (
       <Box flexDirection="column">
         {header}
         {v.frontiers.map((f, i) => {
-          const color = WS_COLORS[i % WS_COLORS.length] ?? 'claude'
+          const color = WS_COLORS[slots.get(f.id) ?? i % WS_COLORS.length] ?? 'claude'
           const shut = !isOpen(f.id, 'ws')
           // The workstream's own header: a rule in its color to the pane's edge,
           // which also folds the whole workstream down to that one line.
           const lead = `${shut ? '▸' : '▾'} ◆ ${f.name} [${f.state}] `
           // The pane's own width; `e.viewport` is the whole terminal's.
-          const rule = '─'.repeat(Math.max(2, (e.props.bodyColumns ?? 38) - lead.length))
+          // Code points, not UTF-16 units; none at all when the name fills the line.
+          const rule = '─'.repeat(Math.max(0, (e.props.bodyColumns ?? 38) - [...lead].length))
           return (
             <Box flexDirection="column" marginTop={1}>
               <Button plain key={`ws:${f.id}`} label={f.name} onPress={() => toggle(f.id, 'ws')}>
@@ -256,7 +262,7 @@ export const register: Register = (on, options) => {
                   {f.next && (
                     <Box flexDirection="row" justifyContent="space-between">
                       <Text>
-                        <Text color="suggestion">
+                        <Text color={color}>
                           next: {f.next.action}
                           {f.next.session ? ` ${f.next.session}` : ''}
                         </Text>
