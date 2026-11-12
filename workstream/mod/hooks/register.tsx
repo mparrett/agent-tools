@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
 
 import type { Attachment, FrontierView, WorkstreamView } from '../types'
 import { asOfLabel, attachments, badgeMode, badgeText, frontierView, roleLabel, touchesWorkstream } from './model'
@@ -16,8 +16,12 @@ const FRONTIER_EVERY_MS = 5 * 60_000
 const INITIAL: WorkstreamView = { attached: null, frontiers: [], error: null, isLoading: false }
 // Change the tag when WorkstreamView's fields change: a value outlives a reload.
 const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-3' })
-// Workstreams whose next-step instructions are unfolded in the pane, by id.
-const expanded = atom({ plugin: 'workstream', key: 'expanded' } as const, [] as string[], { shape: 'expanded-1' })
+// The pane's foldable parts of each workstream, and whether each starts open:
+// the sections do; the agent-facing instructions behind `how` do not.
+const FOLDS = { how: false, loose: true, anchors: true, sessions: true } as const
+type Fold = keyof typeof FOLDS
+// `${workstream id}:${fold}` for each fold flipped from its default.
+const flipped = atom({ plugin: 'workstream', key: 'flipped' } as const, [] as string[], { shape: 'flipped-1' })
 
 // Where the badge goes, from the `badge` option. Options are fixed for an
 // activation; a change reloads the plugin and runs `register` again.
@@ -165,13 +169,32 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const v = await read($, view)
-    const open = await read($, expanded)
-    const toggle = (id: string) =>
-      // Ids no longer shown are dropped here, so the list cannot outgrow the pane.
-      update($, expanded, xs => {
-        const shown = xs.filter(x => x !== id && v.frontiers.some(f => f.id === x))
-        return xs.includes(id) ? shown : [...shown, id]
+    const flips = await read($, flipped)
+    const isOpen = (id: string, fold: Fold) => FOLDS[fold] !== flips.includes(`${id}:${fold}`)
+    const toggle = async (id: string, fold: Fold) => {
+      const k = `${id}:${fold}`
+      // Workstreams no longer shown are dropped here, so the list cannot outgrow
+      // the pane; against the view as it is now, not as this render saw it.
+      const now = await read($, view)
+      return update($, flipped, xs => {
+        const kept = xs.filter(x => x !== k && now.frontiers.some(f => x.startsWith(`${f.id}:`)))
+        return xs.includes(k) ? kept : [...kept, k]
       })
+    }
+    // A section's header is its own toggle, caret first; folded, it gives a count.
+    const section = (id: string, fold: Fold, title: string, count: number, rows: RenderChildren[]) => {
+      const shut = !isOpen(id, fold)
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Button plain key={`${fold}:${id}`} label={title} onPress={() => toggle(id, fold)}>
+            <Text dimColor>{shut ? '▸ ' : '▾ '}</Text>
+            <Text weight="semibold">{title}</Text>
+            {shut ? <Text dimColor> ({count})</Text> : null}
+          </Button>
+          {shut ? null : rows}
+        </Box>
+      )
+    }
     const header = (
       <Box flexDirection="row" justifyContent="space-between">
         <Text dimColor>{v.isLoading ? 'refreshing…' : asOfLabel(v.frontiers[0]?.asOf ?? null)}</Text>
@@ -222,15 +245,13 @@ export const register: Register = (on, options) => {
                   {f.next.why ? <Text dimColor> · {f.next.why}</Text> : null}
                 </Text>
                 {f.next.how || f.next.facts.length ? (
-                  <Button
-                    key={`how:${f.id}`}
-                    label={open.includes(f.id) ? 'how ▾' : 'how ▸'}
-                    onPress={() => toggle(f.id)}
-                  />
+                  <Button plain dimColor key={`how:${f.id}`} label="how" onPress={() => toggle(f.id, 'how')}>
+                    {isOpen(f.id, 'how') ? '▾ how' : '▸ how'}
+                  </Button>
                 ) : null}
               </Box>
             )}
-            {f.next && open.includes(f.id) && (
+            {f.next && isOpen(f.id, 'how') && (
               <Box flexDirection="column">
                 {f.next.how ? <Text dimColor>  {f.next.how}</Text> : null}
                 {f.next.facts.map(x => (
@@ -238,36 +259,42 @@ export const register: Register = (on, options) => {
                 ))}
               </Box>
             )}
-            {f.looseEnds.length > 0 && (
-              <Box flexDirection="column" marginTop={1}>
-                <Text weight="semibold">loose ends</Text>
-                {f.looseEnds.map(l => (
-                  <Text color="warning">  • {l}</Text>
-                ))}
-              </Box>
-            )}
-            {f.anchors.length > 0 && (
-              <Box flexDirection="column" marginTop={1}>
-                <Text weight="semibold">anchors</Text>
-                {f.anchors.map(a => (
+            {f.looseEnds.length > 0 &&
+              section(
+                f.id,
+                'loose',
+                'loose ends',
+                f.looseEnds.length,
+                f.looseEnds.map(l => <Text color="warning">  • {l}</Text>),
+              )}
+            {f.anchors.length > 0 &&
+              section(
+                f.id,
+                'anchors',
+                'anchors',
+                f.anchors.length,
+                f.anchors.map(a => (
                   <Text>
                     {'  '}
                     <Text dimColor>{a.status.padEnd(9)}</Text>
                     {a.ref}
                   </Text>
-                ))}
-              </Box>
-            )}
-            <Box flexDirection="column" marginTop={1}>
-              <Text weight="semibold">sessions</Text>
-              {f.sessions.map(s => (
-                <Text>
-                  {'  '}
-                  {s.id} <Text dimColor>{s.role}</Text>
-                  {s.live ? <Text color="success"> live</Text> : null}
-                </Text>
-              ))}
-            </Box>
+                )),
+              )}
+            {f.sessions.length > 0 &&
+              section(
+                f.id,
+                'sessions',
+                'sessions',
+                f.sessions.length,
+                f.sessions.map(s => (
+                  <Text>
+                    {'  '}
+                    {s.id} <Text dimColor>{s.role}</Text>
+                    {s.live ? <Text color="success"> live</Text> : null}
+                  </Text>
+                )),
+              )}
             {f.prose && (
               <Box marginTop={1}>
                 <Text dimColor>
