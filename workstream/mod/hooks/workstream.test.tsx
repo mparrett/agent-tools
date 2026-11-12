@@ -165,6 +165,15 @@ test('an attached session gets the badge and a pane with its frontier', async ($
   expect(await ui.find({ type: 'Text', text: /no recorded frontier/ })).toBeDefined()
   await ui.press({ key: 'anchors:abc123def4567890' })
   expect(await ui.find({ type: 'Text', text: /gh:o\/r#7/ })).toBeDefined()
+
+  // The workstream's header folds the whole block down to itself.
+  expect((await ui.find({ key: 'ws:abc123def4567890' }))?.text).toMatch(/^▾ ◆ demo \[open\] ─+$/)
+  await ui.press({ key: 'ws:abc123def4567890' })
+  expect((await ui.find({ key: 'ws:abc123def4567890' }))?.text).toMatch(/^▸ ◆ demo \[open\] ─+$/)
+  expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /no recorded frontier/ })).toBeUndefined()
+  await ui.press({ key: 'ws:abc123def4567890' })
+  expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeDefined()
   await ui.unmount()
 })
 

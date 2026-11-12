@@ -18,8 +18,11 @@ const INITIAL: WorkstreamView = { attached: null, frontiers: [], error: null, is
 const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-3' })
 // The pane's foldable parts of each workstream, and whether each starts open:
 // the sections do; the agent-facing instructions behind `how` do not.
-const FOLDS = { how: false, loose: true, anchors: true, sessions: true } as const
+const FOLDS = { ws: true, how: false, loose: true, anchors: true, sessions: true } as const
 type Fold = keyof typeof FOLDS
+// One theme color per workstream shown, in order, so blocks read apart once
+// some are folded; the strongest first, since one or two is the usual count.
+const WS_COLORS = ['claude', 'suggestion', 'merged', 'planMode', 'ide', 'remember'] as const
 // `${workstream id}:${fold}` for each fold flipped from its default.
 const flipped = atom({ plugin: 'workstream', key: 'flipped' } as const, [] as string[], { shape: 'flipped-1' })
 
@@ -182,12 +185,12 @@ export const register: Register = (on, options) => {
       })
     }
     // A section's header is its own toggle, caret first; folded, it gives a count.
-    const section = (id: string, fold: Fold, title: string, count: number, rows: RenderChildren[]) => {
+    const section = (id: string, color: string, fold: Fold, title: string, count: number, rows: RenderChildren[]) => {
       const shut = !isOpen(id, fold)
       return (
         <Box flexDirection="column" marginTop={1}>
           <Button plain key={`${fold}:${id}`} label={title} onPress={() => toggle(id, fold)}>
-            <Text dimColor>{shut ? '▸ ' : '▾ '}</Text>
+            <Text color={color}>{shut ? '▸ ' : '▾ '}</Text>
             <Text weight="semibold">{title}</Text>
             {shut ? <Text dimColor> ({count})</Text> : null}
           </Button>
@@ -229,82 +232,103 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         {header}
-        {v.frontiers.map(f => (
-          <Box flexDirection="column" marginTop={1}>
-            <Text>
-              <Text weight="semibold">{f.name}</Text> <Text dimColor>[{f.state}]</Text>
-            </Text>
-            <Text>{f.title}</Text>
-            {f.next && (
-              <Box flexDirection="row" justifyContent="space-between">
-                <Text>
-                  <Text color="suggestion">
-                    next: {f.next.action}
-                    {f.next.session ? ` ${f.next.session}` : ''}
-                  </Text>
-                  {f.next.why ? <Text dimColor> · {f.next.why}</Text> : null}
+        {v.frontiers.map((f, i) => {
+          const color = WS_COLORS[i % WS_COLORS.length] ?? 'claude'
+          const shut = !isOpen(f.id, 'ws')
+          // The workstream's own header: a rule in its color to the pane's edge,
+          // which also folds the whole workstream down to that one line.
+          const lead = `${shut ? '▸' : '▾'} ◆ ${f.name} [${f.state}] `
+          // The pane's own width; `e.viewport` is the whole terminal's.
+          const rule = '─'.repeat(Math.max(2, (e.props.bodyColumns ?? 38) - lead.length))
+          return (
+            <Box flexDirection="column" marginTop={1}>
+              <Button plain key={`ws:${f.id}`} label={f.name} onPress={() => toggle(f.id, 'ws')}>
+                <Text color={color}>{shut ? '▸ ◆ ' : '▾ ◆ '}</Text>
+                <Text color={color} weight="semibold">
+                  {f.name}
                 </Text>
-                {f.next.how || f.next.facts.length ? (
-                  <Button plain dimColor key={`how:${f.id}`} label="how" onPress={() => toggle(f.id, 'how')}>
-                    {isOpen(f.id, 'how') ? '▾ how' : '▸ how'}
-                  </Button>
-                ) : null}
-              </Box>
-            )}
-            {f.next && isOpen(f.id, 'how') && (
-              <Box flexDirection="column">
-                {f.next.how ? <Text dimColor>  {f.next.how}</Text> : null}
-                {f.next.facts.map(x => (
-                  <Text dimColor>  • {x}</Text>
-                ))}
-              </Box>
-            )}
-            {f.looseEnds.length > 0 &&
-              section(
-                f.id,
-                'loose',
-                'loose ends',
-                f.looseEnds.length,
-                f.looseEnds.map(l => <Text color="warning">  • {l}</Text>),
+                <Text dimColor> [{f.state}] </Text>
+                <Text color={color}>{rule}</Text>
+              </Button>
+              {shut ? null : (
+                <Box flexDirection="column">
+                  <Text>{f.title}</Text>
+                  {f.next && (
+                    <Box flexDirection="row" justifyContent="space-between">
+                      <Text>
+                        <Text color="suggestion">
+                          next: {f.next.action}
+                          {f.next.session ? ` ${f.next.session}` : ''}
+                        </Text>
+                        {f.next.why ? <Text dimColor> · {f.next.why}</Text> : null}
+                      </Text>
+                      {f.next.how || f.next.facts.length ? (
+                        <Button plain dimColor key={`how:${f.id}`} label="how" onPress={() => toggle(f.id, 'how')}>
+                          {isOpen(f.id, 'how') ? '▾ how' : '▸ how'}
+                        </Button>
+                      ) : null}
+                    </Box>
+                  )}
+                  {f.next && isOpen(f.id, 'how') && (
+                    <Box flexDirection="column">
+                      {f.next.how ? <Text dimColor>  {f.next.how}</Text> : null}
+                      {f.next.facts.map(x => (
+                        <Text dimColor>  • {x}</Text>
+                      ))}
+                    </Box>
+                  )}
+                  {f.looseEnds.length > 0 &&
+                    section(
+                      f.id,
+                      color,
+                      'loose',
+                      'loose ends',
+                      f.looseEnds.length,
+                      f.looseEnds.map(l => <Text color="warning">  • {l}</Text>),
+                    )}
+                  {f.anchors.length > 0 &&
+                    section(
+                      f.id,
+                      color,
+                      'anchors',
+                      'anchors',
+                      f.anchors.length,
+                      f.anchors.map(a => (
+                        <Text>
+                          {'  '}
+                          <Text dimColor>{a.status.padEnd(9)}</Text>
+                          {a.ref}
+                        </Text>
+                      )),
+                    )}
+                  {f.sessions.length > 0 &&
+                    section(
+                      f.id,
+                      color,
+                      'sessions',
+                      'sessions',
+                      f.sessions.length,
+                      f.sessions.map(s => (
+                        <Text>
+                          {'  '}
+                          {s.id} <Text dimColor>{s.role}</Text>
+                          {s.live ? <Text color="success"> live</Text> : null}
+                        </Text>
+                      )),
+                    )}
+                  {f.prose && (
+                    <Box marginTop={1}>
+                      <Text dimColor>
+                        prose: {f.prose.path}
+                        {f.prose.exists ? '' : ' (not written yet)'}
+                      </Text>
+                    </Box>
+                  )}
+                </Box>
               )}
-            {f.anchors.length > 0 &&
-              section(
-                f.id,
-                'anchors',
-                'anchors',
-                f.anchors.length,
-                f.anchors.map(a => (
-                  <Text>
-                    {'  '}
-                    <Text dimColor>{a.status.padEnd(9)}</Text>
-                    {a.ref}
-                  </Text>
-                )),
-              )}
-            {f.sessions.length > 0 &&
-              section(
-                f.id,
-                'sessions',
-                'sessions',
-                f.sessions.length,
-                f.sessions.map(s => (
-                  <Text>
-                    {'  '}
-                    {s.id} <Text dimColor>{s.role}</Text>
-                    {s.live ? <Text color="success"> live</Text> : null}
-                  </Text>
-                )),
-              )}
-            {f.prose && (
-              <Box marginTop={1}>
-                <Text dimColor>
-                  prose: {f.prose.path}
-                  {f.prose.exists ? '' : ' (not written yet)'}
-                </Text>
-              </Box>
-            )}
-          </Box>
-        ))}
+            </Box>
+          )
+        })}
       </Box>
     )
   })
