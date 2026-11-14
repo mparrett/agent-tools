@@ -141,7 +141,7 @@ test('an attached session gets the badge and a pane with its frontier', async ($
     return { value: { isPlaced: true } }
   })
   on('ui.panes', () => ({ value: [{ id: 'workstream', title: 'Workstream', isShown: true, isFocused: false, isPlaced: true }] }))
-  on('command.register', () => ({ value: { command: 'workstream-pane' } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -214,7 +214,7 @@ test('refresh pressed during a badge-only refresh still reads the frontier', asy
   on('ui.status', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.panes', () => ({ value: [] }))
-  on('command.register', () => ({ value: { command: 'workstream-pane' } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -242,7 +242,7 @@ test('one failed frontier keeps the last good list', async ($, on) => {
   on('ui.status', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.panes', () => ({ value: [] }))
-  on('command.register', () => ({ value: { command: 'workstream-pane' } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -285,7 +285,7 @@ function stubStart(on: On, ls: string, statuses: (string | undefined)[]) {
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.panes', () => ({ value: [] }))
-  on('command.register', () => ({ value: { command: 'workstream-pane' } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 }
 
@@ -312,4 +312,67 @@ test('the default leaves the band to others', async ($, on) => {
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /◆ ws/ })).toBeUndefined()
   await ui.unmount()
+})
+
+const slash = (args: string) => ({
+  command: 'workstream',
+  args,
+  origin: { kind: 'composer' as const },
+  presentation: { isFullscreen: false, columns: 120 },
+})
+
+// `waiting` holds a pane open but undrawn, as on a terminal too narrow to seat it;
+// `behind` holds one drawn but not shown, behind another pane
+function stubPanes(on: On, opened: string[], closed: string[], waiting: Set<string>, behind = new Set<string>()) {
+  const up = new Set<string>()
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.id', () => ({ value: SID }))
+  on('process.run', (_, e) => ok(e.argv.includes('ls') ? '[]' : FRONTIER))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.open', (_, e) => (
+    opened.push(e.id), up.add(e.id), { value: waiting.has(e.id) ? { isPlaced: false, reason: 'too narrow' } : { isPlaced: true } }
+  ))
+  on('ui.close', (_, e) => (closed.push(e.id), up.delete(e.id), { value: undefined }))
+  on('ui.panes', () => ({
+    value: [...up].map(id => ({ id, title: id, isShown: !behind.has(id), isFocused: false, isPlaced: !waiting.has(id) })),
+  }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+}
+
+test('bare /workstream toggles the pane, cancels one waiting undrawn, and brings one forward', async ($, on) => {
+  const clock = mock.clock(on)
+  const opened: string[] = []
+  const closed: string[] = []
+  const waiting = new Set<string>()
+  const behind = new Set<string>()
+  stubPanes(on, opened, closed, waiting, behind)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(opened).toEqual([])
+
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane opened. /workstream closes it.')
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane closed. /workstream reopens it.')
+  expect(closed).toEqual(['workstream'])
+  waiting.add('workstream')
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane waiting: too narrow. /workstream cancels it.')
+  expect((await $.command.run(slash(''))).text).toMatch(/^Workstream pane closed\./)
+  expect(closed).toEqual(['workstream', 'workstream'])
+  waiting.clear()
+  await $.command.run(slash(''))
+  behind.add('workstream')
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane opened. /workstream closes it.')
+  expect(closed).toEqual(['workstream', 'workstream'])
+  expect(opened).toEqual(['workstream', 'workstream', 'workstream', 'workstream'])
+  // the refresh an open starts must land before the test's engine goes
+  await clock.settle()
+})
+
+test('/workstream with arguments points at the skill and leaves the pane alone', async ($, on) => {
+  const clock = mock.clock(on)
+  const opened: string[] = []
+  stubPanes(on, opened, [], new Set())
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect((await $.command.run(slash('attach'))).text).toBe('/workstream takes no arguments; /workstream-manage runs the skill.')
+  expect(opened).toEqual([])
 })

@@ -7,7 +7,9 @@ import { asOfLabel, attachments, badgeMode, badgeText, frontierView, roleLabel, 
 import type { BadgeMode } from './model'
 
 const PANE = 'workstream'
-const COMMAND = 'workstream-pane'
+// A bare `/workstream` opens or closes the pane. The skill that attaches and
+// resumes is `/workstream-manage`, a name of its own, so nothing here collides.
+const COMMAND = 'workstream'
 // `ls --session` is under a second, so the badge can keep close to the store;
 // a frontier probes every anchor through gh and git (seconds per workstream),
 // so the pane refreshes far less often, and only while it is open.
@@ -46,6 +48,14 @@ async function cli($: EngineInterface, args: string[]): Promise<string> {
 
 async function isPaneOpen($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(p => p.id === PANE)
+}
+
+// What /workstream should do to the pane. A pane drawn but behind another is
+// brought forward; one waiting undrawn on a narrow terminal is closed, so a
+// second /workstream cancels it instead of leaving its frontier polling.
+async function shouldClosePane($: EngineInterface): Promise<boolean> {
+  const pane = (await $.ui.panes()).find(p => p.id === PANE)
+  return !!pane && (pane.isShown || !pane.isPlaced)
 }
 
 async function refresh($: EngineInterface, withFrontier: boolean): Promise<void> {
@@ -104,10 +114,7 @@ export const register: Register = (on, options) => {
   mode = badgeMode(options.badge)
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: COMMAND,
-      description: "Open the workstream pane: this session's workstreams and their frontier",
-    })
+    await $.command.register({ name: COMMAND, description: 'Open or close the workstream pane' })
     // Whatever started before is stopped first, so a second start never doubles the polling.
     for (const t of timers) t.cancel()
     timers = [
@@ -129,11 +136,17 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: COMMAND }, async $ => {
-    await $.ui.open({ id: PANE, title: 'Workstream' })
+  on('command.run', { command: COMMAND }, async ($, e) => {
+    if (e.args.trim()) return { text: '/workstream takes no arguments; /workstream-manage runs the skill.' }
+    if (await shouldClosePane($)) {
+      await $.ui.close({ id: PANE })
+      return { text: 'Workstream pane closed. /workstream reopens it.' }
+    }
+    const opened = await $.ui.open({ id: PANE, title: 'Workstream' })
     void kick($, true)
-    return { text: 'Workstream pane opened.' }
-  }).catch(() => ({ text: 'The workstream pane could not open; see claude --debug.' }))
+    if (!opened.isPlaced) return { text: `Workstream pane waiting: ${opened.reason}. /workstream cancels it.` }
+    return { text: 'Workstream pane opened. /workstream closes it.' }
+  }).catch(() => ({ text: 'The workstream pane could not be opened or closed; see claude --debug.' }))
 
   // Never a gate: a failed refresh must not refuse the command it watched.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {

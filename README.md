@@ -136,6 +136,7 @@ rather than pulling over it. Commit it from a working clone first.
 | [`pr-map`](claude-code-skills/pr-map/SKILL.md) | Map a person's work in a theme across one or more repos — every issue and PR they touched, as lanes × time with the `#`-references between them as edges, hub ranking, a curated "start here" per lane, and a markdown inventory. The historical, relational sibling of `pr-dashboard`. |
 | [`pr-watch`](claude-code-skills/pr-watch/SKILL.md) | Report only what moved on open PRs since the last check — approval flips, comment/body changes (conversation and inline review), new reviews, opened/closed PRs. Stateful delta sibling of `pr-dashboard`: the engine (`watch.py`) and baseline cache live in the `pr-dashboard` skill, so installing pr-watch requires pr-dashboard alongside it. |
 | [`smolspec`](claude-code-skills/smolspec/SKILL.md) | Sharpen a task with three critical questions — why, what's undecided, what done means and where new scope goes — into a spec of half a page to a page. |
+| [`workstream-manage`](claude-code-skills/workstream-manage/SKILL.md) | Attach a session to its workstream, resume from a workstream's frontier, and record the frontier before a session is retired. Pairs with the `workstream` CLI; `/workstream` alone toggles the plugin's pane. |
 
 ## Roadmap
 
