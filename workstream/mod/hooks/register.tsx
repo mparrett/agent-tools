@@ -7,13 +7,9 @@ import { asOfLabel, attachments, badgeMode, badgeText, frontierView, roleLabel, 
 import type { BadgeMode } from './model'
 
 const PANE = 'workstream'
-// The workstream skill's command. A bare `/workstream` is the pane's toggle and
-// never reaches the skill; with arguments (`/workstream attach`) it runs the skill.
-// The mod registers the name only when no skill provides it, so the pane keeps a
-// command where the skill isn't installed; registering over the skill would hide it.
+// A bare `/workstream` opens or closes the pane. The skill that attaches and
+// resumes is `/workstream-manage`, a name of its own, so nothing here collides.
 const COMMAND = 'workstream'
-// Whether this session's `/workstream` is the mod's own, for want of the skill.
-let ownsCommand = false
 // `ls --session` is under a second, so the badge can keep close to the store;
 // a frontier probes every anchor through gh and git (seconds per workstream),
 // so the pane refreshes far less often, and only while it is open.
@@ -117,11 +113,7 @@ export const register: Register = (on, options) => {
   mode = badgeMode(options.badge)
 
   on('session.start', async ($, e, next) => {
-    const listed = await $.command.list().catch(() => [])
-    ownsCommand = !listed.some(c => c.name === COMMAND && !(c.source === 'plugin' && c.plugin === 'workstream'))
-    if (ownsCommand) {
-      await $.command.register({ name: COMMAND, description: 'Open or close the workstream pane' })
-    }
+    await $.command.register({ name: COMMAND, description: 'Open or close the workstream pane' })
     // Whatever started before is stopped first, so a second start never doubles the polling.
     for (const t of timers) t.cancel()
     timers = [
@@ -143,11 +135,8 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: COMMAND }, async ($, e, next) => {
-    if (e.args.trim()) {
-      if (ownsCommand) return { text: 'The workstream skill is not installed; a bare /workstream opens or closes the pane.' }
-      return next(e)
-    }
+  on('command.run', { command: COMMAND }, async ($, e) => {
+    if (e.args.trim()) return { text: '/workstream takes no arguments; /workstream-manage runs the skill.' }
     if (await isPaneShowing($)) {
       await $.ui.close({ id: PANE })
       return { text: 'Workstream pane closed. /workstream reopens it.' }
@@ -155,16 +144,8 @@ export const register: Register = (on, options) => {
     const opened = await $.ui.open({ id: PANE, title: 'Workstream' })
     void kick($, true)
     if (!opened.isPlaced) return { text: `Workstream pane waiting: ${opened.reason}` }
-    const skill = ownsCommand ? '' : '; /workstream attach runs the skill'
-    return { text: `Workstream pane opened. /workstream closes it${skill}.` }
-  }).catch(($, e, next) => (next.called ? next(e) : { text: 'The workstream pane could not open; see claude --debug.' }))
-
-  // The menu would otherwise show only the skill's line, and a bare run no longer reaches the skill.
-  on('command.describe', { command: COMMAND }, async ($, e, next) => {
-    const d = await next(e)
-    if (ownsCommand) return d
-    return { ...d, description: `Bare: open or close the workstream pane. With arguments: ${d.description}`, argumentHint: '[attach | request]' }
-  })
+    return { text: 'Workstream pane opened. /workstream closes it.' }
+  }).catch(() => ({ text: 'The workstream pane could not open; see claude --debug.' }))
 
   // Never a gate: a failed refresh must not refuse the command it watched.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {

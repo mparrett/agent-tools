@@ -60,11 +60,8 @@ from (the read-only clone, where there is one):
    registers both hooks, and adds a badge naming the session's workstreams and
    its role in each (`workstream: <name> (owner)`, `(helping)`, `none`) and a
    side pane with their frontier (it opens by itself for an attached session
-   where the terminal is wide enough). With the plugin installed, a bare
-   `/workstream` opens or closes the pane instead of running the skill, and
-   `/workstream <args>` (`/workstream attach`, `/workstream where did we
-   stop`) still runs the skill; without the skill installed, the plugin serves
-   `/workstream` itself as the toggle alone. Claude Code draws a
+   where the terminal is wide enough; `/workstream` opens or closes it).
+   Claude Code draws a
    plugin's status line as a yellow warning, so the `badge` option in `/config`
    can move it to a one-row band above the prompt (`band`) or drop it (`off`).
    Install it from the checkout's own marketplace:
@@ -94,8 +91,10 @@ from (the read-only clone, where there is one):
    SessionStart prints the candidate block the skill acts on; SessionEnd
    records a frontier capture for a session that forgot to.
 4. **The skill**: `just link-skills ~/.claude/skills` links
-   `claude-code-skills/workstream`, which tells a session when to attach and
-   how to resume from a frontier.
+   `claude-code-skills/workstream-manage` (`/workstream-manage`), which tells
+   a session when to attach and how to resume from a frontier. A link left
+   from before the rename, `~/.claude/skills/workstream`, points at a folder
+   that no longer exists; remove it.
 5. **Recommended: a hook log**, from
    [mparrett/claude-hook-logger](https://github.com/mparrett/claude-hook-logger),
    registered on every hook event. It appends each event to

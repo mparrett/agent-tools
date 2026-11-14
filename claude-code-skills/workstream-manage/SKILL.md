@@ -1,33 +1,27 @@
 ---
-name: workstream
+name: workstream-manage
 description: >-
   Attach the current session to the workstream it belongs to, resume work from
   a workstream's frontier, and record the frontier before a session is retired.
   Use when a SessionStart block lists workstream candidates, when the user says
   "what's the state of X", "who worked on this PR / branch / worktree",
   "where did we stop", "pick up where the other session left off", "which
-  session owns #N", or "retire these sessions", or invokes /workstream. Also use
+  session owns #N", or "retire these sessions", or invokes /workstream-manage. Also use
   before taking an action on an anchor another workstream holds (merging its
   PR, touching its worktree). Backed by the `workstream` CLI over weft; the
   prose frontier lives in project-docs.
 ---
 
-# workstream
+# workstream-manage
 
 A workstream is the durable identity of a piece of work: usually one project,
 sometimes several, spanning Claude sessions, their subagents, Codex rollouts,
 PRs, branches, worktrees, specs and handoffs. `workstream` is the CLI; weft is
 the store; this skill is how a session uses them.
 
-## Invoked as `/workstream <args>`
-
-With the workstream plugin installed, a bare `/workstream` toggles its side pane
-and never reaches this skill, so a person invoking it always passes arguments:
-
-- `attach`, or `attach <ws>`: run "When to attach" below. Pick from the
-  SessionStart candidates (or attach to `<ws>` if named), then say what you did.
-- Anything else is a request in words ("where did we stop", "retire these
-  sessions", a workstream name): handle it as if the user had typed it.
+`/workstream-manage` runs this skill; a bare one means "attach this session",
+per "When to attach" below. `/workstream`, with no suffix, is the workstream
+plugin's pane toggle, not this skill.
 
 ## When to attach (and to what)
 
