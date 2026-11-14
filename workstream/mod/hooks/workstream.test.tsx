@@ -321,8 +321,9 @@ const slash = (args: string) => ({
   presentation: { isFullscreen: false, columns: 120 },
 })
 
-// `waiting` holds a pane open but undrawn, as on a terminal too narrow to seat it
-function stubPanes(on: On, opened: string[], closed: string[], waiting: Set<string>) {
+// `waiting` holds a pane open but undrawn, as on a terminal too narrow to seat it;
+// `behind` holds one drawn but not shown, behind another pane
+function stubPanes(on: On, opened: string[], closed: string[], waiting: Set<string>, behind = new Set<string>()) {
   const up = new Set<string>()
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.id', () => ({ value: SID }))
@@ -333,17 +334,18 @@ function stubPanes(on: On, opened: string[], closed: string[], waiting: Set<stri
   ))
   on('ui.close', (_, e) => (closed.push(e.id), up.delete(e.id), { value: undefined }))
   on('ui.panes', () => ({
-    value: [...up].map(id => ({ id, title: id, isShown: true, isFocused: false, isPlaced: !waiting.has(id) })),
+    value: [...up].map(id => ({ id, title: id, isShown: !behind.has(id), isFocused: false, isPlaced: !waiting.has(id) })),
   }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 }
 
-test('bare /workstream toggles the pane, and opens one still waiting undrawn', async ($, on) => {
+test('bare /workstream toggles the pane, cancels one waiting undrawn, and brings one forward', async ($, on) => {
   const clock = mock.clock(on)
   const opened: string[] = []
   const closed: string[] = []
   const waiting = new Set<string>()
-  stubPanes(on, opened, closed, waiting)
+  const behind = new Set<string>()
+  stubPanes(on, opened, closed, waiting, behind)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.settle()
   expect(opened).toEqual([])
@@ -352,10 +354,15 @@ test('bare /workstream toggles the pane, and opens one still waiting undrawn', a
   expect((await $.command.run(slash(''))).text).toBe('Workstream pane closed. /workstream reopens it.')
   expect(closed).toEqual(['workstream'])
   waiting.add('workstream')
-  expect((await $.command.run(slash(''))).text).toBe('Workstream pane waiting: too narrow')
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane waiting: too narrow. /workstream cancels it.')
+  expect((await $.command.run(slash(''))).text).toMatch(/^Workstream pane closed\./)
+  expect(closed).toEqual(['workstream', 'workstream'])
+  waiting.clear()
   await $.command.run(slash(''))
-  expect(closed).toEqual(['workstream'])
-  expect(opened).toEqual(['workstream', 'workstream', 'workstream'])
+  behind.add('workstream')
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane opened. /workstream closes it.')
+  expect(closed).toEqual(['workstream', 'workstream'])
+  expect(opened).toEqual(['workstream', 'workstream', 'workstream', 'workstream'])
   // the refresh an open starts must land before the test's engine goes
   await clock.settle()
 })

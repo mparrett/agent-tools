@@ -50,11 +50,12 @@ async function isPaneOpen($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(p => p.id === PANE)
 }
 
-// Open and drawn. A pane still waiting undrawn on a narrow terminal is not
-// showing, so the toggle opens it rather than closing what nobody can see.
-async function isPaneShowing($: EngineInterface): Promise<boolean> {
+// What /workstream should do to the pane. A pane drawn but behind another is
+// brought forward; one waiting undrawn on a narrow terminal is closed, so a
+// second /workstream cancels it instead of leaving its frontier polling.
+async function shouldClosePane($: EngineInterface): Promise<boolean> {
   const pane = (await $.ui.panes()).find(p => p.id === PANE)
-  return !!pane?.isShown && !!pane.isPlaced
+  return !!pane && (pane.isShown || !pane.isPlaced)
 }
 
 async function refresh($: EngineInterface, withFrontier: boolean): Promise<void> {
@@ -137,15 +138,15 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: COMMAND }, async ($, e) => {
     if (e.args.trim()) return { text: '/workstream takes no arguments; /workstream-manage runs the skill.' }
-    if (await isPaneShowing($)) {
+    if (await shouldClosePane($)) {
       await $.ui.close({ id: PANE })
       return { text: 'Workstream pane closed. /workstream reopens it.' }
     }
     const opened = await $.ui.open({ id: PANE, title: 'Workstream' })
     void kick($, true)
-    if (!opened.isPlaced) return { text: `Workstream pane waiting: ${opened.reason}` }
+    if (!opened.isPlaced) return { text: `Workstream pane waiting: ${opened.reason}. /workstream cancels it.` }
     return { text: 'Workstream pane opened. /workstream closes it.' }
-  }).catch(() => ({ text: 'The workstream pane could not open; see claude --debug.' }))
+  }).catch(() => ({ text: 'The workstream pane could not be opened or closed; see claude --debug.' }))
 
   // Never a gate: a failed refresh must not refuse the command it watched.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
