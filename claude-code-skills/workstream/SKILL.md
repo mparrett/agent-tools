@@ -19,6 +19,16 @@ sometimes several, spanning Claude sessions, their subagents, Codex rollouts,
 PRs, branches, worktrees, specs and handoffs. `workstream` is the CLI; weft is
 the store; this skill is how a session uses them.
 
+## Invoked as `/workstream <args>`
+
+With the workstream plugin installed, a bare `/workstream` toggles its side pane
+and never reaches this skill, so a person invoking it always passes arguments:
+
+- `attach`, or `attach <ws>`: run "When to attach" below. Pick from the
+  SessionStart candidates (or attach to `<ws>` if named), then say what you did.
+- Anything else is a request in words ("where did we stop", "retire these
+  sessions", a workstream name): handle it as if the user had typed it.
+
 ## When to attach (and to what)
 
 A session has **one canonical workstream at a time** plus any number of
