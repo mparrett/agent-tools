@@ -63,7 +63,8 @@ from (the read-only clone, where there is one):
    where the terminal is wide enough). With the plugin installed, a bare
    `/workstream` opens or closes the pane instead of running the skill, and
    `/workstream <args>` (`/workstream attach`, `/workstream where did we
-   stop`) still runs the skill. Claude Code draws a
+   stop`) still runs the skill; without the skill installed, the plugin serves
+   `/workstream` itself as the toggle alone. Claude Code draws a
    plugin's status line as a yellow warning, so the `badge` option in `/config`
    can move it to a one-row band above the prompt (`band`) or drop it (`off`).
    Install it from the checkout's own marketplace:
