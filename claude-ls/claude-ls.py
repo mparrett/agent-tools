@@ -5237,9 +5237,14 @@ def _store_edges(base_dir: str, index: Dict[str, Path]) -> List[LineageEdge]:
         if rec.get("type") == "user":
             # A header in a user record is the doc's text coming back to the
             # reader: a tool result, or a paste.
-            for src in _HANDOFF_HEADER_RE.findall(line):
-                if src != sid and src in index:
-                    _merge_edge(edges, LineageEdge(src, sid, "handoff"))
+            # Same guards as mentions: a grep over a handoff directory returns
+            # many headers at once, and a doc written after this session began
+            # is not where it came from.
+            headers = set(_HANDOFF_HEADER_RE.findall(line))
+            if len(headers) <= 2:
+                for src in headers:
+                    if src != sid and src in index and started(src) < started(sid):
+                        _merge_edge(edges, LineageEdge(src, sid, "handoff"))
             # Typed prompts only: a tool result's content is a list, and
             # wrapper text (hooks, slash-command scaffolding) is not the human.
             text = (rec.get("message") or {}).get("content")
@@ -5374,6 +5379,29 @@ def _lineage_facts(sid: str, path: Path, with_subagents: bool) -> LineageNode:
     return node
 
 
+def _clear_edges(index: Dict[str, Path]) -> List[LineageEdge]:
+    """Each pane's /clear chain, oldest first, as consecutive edges, across the
+    whole store. Unlike `session_chain`, which reads one project folder, this
+    keeps a pane that moved into a worktree (its later transcripts filed under
+    another folder) in one chain, and a root that retention deleted stays as
+    the chain's first node, with no transcript."""
+    panes: Dict[str, List[str]] = defaultdict(list)
+    for sid, path in index.items():
+        origin = session_origin(path)
+        if origin:
+            panes[origin].append(sid)
+
+    def started(sid: str) -> float:
+        return _head_facts(str(index[sid])).started or 0.0
+
+    edges: List[LineageEdge] = []
+    for root, members in panes.items():
+        chain = sorted((m for m in members if m != root), key=started)
+        chain.insert(0, root)  # the root came first, on disk or not
+        edges += [LineageEdge(a, b, "clear") for a, b in zip(chain, chain[1:])]
+    return edges
+
+
 def build_lineage(
     seed: Path, base_dir: str, limit: int = 50, with_subagents: bool = True
 ) -> Tuple[Dict[str, LineageNode], List[LineageEdge], bool]:
@@ -5382,28 +5410,15 @@ def build_lineage(
     the seed or any ancestor. The walk never turns from down back to up, so a
     session that mentions two unrelated ones does not join their families.
     Stops adding sessions at `limit`; `truncated` says it did."""
-    index = {p.stem: p for p in Path(base_dir).glob("*/*.jsonl")}
+    index = {p.stem: p for p in Path(base_dir).glob("*/*.jsonl") if not p.name.startswith("agent-")}
     index.setdefault(seed.stem, seed)
     by_node: Dict[str, List[LineageEdge]] = defaultdict(list)
-    for e in _store_edges(base_dir, index):
+    for e in _clear_edges(index) + _store_edges(base_dir, index):
         by_node[e.src].append(e)
         by_node[e.dst].append(e)
 
     def touching(sid: str) -> List[LineageEdge]:
-        found = list(by_node.get(sid, []))
-        if sid in index:
-            chain = session_chain(index[sid])
-            found += [
-                LineageEdge(a.session_id, b.session_id, "clear") for a, b in zip(chain, chain[1:])
-            ]
-            # `session_chain` reads one project folder. The root can be outside
-            # the chain because the pane moved into a worktree (its root sits in
-            # another folder) or because retention deleted it (a node with no
-            # transcript). Either way, keep the link to where it came from.
-            origin = session_origin(index[sid])
-            if chain and origin and origin not in {m.session_id for m in chain}:
-                found.append(LineageEdge(origin, chain[0].session_id, "clear"))
-        return found
+        return by_node.get(sid, [])
 
     order = [seed.stem]
     edges: Dict[Tuple[str, str], LineageEdge] = {}

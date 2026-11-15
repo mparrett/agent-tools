@@ -4024,3 +4024,44 @@ def test_merge_edge_folds_kinds_in_a_fixed_order():
     cl._merge_edge(edges, cl.LineageEdge("a", "b", "handoff", "h.md"))
     cl._merge_edge(edges, cl.LineageEdge("a", "b", "clear"))
     assert edges[("a", "b")] == cl.LineageEdge("a", "b", "clear+handoff", "h.md")
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_lineage_walks_down_into_a_worktree_folder_from_the_root(tmp_path, capsys):
+    # The pane moved into a worktree: its cleared transcripts sit in another
+    # project folder. Walking down from the root must still reach them.
+    _lin_session(tmp_path / "-w-lin", "root", 1)
+    _lin_session(tmp_path / "-w-lin-wt", "cleared", 2, origin=_LIN["root"])
+    _lin_session(tmp_path / "-w-lin-wt", "reader", 3, origin=_LIN["root"])
+    edges = {(e["src"], e["dst"]) for e in _lin_json(tmp_path, "root", capsys)["edges"]}
+    assert edges == {(_LIN["root"], _LIN["cleared"]), (_LIN["cleared"], _LIN["reader"])}
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_handoff_headers_from_a_grep_or_a_later_session_are_not_links(tmp_path, capsys):
+    proj = tmp_path / "-w-lin"
+    for key, hour in (("root", 1), ("cleared", 2), ("reader", 3)):
+        _lin_session(proj, key, hour)
+    grep = "\n".join(f"**Session ID:** {_LIN[k]}" for k in ("root", "cleared", "reader"))
+    result = {"type": "tool_result", "tool_use_id": "t", "content": grep}
+    _lin_session(proj, "mentioner", 4, [{"type": "user", "message": {"content": [result]}}])
+    # `root` started first, so a header naming the later `reader` is not its parent.
+    later = {
+        "type": "tool_result",
+        "tool_use_id": "t",
+        "content": f"**Session ID:** {_LIN['reader']}",
+    }
+    _jsonl(
+        proj / f"{_LIN['root']}.jsonl",
+        [
+            *[json.loads(ln) for ln in (proj / f"{_LIN['root']}.jsonl").read_text().splitlines()],
+            {
+                "type": "user",
+                "timestamp": "2026-09-01T09:00:00Z",
+                "entrypoint": "cli",
+                "message": {"content": [later]},
+            },
+        ],
+    )
+    assert _lin_json(tmp_path, "mentioner", capsys)["edges"] == []
+    assert _lin_json(tmp_path, "root", capsys)["edges"] == []
