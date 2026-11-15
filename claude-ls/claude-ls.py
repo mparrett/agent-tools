@@ -5139,7 +5139,7 @@ def _splice_subagents(
 #   `**Session ID:**` header (the handoff skill writes one), or a Read of a
 #   handoff file another session wrote, names the writer.
 # - mention: a prompt the human typed names an earlier session ("last session
-#   was 09e976cf"). This was the most common link of the three (115 pairs).
+#   was 1a2b3c4d"). This was the most common link of the three.
 # Compaction is not a link: every `logicalParentUuid` resolved inside its own
 # file, so it is an annotation on one session. No two sessions shared a slug.
 
@@ -5196,7 +5196,7 @@ def _is_handoff_doc(path: str) -> bool:
 def _store_edges(base_dir: str, index: Dict[str, Path]) -> List[LineageEdge]:
     """Every handoff (writer -> reader) and typed mention (mentioned -> mentioner)
     in the store, from one rg pass over the top-level transcripts (about 2s on a
-    store of 1,281 sessions, 2026-11-15)."""
+    real store, 2026-11-15)."""
     if shutil.which("rg") is None:
         print("warning: ripgrep (rg) not found; handoff and mention links skipped", file=sys.stderr)
         return []
@@ -5246,7 +5246,7 @@ def _store_edges(base_dir: str, index: Dict[str, Path]) -> List[LineageEdge]:
             if rec.get("isMeta") or not isinstance(text, str) or is_wrapper_text(text):
                 continue
             # Interactive prompts only: scripted (`sdk-cli`) runs such as
-            # claude-miner's judges paste lists of session ids, and each list
+            # a session-mining tool's judges paste lists of session ids, and each list
             # would otherwise read as a parent link to every session on it.
             if rec.get("entrypoint") not in (None, "cli"):
                 continue
