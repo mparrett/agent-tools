@@ -4065,3 +4065,90 @@ def test_handoff_headers_from_a_grep_or_a_later_session_are_not_links(tmp_path, 
     )
     assert _lin_json(tmp_path, "mentioner", capsys)["edges"] == []
     assert _lin_json(tmp_path, "root", capsys)["edges"] == []
+
+
+# ---- subagents named as search lists them: agent-<id> ----
+
+
+def _with_agents(base: Path, n: int = 3) -> list:
+    """Give the fixture's root session `n` more subagents with search-length ids."""
+    sub = base / "-w-lin" / _LIN["root"] / "subagents"
+    ids = [f"a{i}b2c3d4e5f6a7b8c" for i in range(n)]
+    for i, aid in enumerate(ids):
+        _jsonl(sub / f"agent-{aid}.jsonl", [_say("assistant", f"agent {i} says", 2 + i)])
+    return ids
+
+
+def test_subagent_owner_and_lookup_by_listed_name(tmp_path):
+    base = _lineage_store(tmp_path)
+    aid = _with_agents(base)[1]
+    (hit,) = cl.find_subagent_files(str(base), f"agent-{aid}")
+    assert cl.find_subagent_files(str(base), aid[:8]) == [hit]
+    assert cl.subagent_owner(hit) == base / "-w-lin" / f"{_LIN['root']}.jsonl"
+    assert cl.subagent_owner(base / "-w-lin" / f"{_LIN['root']}.jsonl") is None
+    assert cl.find_subagent_files(str(base), "a1") == []  # too short to mean anything
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_lineage_seeded_by_a_subagent_draws_its_session_and_marks_it(tmp_path, capsys):
+    base = _lineage_store(tmp_path)
+    aid = _with_agents(base)[2]
+    doc = _lin_json(base, f"agent-{aid}", capsys)
+    assert doc["seed"] == _LIN["root"] and doc["seed_agent"] == aid
+    # The seed stays visible past the per-level cap, and the session isn't marked.
+    lines = cl._lineage_lines(
+        *cl.build_lineage(base / "-w-lin" / f"{_LIN['root']}.jsonl", str(base))[:2],
+        _LIN["root"],
+        max_subagents=1,
+        seed_agent=aid,
+    )
+    text = "\n".join(ln.plain for ln in lines)
+    seeded = [ln for ln in text.splitlines() if "◀ seed" in ln]
+    assert len(seeded) == 1 and '"agent 2 says"' not in seeded[0] and "⎇" in seeded[0]
+    assert "more subagents" in text
+    # With subagents left out, the owning session carries the mark instead.
+    nodes, edges, _ = cl.build_lineage(
+        base / "-w-lin" / f"{_LIN['root']}.jsonl", str(base), with_subagents=False
+    )
+    text = "\n".join(ln.plain for ln in cl._lineage_lines(nodes, edges, _LIN["root"], 8, aid))
+    (marked,) = [ln for ln in text.splitlines() if "◀" in ln]
+    assert marked.startswith(_LIN["root"][:8]) and f"its subagent {aid[:8]}" in marked
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_search_files_a_subagent_hit_under_its_sessions_project(tmp_path):
+    base = _lineage_store(tmp_path)
+    _with_agents(base, 1)
+    hits = cl.search_session_content(str(base), "agent 0 says")
+    assert [(proj.name, cl.subagent_owner(sess).stem) for proj, sess, _ in hits] == [
+        ("-w-lin", _LIN["root"])
+    ]
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_a_copied_subagent_seeds_the_original_and_is_marked_once(tmp_path, capsys):
+    # A continued session keeps copies of its predecessor's subagents.
+    base = _lineage_store(tmp_path)
+    aid = _with_agents(base, 1)[0]
+    original = base / "-w-lin" / _LIN["root"] / "subagents" / f"agent-{aid}.jsonl"
+    copy = base / "-w-lin" / _LIN["cleared"] / "subagents" / original.name
+    copy.parent.mkdir(parents=True)
+    shutil.copy(original, copy)
+    cl.lineage_mode(_lin_args(base, f"agent-{aid}", json=False), None)
+    cap = capsys.readouterr()
+    assert "also copied into" in cap.err
+    marked = [ln for ln in cap.out.splitlines() if "◀" in ln]
+    assert len(marked) == 1 and "⎇" in marked[0]
+    # The original is the one under root, which comes before the cleared copy.
+    assert cap.out.index("◀ seed") < cap.out.index(f"cleared {_LIN['cleared'][:8]}")
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_search_resume_by_a_subagents_id_resumes_its_session(tmp_path, monkeypatch):
+    base = _lineage_store(tmp_path)
+    aid = _with_agents(base, 1)[0]
+    captured = {}
+    monkeypatch.setattr(cl, "resume_mode", lambda a, c: captured.update(session=a.session))
+    for sel in ("1", aid[:8], f"agent-{aid}"):
+        cl.search_content_mode(_search_args(base, query=["agent 0 says"], resume=sel), None)
+        assert captured.pop("session") == _LIN["root"], sel
