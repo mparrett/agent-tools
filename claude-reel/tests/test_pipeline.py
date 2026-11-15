@@ -400,3 +400,25 @@ def test_subagents_brief_places_every_agent(tmp_path):
     html = render(curate({"meta": {}, "beats": beats}))
     assert "Two callers: a.py and b.py." in html
     assert 'data-copy="claude-reel ' in html and "agent-bbb222.jsonl --open" in html
+
+
+def test_blob_copy_arriving_before_its_entry_is_still_skipped(tmp_path):
+    """Most blobs follow the entry they copy, but some arrive first (seen on real
+    sessions); the copy check has to wait for the whole file."""
+    recs = [
+        {**_u("first ask", "2026-07-05T10:00:00Z"), "cwd": "/x/r"},
+        _blob("user", "second ask"),  # copy, ahead of its entry
+        _u("second ask", "2026-07-05T10:01:00Z"),
+    ]
+    beats = extract(_write(tmp_path, recs))["beats"]
+    assert [b["kind"] for b in beats] == ["user_say", "user_say"]
+    assert not any("copy_check" in b for b in beats)
+
+
+def test_sidecar_without_transcript_still_names_the_agent(tmp_path):
+    session = _with_subagents(tmp_path)
+    (session.with_suffix("") / "subagents" / "agent-aaa111.jsonl").unlink()
+    for mode in ("none", "brief"):
+        beats = extract(session, subagents=mode)["beats"]
+        call = next(b for b in beats if b["kind"] == "tool_call")
+        assert call["agentType"] == "Explore" and "subagent" not in call

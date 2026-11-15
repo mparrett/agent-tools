@@ -270,7 +270,9 @@ def _fmt_ts(iso) -> str:
     return iso[5:16].replace("T", " ")  # MM-DD HH:MM
 
 
-CONTEXT_CLIP = 60_000  # system prompts run ~40k; showing them whole is the point
+# Seeing the system prompt whole is the point, so the clip sits well above it: real
+# prompt_snapshot text ran ~40k chars as of 2026-11-15.
+CONTEXT_CLIP = 60_000
 
 
 def _context_html(el, open_by_default: bool, slide_no: int = 0) -> str:

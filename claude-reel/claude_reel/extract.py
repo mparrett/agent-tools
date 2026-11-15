@@ -95,18 +95,28 @@ def _normalize_result(content) -> tuple[str, bool]:
 
 
 def _subagent_pool(path: Path) -> dict:
-    """agent id -> {"path", "meta"} for every subagent transcript under
-    `<session>/subagents/`, with its `.meta.json` sidecar ({} when unreadable)."""
+    """agent id -> {"path", "meta"} for every subagent under `<session>/subagents/`.
+
+    An agent is known by its sidecar or its transcript, whichever exists: a sidecar
+    alone still names the agent on its chip (the transcript may be pruned or not yet
+    written), and a transcript alone can still be summarized. `path` is None when
+    there is no transcript, `meta` {} when there is no readable sidecar."""
     pool = {}
     sub_dir = path.with_suffix("") / "subagents"
     if not sub_dir.is_dir():
         return pool
-    for f in sorted(sub_dir.glob("agent-*.jsonl")):
+    ids = {f.name[len("agent-") :].split(".", 1)[0] for f in sub_dir.glob("agent-*.meta.json")}
+    ids |= {f.stem[len("agent-") :] for f in sub_dir.glob("agent-*.jsonl")}
+    for aid in sorted(ids):
+        transcript = sub_dir / f"agent-{aid}.jsonl"
         try:
-            meta = json.loads(f.with_suffix(".meta.json").read_text(encoding="utf-8"))
+            meta = json.loads((sub_dir / f"agent-{aid}.meta.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             meta = {}
-        pool[f.stem[len("agent-") :]] = {"path": f, "meta": meta if isinstance(meta, dict) else {}}
+        pool[aid] = {
+            "path": transcript if transcript.is_file() else None,
+            "meta": meta if isinstance(meta, dict) else {},
+        }
     return pool
 
 
@@ -145,23 +155,11 @@ def _subagent_brief(sub_path: Path) -> dict:
     except OSError:
         return {"path": str(sub_path)}
     beats = reel["beats"]
-    # A forked skill's prompt is flagged isMeta, so it isn't a user_say; the first user
-    # entry is the prompt whichever way it was flagged.
-    prompt = next(
-        (
-            t
-            for o in _iter_lines(sub_path)
-            if o.get("type") == "user" and isinstance(o.get("message"), dict)
-            for t in _message_texts(o["message"].get("content"))
-            if t.strip()
-        ),
-        "",
-    )
     final = next((b["text"] for b in reversed(beats) if b["kind"] == "assistant_say"), "")
     m = reel["meta"]
     return {
         "path": str(sub_path),
-        "prompt": prompt,
+        "prompt": reel["meta"]["first_prompt"],
         "final": final,
         "tool_calls": m["tool_calls"],
         "first_ts": m["first_ts"],
@@ -248,17 +246,10 @@ def _message_texts(content) -> list:
     return []
 
 
-def _conversation_texts(path: Path) -> set:
-    """Every text block the transcript's own user/assistant entries carry, so a blob
-    part that merely copies one can be told apart from injected context."""
-    seen = set()
-    for obj in _iter_lines(path):
-        if obj.get("type") in ("user", "assistant") and isinstance(obj.get("message"), dict):
-            seen.update(t.strip() for t in _message_texts(obj["message"].get("content")) if t)
-    return seen
-
-
-def _context_beats(obj: dict, ts, conversation: set) -> list:
+def _context_beats(obj: dict, ts) -> list:
+    """Context beats for one non-conversation entry. A user-role blob part may copy a
+    message of the transcript's own, which is only known once the whole file is read,
+    so it carries `copy_check` and extract drops the copies at the end."""
     otype = obj.get("type")
     if otype == "attachment":
         att = obj.get("attachment") or {}
@@ -275,8 +266,11 @@ def _context_beats(obj: dict, ts, conversation: set) -> list:
         return []
     out = []
     for t in _message_texts(msg.get("content")):
-        if t.strip() and (role == "system" or t.strip() not in conversation):
-            out.append(_context_beat(t, ts))
+        if t.strip():
+            beat = _context_beat(t, ts)
+            if role != "system":
+                beat["copy_check"] = t.strip()
+            out.append(beat)
     return out
 
 
@@ -350,12 +344,15 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
     by_tool = {p["meta"]["toolUseId"]: aid for aid, p in pool.items() if p["meta"].get("toolUseId")}
     brief = subagents == "brief"
     placed: set = set()
-    conversation = _conversation_texts(path) if context else set()
+    # Text blocks of the transcript's own turns. A blob part repeating one is a copy,
+    # not context; most blobs follow the entry they copy, but a few arrive first.
+    conversation: set = set()
+    first_prompt = ""
 
     def sub_fields(aid):
         meta = pool[aid]["meta"]
         out = {"agentType": meta.get("agentType"), "description": meta.get("description")}
-        if brief:
+        if brief and pool[aid]["path"]:
             placed.add(aid)
             out["subagent"] = _subagent_brief(pool[aid]["path"])
         return out
@@ -372,7 +369,7 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
 
         if brief:
             for aid in _launched_ids(obj, pool):
-                if aid not in placed:
+                if aid not in placed and pool[aid]["path"]:
                     beats.append({"kind": "subagent", "ts": ts or last_ts, **sub_fields(aid)})
 
         # Only the conversation's own entries become say/tool beats. Other entry types
@@ -380,7 +377,7 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
         # those as turns put injected context on screen as Claude's prose.
         if otype not in ("user", "assistant"):
             if context:
-                beats.extend(_context_beats(obj, ts or last_ts, conversation))
+                beats.extend(_context_beats(obj, ts or last_ts))
             continue
 
         msg = obj.get("message")
@@ -394,6 +391,13 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
             usage_out += u.get("output_tokens", 0) or 0
 
         content = msg.get("content") if isinstance(msg, dict) else None
+        texts = [t.strip() for t in _message_texts(content) if t.strip()]
+        if context:
+            conversation.update(texts)
+        # A forked skill's prompt is flagged isMeta, so it isn't a user_say; a subagent
+        # brief wants the first user text whichever way it was flagged.
+        if role == "user" and not first_prompt and texts:
+            first_prompt = texts[0]
 
         def say(text):
             if not text.strip():
@@ -459,8 +463,9 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
     if brief:
         # A subagent with no recoverable launch still goes in, by its start time, so
         # nothing on disk is silently dropped (same rule as claude-ls export).
+        # A sidecar with no transcript has nothing to summarize, so it isn't placed.
         for aid in pool:
-            if aid not in placed:
+            if aid not in placed and pool[aid]["path"]:
                 b = {"kind": "subagent", **sub_fields(aid)}
                 b["ts"] = b["subagent"].get("first_ts")
                 i = next(
@@ -468,6 +473,11 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
                     len(beats),
                 )
                 beats.insert(i, b)
+
+    if conversation:
+        beats = [b for b in beats if b.get("copy_check") not in conversation]
+    for b in beats:
+        b.pop("copy_check", None)
 
     meta = {
         "session_id": session_id or path.stem,
@@ -480,6 +490,7 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
         "tool_calls": tool_calls,
         "input_tokens": usage_in,
         "output_tokens": usage_out,
+        "first_prompt": first_prompt,
     }
     return {"meta": meta, "beats": beats}
 
