@@ -4123,3 +4123,32 @@ def test_search_files_a_subagent_hit_under_its_sessions_project(tmp_path):
     assert [(proj.name, cl.subagent_owner(sess).stem) for proj, sess, _ in hits] == [
         ("-w-lin", _LIN["root"])
     ]
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_a_copied_subagent_seeds_the_original_and_is_marked_once(tmp_path, capsys):
+    # A continued session keeps copies of its predecessor's subagents.
+    base = _lineage_store(tmp_path)
+    aid = _with_agents(base, 1)[0]
+    original = base / "-w-lin" / _LIN["root"] / "subagents" / f"agent-{aid}.jsonl"
+    copy = base / "-w-lin" / _LIN["cleared"] / "subagents" / original.name
+    copy.parent.mkdir(parents=True)
+    shutil.copy(original, copy)
+    cl.lineage_mode(_lin_args(base, f"agent-{aid}", json=False), None)
+    cap = capsys.readouterr()
+    assert "also copied into" in cap.err
+    marked = [ln for ln in cap.out.splitlines() if "◀" in ln]
+    assert len(marked) == 1 and "⎇" in marked[0]
+    # The original is the one under root, which comes before the cleared copy.
+    assert cap.out.index("◀ seed") < cap.out.index(f"cleared {_LIN['cleared'][:8]}")
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_search_resume_by_a_subagents_id_resumes_its_session(tmp_path, monkeypatch):
+    base = _lineage_store(tmp_path)
+    aid = _with_agents(base, 1)[0]
+    captured = {}
+    monkeypatch.setattr(cl, "resume_mode", lambda a, c: captured.update(session=a.session))
+    for sel in ("1", aid[:8], f"agent-{aid}"):
+        cl.search_content_mode(_search_args(base, query=["agent 0 says"], resume=sel), None)
+        assert captured.pop("session") == _LIN["root"], sel

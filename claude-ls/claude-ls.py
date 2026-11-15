@@ -3383,6 +3383,14 @@ def search_content_mode(args, console: Optional[Console]):
             ident = (subagent_owner(picked) or picked).stem
         else:
             ident = resume_sel
+            # Subagent rows show the agent's id; map it to the session that
+            # owns it, which is what can be resumed.
+            needle = resume_sel.removeprefix("agent-")
+            for _, row_sess, _, _ in enriched:
+                row_owner = subagent_owner(row_sess)
+                if row_owner and needle in row_sess.stem.removeprefix("agent-"):
+                    ident = row_owner.stem
+                    break
         # resume_mode resolves the id, locates the anchoring dir, and runs the
         # tmux safety check. -f passes through to skip that check; attach/dry-run
         # aren't exposed here — use the dedicated `resume` command for those.
@@ -5546,31 +5554,34 @@ def _lineage_lines(
     def holds_seed(a: Dict) -> bool:
         return a["id"] == seed_agent or any(holds_seed(c) for c in a["children"])
 
-    def agent(a: Dict, prefix: str, last: bool) -> None:
+    # `mark`: these agents belong to the seed's session. A continued session
+    # keeps copies of its predecessor's subagents under the same ids, so an id
+    # alone would mark (and keep past the cap) every copy in the family.
+    def agent(a: Dict, prefix: str, last: bool, mark: bool) -> None:
         line = Text(prefix + ("└── " if last else "├── "), style="yellow")
         line.append(f"⎇ {a['type']}", style="blue")
         if a["description"]:
             line.append(f'  "{a["description"][:60]}"')
         line.append(f"  {_span(a['start'], a['end'])}", style="cyan")
         line.append(f"  {a['tools']} tools", style="dim")
-        if a["id"] == seed_agent:
+        if mark and a["id"] == seed_agent:
             line.append("  ◀ seed", style="bold red")
             seed_state["agent_drawn"] = True
         lines.append(line)
-        agents(a["children"], prefix + ("    " if last else "│   "), tail=False)
+        agents(a["children"], prefix + ("    " if last else "│   "), tail=False, mark=mark)
 
-    def agents(items: List[Dict], prefix: str, tail: bool) -> None:
+    def agents(items: List[Dict], prefix: str, tail: bool, mark: bool) -> None:
         """`tail`: session children follow, so even the last agent isn't `└`."""
         # The seed subagent (and the chain of agents above it) is always shown,
         # whatever the cap: it is the one the user asked about.
         shown = [
             a
             for i, a in enumerate(items)
-            if max_subagents <= 0 or i < max_subagents or holds_seed(a)
+            if max_subagents <= 0 or i < max_subagents or (mark and holds_seed(a))
         ]
         hidden = len(items) - len(shown)
         for i, a in enumerate(shown):
-            agent(a, prefix, last=(i == len(shown) - 1 and not hidden and not tail))
+            agent(a, prefix, last=(i == len(shown) - 1 and not hidden and not tail), mark=mark)
         if hidden:
             more = "├── " if tail else "└── "
             lines.append(
@@ -5617,7 +5628,7 @@ def _lineage_lines(
                 Text(child_prefix + bar, style="yellow")
                 + Text(f"⟳ {len(n.compactions)} compaction(s): {when}", style="dim")
             )
-        agents(n.subagents, child_prefix, tail=bool(children))
+        agents(n.subagents, child_prefix, tail=bool(children), mark=sid == seed)
         for i, e in enumerate(children):
             last = i == len(children) - 1
             session(e.dst, child_prefix, "└── " if last else "├── ", e)
@@ -5636,6 +5647,28 @@ def _lineage_lines(
     return lines
 
 
+def _original_subagent(copies: List[Path]) -> Optional[Path]:
+    """One agent id can sit under several sessions: a continued session keeps
+    copies of its predecessor's subagent transcripts. The copy under the
+    session that started first is the one that ran; name the others so a
+    path can pick one."""
+    if not copies:
+        return None
+    if len(copies) == 1:
+        return copies[0]
+
+    def owner_started(p: Path) -> float:
+        owner = subagent_owner(p)
+        if owner is None or not owner.is_file():
+            return float("inf")
+        return _head_facts(str(owner)).started or float("inf")
+
+    ordered = sorted(copies, key=owner_started)
+    others = ", ".join(_tilde(str(p)) for p in ordered[1:])
+    print(f"note: {ordered[0].stem} was also copied into: {others}", file=sys.stderr)
+    return ordered[0]
+
+
 def _lineage_subagent_seed(args) -> Tuple[Optional[str], Optional[Path]]:
     """(agent id, owning session file) when the argument names a subagent,
     else (None, None). A bare id goes to sessions first; only `agent-...` or an
@@ -5648,12 +5681,12 @@ def _lineage_subagent_seed(args) -> Tuple[Optional[str], Optional[Path]]:
         sub = as_path if subagent_owner(as_path) else None
     elif token.startswith("agent-") or not matching_sessions(args.base_dir, token):
         subs = find_subagent_files(args.base_dir, token)
-        if len(subs) > 1:
-            print(f"'{token}' matches {len(subs)} subagents:", file=sys.stderr)
+        if len({s.stem for s in subs}) > 1:
+            print(f"'{token}' matches {len(subs)} subagents; pass more of the id:", file=sys.stderr)
             for s in subs[:10]:
-                print(f"  {s.stem}  (in {s.parent.parent.name[:8]})", file=sys.stderr)
+                print(f"  {s.stem}  {_tilde(str(s))}", file=sys.stderr)
             sys.exit(1)
-        sub = subs[0] if subs else None
+        sub = _original_subagent(subs)
     else:
         sub = None
     if sub is None:
