@@ -537,7 +537,13 @@ def parse_args():
     export_parser.add_argument(
         "--no-follow",
         action="store_true",
-        help="Don't include related sessions with the same slug (default: follow)",
+        help="Don't include related sessions: same slug, or the same pane across /clear "
+        "(default: follow)",
+    )
+    export_parser.add_argument(
+        "--subagents",
+        action="store_true",
+        help="Splice each subagent's transcript in, quoted, after the call that spawned it",
     )
     export_group = export_parser.add_mutually_exclusive_group()
     export_group.add_argument(
@@ -4794,9 +4800,33 @@ def render_markdown(entries: List[Dict], metadata: SessionMetadata, options: Exp
     # Conversation body
     out.append("---")
     out.append("")
+    out.extend(_render_body(entries, options))
+    return "\n".join(out)
 
+
+def _render_subagent(entry: Dict, options: ExportOptions) -> List[str]:
+    """A spliced-in subagent transcript, blockquoted so it reads as nested under
+    the call that spawned it. Its body renders through `_render_body`, so a
+    subagent's own subagents nest one quote level deeper with no extra code."""
+    meta = entry.get("meta") or {}
+    label = " — ".join(
+        p for p in (f"`{meta.get('agentType') or 'agent'}`", meta.get("description")) if p
+    )
+    lines = [f"**Subagent transcript** {label} (`{entry['agent_id']}`)", ""]
+    lines += _render_body(entry["entries"], options)
+    lines.append("**End subagent transcript**")
+    # Body items can hold whole multi-line messages; quote every physical line.
+    physical = "\n".join(lines).split("\n")
+    return [f"> {ln}" if ln else ">" for ln in physical] + [""]
+
+
+def _render_body(entries: List[Dict], options: ExportOptions) -> List[str]:
+    out: List[str] = []
     for entry in entries:
         entry_type = entry.get("type", "")
+        if entry_type == "subagent":
+            out.extend(_render_subagent(entry, options))
+            continue
         ts_str = entry.get("timestamp", "")
         time_str = _format_time(ts_str)
 
@@ -4949,7 +4979,7 @@ def render_markdown(entries: List[Dict], metadata: SessionMetadata, options: Exp
                     out.append(f"**Tool**: {summary}")
                     out.append("")
 
-    return "\n".join(out)
+    return out
 
 
 def _read_slug(path: Path) -> Optional[str]:
@@ -4972,6 +5002,96 @@ def _read_slug(path: Path) -> Optional[str]:
     except OSError:
         pass
     return None
+
+
+# A forked skill (e.g. /code-review) launches its agent with no tool call, so its
+# sidecar has no toolUseId; the parent records the launch as a system line whose
+# content embeds {"agentId": "..."} instead.
+_AGENT_ID_REF = re.compile(r'"agentId"\s*:\s*"([A-Za-z0-9]+)"')
+
+
+def _subagent_pool(session_path: Path) -> Dict[str, Dict]:
+    """Every subagent transcript under `<session>/subagents/`, keyed by agent id,
+    with its `.meta.json` sidecar (empty when missing or unreadable). Nested
+    subagents sit in the same flat directory as their parents."""
+    sub_dir = session_path.with_suffix("") / "subagents"
+    pool: Dict[str, Dict] = {}
+    if not sub_dir.is_dir():
+        return pool
+    for f in sorted(sub_dir.glob("agent-*.jsonl")):
+        try:
+            meta = json.loads(f.with_suffix(".meta.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+        pool[f.stem[len("agent-") :]] = {"path": f, "meta": meta if isinstance(meta, dict) else {}}
+    return pool
+
+
+def _spawned_by(entry: Dict, pool: Dict[str, Dict], by_tool: Dict[str, str]) -> List[str]:
+    """Agent ids this entry launched: through an Agent tool call's id, or an
+    `agentId` reference in a system/user line (forked-skill launches)."""
+    found: List[str] = []
+    content = (entry.get("message") or {}).get("content")
+    if entry.get("type") == "assistant" and isinstance(content, list):
+        found += [
+            by_tool[b["id"]]
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") in by_tool
+        ]
+    elif entry.get("type") in ("system", "user"):
+        text = entry.get("content") if entry.get("type") == "system" else content
+        if isinstance(text, str) and "agentId" in text:
+            found += [a for a in _AGENT_ID_REF.findall(text) if a in pool]
+    return found
+
+
+def _splice_subagents(entries: List[Dict], session_path: Path) -> List[Dict]:
+    """The session's entries with each subagent's transcript inserted, as one
+    `subagent` entry, right after the record that spawned it. A background agent's
+    whole run therefore sits at its launch point, not spread across the parent's
+    later turns. Subagents with no recoverable launch record go in by start time,
+    so nothing on disk is silently dropped."""
+    pool = _subagent_pool(session_path)
+    if not pool:
+        return entries
+    by_tool = {p["meta"]["toolUseId"]: aid for aid, p in pool.items() if p["meta"].get("toolUseId")}
+    placed: Set[str] = set()
+
+    def attach(seq: List[Dict]) -> List[Dict]:
+        out: List[Dict] = []
+        for e in seq:
+            out.append(e)
+            for aid in _spawned_by(e, pool, by_tool):
+                if aid not in placed:
+                    out.append(build(aid))
+        return out
+
+    def build(aid: str) -> Dict:
+        placed.add(aid)  # before recursing: a transcript can't splice itself in
+        sub = load_raw_entries(str(pool[aid]["path"]))
+        return {
+            "type": "subagent",
+            "agent_id": aid,
+            "meta": pool[aid]["meta"],
+            "timestamp": next((e["timestamp"] for e in sub if e.get("timestamp")), ""),
+            "entries": attach(sub),
+        }
+
+    result = attach(entries)
+    # Shallowest first, so an orphaned parent claims its own children before
+    # they could be filed as orphans themselves.
+    orphans: List[Dict] = []
+    for aid in sorted(pool, key=lambda a: pool[a]["meta"].get("spawnDepth") or 1):
+        if aid not in placed:
+            orphans.append(build(aid))
+    for sub in sorted(orphans, key=lambda s: s["timestamp"]):
+        # ISO-8601 UTC strings from one writer compare correctly as text.
+        idx = next(
+            (i for i, e in enumerate(result) if (e.get("timestamp") or "") > sub["timestamp"]),
+            len(result),
+        )
+        result.insert(idx, sub)
+    return result
 
 
 def find_related_sessions(session_path: Path) -> List[Path]:
@@ -5013,6 +5133,7 @@ def export_mode(args, console: Optional[Console]):
     else:
         session_files = [session_file]
 
+    subagents = getattr(args, "subagents", False)
     # Load entries from all files, inserting session boundary markers
     all_entries = []
     for i, sf in enumerate(session_files):
@@ -5025,6 +5146,8 @@ def export_mode(args, console: Optional[Console]):
                 }
             )
         file_entries = load_raw_entries(str(sf))
+        if subagents:
+            file_entries = _splice_subagents(file_entries, Path(sf))
         if file_entries and all_entries and all_entries[-1].get("type") == "session_boundary":
             all_entries[-1]["timestamp"] = file_entries[0].get("timestamp", "")
         all_entries.extend(file_entries)

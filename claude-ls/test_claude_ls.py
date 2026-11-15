@@ -3345,6 +3345,103 @@ def test_export_follows_the_clear_chain(tmp_path, capsys):
     assert "first stream" not in capsys.readouterr().out
 
 
+def _jsonl(path: Path, records) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+    return path
+
+
+def _say(role: str, text: str, minute: int, **extra) -> dict:
+    ts = f"2026-09-01T10:{minute:02d}:00.000Z"
+    return {"type": role, "timestamp": ts, "message": {"role": role, "content": text}, **extra}
+
+
+def _subagent_session(tmp_path) -> Path:
+    """A parent that spawns `tool1` through an Agent call, `fork1` through a
+    forked-skill launch line, and has `stray1` with no launch record at all.
+    `tool1` itself spawns `nested1`."""
+    session = tmp_path / "proj" / "sess.jsonl"
+    call = {"type": "tool_use", "id": "toolu_A", "name": "Agent", "input": {"prompt": "go"}}
+    _jsonl(
+        session,
+        [
+            _say("user", "parent asks", 0),
+            {
+                "type": "assistant",
+                "timestamp": "2026-09-01T10:01:00.000Z",
+                "message": {"role": "assistant", "content": [call]},
+            },
+            _say("assistant", "parent after agent", 5),
+            {
+                "type": "system",
+                "timestamp": "2026-09-01T10:06:00.000Z",
+                "content": 'launch <forked-skill-launch>{"agentId":"fork1"}</forked-skill-launch>',
+            },
+            _say("assistant", "parent after fork", 7),
+            _say("assistant", "parent late", 20),
+        ],
+    )
+    sub = session.with_suffix("") / "subagents"
+    nested_call = {"type": "tool_use", "id": "toolu_N", "name": "Agent", "input": {"prompt": "x"}}
+    _jsonl(
+        sub / "agent-tool1.jsonl",
+        [
+            _say("user", "tool1 brief\nsecond line", 1),
+            {
+                "type": "assistant",
+                "timestamp": "2026-09-01T10:02:00.000Z",
+                "message": {"role": "assistant", "content": [nested_call]},
+            },
+            _say("assistant", "tool1 done", 3),
+        ],
+    )
+    (sub / "agent-tool1.meta.json").write_text(
+        json.dumps({"agentType": "Explore", "description": "find it", "toolUseId": "toolu_A"})
+    )
+    _jsonl(sub / "agent-nested1.jsonl", [_say("assistant", "nested says", 2)])
+    (sub / "agent-nested1.meta.json").write_text(
+        json.dumps({"toolUseId": "toolu_N", "spawnDepth": 2})
+    )
+    _jsonl(sub / "agent-fork1.jsonl", [_say("assistant", "fork says", 6)])
+    (sub / "agent-fork1.meta.json").write_text(json.dumps({"name": "code-review"}))
+    _jsonl(sub / "agent-stray1.jsonl", [_say("assistant", "stray says", 10)])
+    return session
+
+
+def _export(session: Path, capsys, **kw) -> str:
+    args = dict(base_dir=str(session.parent), file=str(session), session_id=None, output=None)
+    cl.export_mode(SimpleNamespace(no_follow=True, **args, **kw), None)
+    return capsys.readouterr().out
+
+
+def test_export_subagents_splices_each_transcript_at_its_launch(tmp_path, capsys):
+    out = _export(_subagent_session(tmp_path), capsys, subagents=True)
+    order = [
+        "parent asks",
+        "tool1 brief",
+        "nested says",
+        "tool1 done",
+        "parent after agent",
+        "fork says",
+        "parent after fork",
+        "stray says",  # no launch record: placed by start time
+        "parent late",
+    ]
+    positions = [out.index(s) for s in order]
+    assert positions == sorted(positions)
+    assert "**Subagent transcript** `Explore` — find it (`tool1`)" in out
+    # Every line of a multi-line message stays inside the quote.
+    assert "> tool1 brief\n> second line" in out
+    # Quoting nests: the nested agent's text is two levels deep.
+    assert "> > nested says" in out
+    assert "> tool1 done" in out and "> > tool1 done" not in out
+
+
+def test_export_leaves_subagents_out_by_default(tmp_path, capsys):
+    out = _export(_subagent_session(tmp_path), capsys)
+    assert "parent late" in out and "tool1 brief" not in out and "Subagent transcript" not in out
+
+
 # ---- Session listing sort keys: touched (mtime) / active / created ----
 #
 # The three orders are deliberately all different in this fixture. A file's mtime
