@@ -162,6 +162,7 @@ KNOWN_MODES = frozenset(
         "activity",
         "resolve",
         "who",
+        "lineage",
     }
 )
 
@@ -169,7 +170,7 @@ MODE_OVERVIEW = """\
 common:  info <id> · search <text> · last · resume <id>
 
 modes by intent:
-  one session     info (aka show, summary) · get · export · resume
+  one session     info (aka show, summary) · get · export · resume · lineage
   find sessions   search · sessions · here (aka find) · pending · who
   browse          browse · select · list · last
   reports         activity · resolve"""
@@ -639,6 +640,26 @@ def parse_args():
         "session_id", nargs="?", help="Session ID or prefix (default: most recent session for CWD)"
     )
     info_parser.add_argument("file", nargs="?", help="Conversation file (.jsonl) - optional")
+
+    # Lineage mode (a session's ancestors and descendants as a tree)
+    lineage_parser = subparsers.add_parser(
+        "lineage",
+        help="Tree of a session's ancestors and descendants across /clear and handoffs, "
+        "with compactions and subagents",
+    )
+    lineage_parser.add_argument(
+        "file", nargs="?", help="Session ID, prefix, or .jsonl path (default: most recent for CWD)"
+    )
+    lineage_parser.add_argument("--json", action="store_true", help="Emit nodes and edges as JSON")
+    lineage_parser.add_argument(
+        "--no-subagents", action="store_true", help="Leave subagents out (faster)"
+    )
+    lineage_parser.add_argument(
+        "--all-subagents", action="store_true", help="Show every subagent (default: 8 per level)"
+    )
+    lineage_parser.add_argument(
+        "--limit", type=int, default=50, help="Stop adding sessions after N (default: 50)"
+    )
 
     # Who mode (the live fleet by repo: pane, checkout, branch, status, topic)
     who_parser = subparsers.add_parser(
@@ -5108,6 +5129,476 @@ def _splice_subagents(
     return result
 
 
+# ---- lineage: a session's ancestors and descendants as one tree ----------------
+#
+# A spike over a real store (2026-11-15) settled which links exist between
+# transcripts:
+# - /clear: the `session_id` root pointer (see `session_chain`). Sessions that
+#   open with "This session is being continued..." carry it too.
+# - handoff: a session reads a handoff doc another session wrote. The doc's
+#   `**Session ID:**` header (the handoff skill writes one), or a Read of a
+#   handoff file another session wrote, names the writer.
+# - mention: a prompt the human typed names an earlier session ("last session
+#   was 09e976cf"). This was the most common link of the three (115 pairs).
+# Compaction is not a link: every `logicalParentUuid` resolved inside its own
+# file, so it is an annotation on one session. No two sessions shared a slug.
+
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_HANDOFF_HEADER_RE = re.compile(r"\*\*Session ID:\*\*\s*`?(" + _UUID + ")")
+# "session", "resuming", or "tail" within a few words of an 8-hex id prefix.
+# Requiring the word keeps most git SHAs out; requiring that the prefix name
+# exactly one session, which started earlier, keeps the rest honest.
+_MENTION_WORDS = r"(?:session|resum|tail)"
+_SESSION_MENTION_RE = re.compile(_MENTION_WORDS + r"[^\n]{0,40}?\b([0-9a-f]{8})", re.IGNORECASE)
+_EDGE_KINDS = ("clear", "handoff", "mention")
+_LINE_TS_RE = re.compile(r'"timestamp":\s*"([^"]+)"')
+_LINE_BRANCH_RE = re.compile(r'"gitBranch":\s*"([^"]+)"')
+_LINE_CWD_RE = re.compile(r'"cwd":\s*"([^"]+)"')
+
+
+@dataclass(frozen=True)
+class LineageEdge:
+    src: str
+    dst: str
+    kind: str  # one of _EDGE_KINDS, or several joined by "+" when they agree
+    via: str = ""  # handoff: the doc's file name, when the link came from a Read
+
+
+def _merge_edge(edges: Dict[Tuple[str, str], LineageEdge], e: LineageEdge) -> None:
+    """Add `e`, folding it into an existing edge between the same pair: a pane
+    that was /cleared and handed off is one link with both kinds, not two."""
+    old = edges.get((e.src, e.dst))
+    if old is None:
+        edges[(e.src, e.dst)] = e
+        return
+    kinds = set(old.kind.split("+")) | set(e.kind.split("+"))
+    kind = "+".join(k for k in _EDGE_KINDS if k in kinds)
+    edges[(e.src, e.dst)] = LineageEdge(e.src, e.dst, kind, old.via or e.via)
+
+
+@dataclass
+class LineageNode:
+    sid: str
+    path: Optional[Path]
+    start: str = ""
+    end: str = ""
+    cwd: str = ""
+    branch: str = ""
+    topic: str = ""
+    compactions: List[Tuple[str, str]] = field(default_factory=list)  # (timestamp, trigger)
+    subagents: List[Dict] = field(default_factory=list)  # roots of the subagent tree
+
+
+def _is_handoff_doc(path: str) -> bool:
+    return path.endswith(".md") and "handoff" in path.lower()
+
+
+def _store_edges(base_dir: str, index: Dict[str, Path]) -> List[LineageEdge]:
+    """Every handoff (writer -> reader) and typed mention (mentioned -> mentioner)
+    in the store, from one rg pass over the top-level transcripts (about 2s on a
+    store of 1,281 sessions, 2026-11-15)."""
+    if shutil.which("rg") is None:
+        print("warning: ripgrep (rg) not found; handoff and mention links skipped", file=sys.stderr)
+        return []
+    # --max-columns=0: ~/.ripgreprc truncates long lines in the output stream,
+    # which would leave every JSONL record unparseable.
+    cmd = ["rg", "--no-ignore", "--hidden", "--null", "--no-heading", "--no-line-number"]
+    cmd += ["--max-columns=0", "-i", "-g", "*.jsonl", "-g", "!**/subagents/**", "--"]
+    cmd += [
+        r'Session ID:\*\*|handoff[^"\\ ]*\.md|' + _MENTION_WORDS + r'[^"]{0,40}?\b[0-9a-f]{8}',
+        base_dir,
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(
+            f"warning: store scan failed ({e}); handoff and mention links skipped", file=sys.stderr
+        )
+        return []
+    by_prefix: Dict[str, List[str]] = defaultdict(list)
+    for sid in index:
+        by_prefix[sid[:8]].append(sid)
+
+    def started(sid: str) -> float:
+        return _head_facts(str(index[sid])).started or 0.0
+
+    edges: Dict[Tuple[str, str], LineageEdge] = {}
+    writes: Dict[str, List[Tuple[str, str]]] = defaultdict(list)  # path -> [(ts, writer)]
+    reads: List[Tuple[str, str, str]] = []  # (path, ts, reader)
+    for raw in res.stdout.splitlines():
+        fname, _, line = raw.partition("\0")
+        sid = Path(fname).stem
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("type") == "user":
+            # A header in a user record is the doc's text coming back to the
+            # reader: a tool result, or a paste.
+            for src in _HANDOFF_HEADER_RE.findall(line):
+                if src != sid and src in index:
+                    _merge_edge(edges, LineageEdge(src, sid, "handoff"))
+            # Typed prompts only: a tool result's content is a list, and
+            # wrapper text (hooks, slash-command scaffolding) is not the human.
+            text = (rec.get("message") or {}).get("content")
+            if rec.get("isMeta") or not isinstance(text, str) or is_wrapper_text(text):
+                continue
+            # Interactive prompts only: scripted (`sdk-cli`) runs such as
+            # claude-miner's judges paste lists of session ids, and each list
+            # would otherwise read as a parent link to every session on it.
+            if rec.get("entrypoint") not in (None, "cli"):
+                continue
+            prefixes = set(p.lower() for p in _SESSION_MENTION_RE.findall(text))
+            if len(prefixes) > 2:  # a list of sessions, not "last session was X"
+                continue
+            for prefix in prefixes:
+                hits = by_prefix.get(prefix, [])
+                if len(hits) == 1 and hits[0] != sid and sid in index:
+                    src = hits[0]
+                    if started(src) < started(sid):
+                        _merge_edge(edges, LineageEdge(src, sid, "mention"))
+        elif rec.get("type") == "assistant":
+            content = (rec.get("message") or {}).get("content")
+            for b in content if isinstance(content, list) else []:
+                if not (isinstance(b, dict) and b.get("type") == "tool_use"):
+                    continue
+                path = (b.get("input") or {}).get("file_path") or ""
+                if not _is_handoff_doc(path):
+                    continue
+                ts = rec.get("timestamp") or ""
+                if b.get("name") in ("Write", "Edit", "MultiEdit"):
+                    writes[path].append((ts, sid))
+                elif b.get("name") == "Read":
+                    reads.append((path, ts, sid))
+    for path, ts, reader in reads:
+        prior = [w for w in sorted(writes.get(path, [])) if w[1] != reader and w[0] <= ts]
+        if prior:
+            src = prior[-1][1]  # the latest version written before this read
+            _merge_edge(edges, LineageEdge(src, reader, "handoff", Path(path).name))
+    return list(edges.values())
+
+
+def _subagent_tree(session_path: Path) -> List[Dict]:
+    """The session's subagents as a forest: each with its type, description,
+    span and tool-call count, nested under the agent that spawned it."""
+    pool = _subagent_pool(session_path)
+    if not pool:
+        return []
+    by_tool = {p["meta"]["toolUseId"]: aid for aid, p in pool.items() if p["meta"].get("toolUseId")}
+    nodes: Dict[str, Dict] = {}
+    parent_of: Dict[str, str] = {}
+    for aid, p in pool.items():
+        start = end = ""
+        tools = 0
+        for e in load_raw_entries(str(p["path"])):
+            ts = e.get("timestamp")
+            if ts:
+                start, end = start or ts, ts
+            content = (e.get("message") or {}).get("content")
+            if e.get("type") == "assistant" and isinstance(content, list):
+                tools += sum(
+                    1 for b in content if isinstance(b, dict) and b.get("type") == "tool_use"
+                )
+            for child in _spawned_by(e, pool, by_tool):
+                if child != aid:
+                    parent_of.setdefault(child, aid)
+        meta = p["meta"]
+        nodes[aid] = {
+            "id": aid,
+            "type": meta.get("agentType") or meta.get("name") or "agent",
+            "description": (meta.get("description") or "").strip(),
+            "start": start,
+            "end": end,
+            "tools": tools,
+            "children": [],
+        }
+    for aid, p in pool.items():
+        named = p["meta"].get("parentAgentId")
+        if aid not in parent_of and named in pool and named != aid:
+            parent_of[aid] = named
+
+    def rooted(aid: str) -> bool:
+        # A malformed store could name parents in a loop; such an agent is a root.
+        seen = {aid}
+        while aid in parent_of:
+            aid = parent_of[aid]
+            if aid in seen:
+                return False
+            seen.add(aid)
+        return True
+
+    roots: List[Dict] = []
+    for aid in sorted(nodes, key=lambda a: nodes[a]["start"]):
+        parent = parent_of.get(aid)
+        if parent and rooted(aid):
+            nodes[parent]["children"].append(nodes[aid])
+        else:
+            roots.append(nodes[aid])
+    return roots
+
+
+def _lineage_facts(sid: str, path: Path, with_subagents: bool) -> LineageNode:
+    """One session's annotations, from a streaming pass that parses only the
+    compaction records (a transcript can run to 100 MB)."""
+    node = LineageNode(sid, path)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                m = _LINE_TS_RE.search(line)
+                if m:
+                    node.start, node.end = node.start or m.group(1), m.group(1)
+                if not node.cwd:
+                    m = _LINE_CWD_RE.search(line)
+                    node.cwd = m.group(1) if m else ""
+                m = _LINE_BRANCH_RE.search(line)
+                if m:
+                    node.branch = m.group(1)
+                if '"compact_boundary"' in line:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("subtype") == "compact_boundary":
+                        trigger = (rec.get("compactMetadata") or {}).get("trigger") or "?"
+                        node.compactions.append((rec.get("timestamp") or "", trigger))
+    except OSError:
+        return node
+    node.topic = get_session_preview(path, topic_only=True)[1]
+    if node.topic.startswith("This session is being continued"):
+        # Claude Code's summary of the predecessor, not anything typed here.
+        node.topic = "(continues a compacted conversation)"
+    if with_subagents:
+        node.subagents = _subagent_tree(path)
+    return node
+
+
+def build_lineage(
+    seed: Path, base_dir: str, limit: int = 50, with_subagents: bool = True
+) -> Tuple[Dict[str, LineageNode], List[LineageEdge], bool]:
+    """The seed's family over /clear, handoff and mention links, as
+    (nodes, edges, truncated): its ancestors, then everything descended from
+    the seed or any ancestor. The walk never turns from down back to up, so a
+    session that mentions two unrelated ones does not join their families.
+    Stops adding sessions at `limit`; `truncated` says it did."""
+    index = {p.stem: p for p in Path(base_dir).glob("*/*.jsonl")}
+    index.setdefault(seed.stem, seed)
+    by_node: Dict[str, List[LineageEdge]] = defaultdict(list)
+    for e in _store_edges(base_dir, index):
+        by_node[e.src].append(e)
+        by_node[e.dst].append(e)
+
+    def touching(sid: str) -> List[LineageEdge]:
+        found = list(by_node.get(sid, []))
+        if sid in index:
+            chain = session_chain(index[sid])
+            found += [
+                LineageEdge(a.session_id, b.session_id, "clear") for a, b in zip(chain, chain[1:])
+            ]
+            # `session_chain` reads one project folder. The root can be outside
+            # the chain because the pane moved into a worktree (its root sits in
+            # another folder) or because retention deleted it (a node with no
+            # transcript). Either way, keep the link to where it came from.
+            origin = session_origin(index[sid])
+            if chain and origin and origin not in {m.session_id for m in chain}:
+                found.append(LineageEdge(origin, chain[0].session_id, "clear"))
+        return found
+
+    order = [seed.stem]
+    edges: Dict[Tuple[str, str], LineageEdge] = {}
+    truncated = False
+
+    def walk(starts: List[str], up: bool) -> None:
+        nonlocal truncated
+        queue = list(starts)
+        while queue:
+            sid = queue.pop(0)
+            for e in touching(sid):
+                if (e.dst if up else e.src) != sid:
+                    continue
+                nxt = e.src if up else e.dst
+                if nxt not in order:
+                    if len(order) >= limit:
+                        truncated = True
+                        continue
+                    order.append(nxt)
+                    queue.append(nxt)
+                _merge_edge(edges, e)
+
+    walk([seed.stem], up=True)
+    walk(list(order), up=False)
+    kept = set(order)
+    nodes = {
+        sid: _lineage_facts(sid, index[sid], with_subagents)
+        if sid in index
+        else LineageNode(sid, None)
+        for sid in order
+    }
+    return nodes, [e for e in edges.values() if e.src in kept and e.dst in kept], truncated
+
+
+def _local(ts: str) -> Optional[datetime]:
+    dt = _parse_ts(ts)
+    return dt.astimezone() if dt else None
+
+
+def _span(start: str, end: str) -> str:
+    """`10-29 09:12 → 11:40 (2h28m)`, the end's date shown only if it differs."""
+    a, b = _local(start), _local(end)
+    if not a:
+        return "?"
+    out = a.strftime("%m-%d %H:%M")
+    if b and b != a:
+        out += " → " + b.strftime("%H:%M" if b.date() == a.date() else "%m-%d %H:%M")
+        mins = int((b - a).total_seconds() // 60)
+        days, hours = divmod(mins // 60, 24)
+        if days:
+            out += f" ({days}d{hours:02d}h)"
+        elif hours:
+            out += f" ({hours}h{mins % 60:02d}m)"
+        else:
+            out += f" ({mins}m)" if mins else " (<1m)"
+    return out
+
+
+def _lineage_lines(
+    nodes: Dict[str, LineageNode], edges: List[LineageEdge], seed: str, max_subagents: int
+) -> List[Text]:
+    """The tree, one rich Text per line. Sessions with no parent in the set are
+    roots; a session reachable twice is drawn once and referenced after."""
+    kids: Dict[str, List[LineageEdge]] = defaultdict(list)
+    has_parent: Set[str] = set()
+    for e in edges:
+        kids[e.src].append(e)
+        has_parent.add(e.dst)
+    by_start = lambda sid: nodes[sid].start or "~"  # noqa: E731
+    for lst in kids.values():
+        lst.sort(key=lambda e: by_start(e.dst))
+    roots = sorted((s for s in nodes if s not in has_parent), key=by_start)
+    if not roots:  # every session has a parent: a cycle; start at the oldest
+        roots = sorted(nodes, key=by_start)[:1]
+    lines: List[Text] = []
+    drawn: Set[str] = set()
+
+    def edge_label(e: Optional[LineageEdge]) -> Text:
+        if e is None:
+            return Text("")
+        parts = {
+            "clear": Text("↺ cleared", style="magenta"),
+            "handoff": Text("✉ handoff" + (f" via {e.via}" if e.via else ""), style="green"),
+            "mention": Text("↪ mentioned", style="blue"),
+        }
+        return Text(" + ").join(parts[k] for k in e.kind.split("+")) + Text(" ")
+
+    def agent(a: Dict, prefix: str, last: bool) -> None:
+        line = Text(prefix + ("└── " if last else "├── "), style="yellow")
+        line.append(f"⎇ {a['type']}", style="blue")
+        if a["description"]:
+            line.append(f'  "{a["description"][:60]}"')
+        line.append(f"  {_span(a['start'], a['end'])}", style="cyan")
+        line.append(f"  {a['tools']} tools", style="dim")
+        lines.append(line)
+        agents(a["children"], prefix + ("    " if last else "│   "), tail=False)
+
+    def agents(items: List[Dict], prefix: str, tail: bool) -> None:
+        """`tail`: session children follow, so even the last agent isn't `└`."""
+        shown = items if max_subagents <= 0 else items[:max_subagents]
+        hidden = len(items) - len(shown)
+        for i, a in enumerate(shown):
+            agent(a, prefix, last=(i == len(shown) - 1 and not hidden and not tail))
+        if hidden:
+            more = "├── " if tail else "└── "
+            lines.append(
+                Text(prefix + more, style="yellow")
+                + Text(f"… {hidden} more subagents (--all-subagents)", style="dim")
+            )
+
+    def session(sid: str, prefix: str, connector: str, via: Optional[LineageEdge]) -> None:
+        n = nodes[sid]
+        line = Text(prefix + connector, style="yellow") + edge_label(via)
+        line.append(sid[:8], style="bold")
+        if sid in drawn:
+            line.append("  (shown above)", style="dim")
+            lines.append(line)
+            return
+        drawn.add(sid)
+        if n.path is None:
+            line.append("  (transcript not on disk)", style="dim")
+        else:
+            line.append(f"  {_span(n.start, n.end)}", style="cyan")
+            where = _tilde(n.cwd) if n.cwd else ""
+            if n.branch:
+                where += f" @ {n.branch}"
+            line.append(f"  {where}", style="dim")
+        if sid == seed:
+            line.append("  ◀ seed", style="bold red")
+        lines.append(line)
+        child_prefix = prefix + ("" if not connector else "    " if connector == "└── " else "│   ")
+        children = kids.get(sid, [])
+        bar = "│ " if (children or n.subagents) else "  "
+        if n.topic:
+            lines.append(
+                Text(child_prefix + bar, style="yellow") + Text(f'"{n.topic[:100]}"', style="dim")
+            )
+        if n.compactions:
+            a, b = _local(n.start), _local(n.end)
+            fmt = "%H:%M" if a and b and a.date() == b.date() else "%m-%d %H:%M"
+            when = ", ".join(
+                f"{t} {_local(ts).strftime(fmt) if _local(ts) else '?'}" for ts, t in n.compactions
+            )
+            lines.append(
+                Text(child_prefix + bar, style="yellow")
+                + Text(f"⟳ {len(n.compactions)} compaction(s): {when}", style="dim")
+            )
+        agents(n.subagents, child_prefix, tail=bool(children))
+        for i, e in enumerate(children):
+            last = i == len(children) - 1
+            session(e.dst, child_prefix, "└── " if last else "├── ", e)
+
+    for r in roots:
+        session(r, "", "", None)
+    # A session whose only parents form a cycle with it is not reached from a
+    # root; draw what is left so nothing found goes missing.
+    for sid in sorted(nodes, key=by_start):
+        if sid not in drawn:
+            session(sid, "", "", None)
+    return lines
+
+
+def lineage_mode(args, console: Optional[Console]):
+    """A session's ancestors and descendants across /clear and handoffs, with
+    compactions and subagents, drawn as a tree."""
+    session_file = resolve_session_file(args, args.base_dir)
+    if not session_file:
+        sys.exit(1)
+    if _file_is_codex(session_file):
+        print("lineage reads Claude transcripts only", file=sys.stderr)
+        sys.exit(2)
+    nodes, edges, truncated = build_lineage(
+        session_file, args.base_dir, limit=args.limit, with_subagents=not args.no_subagents
+    )
+    if args.json:
+        doc = {
+            "seed": session_file.stem,
+            "truncated": truncated,
+            "sessions": [
+                {**asdict(n), "path": str(n.path) if n.path else None} for n in nodes.values()
+            ],
+            "edges": [asdict(e) for e in edges],
+        }
+        print(json.dumps(doc, indent=2))
+        return
+    max_subagents = 0 if args.all_subagents else 8
+    for line in _lineage_lines(nodes, edges, session_file.stem, max_subagents):
+        if console:
+            console.print(line, no_wrap=True, overflow="ellipsis", highlight=False)
+        else:
+            print(line.plain)
+    if truncated:
+        print(f"(stopped at {args.limit} sessions; raise --limit to see more)", file=sys.stderr)
+
+
 def find_related_sessions(session_path: Path) -> List[Path]:
     """Every session file that continues this one's story, ordered by first entry
     timestamp: the files sharing its slug, and its pane's lineage across /clear
@@ -7593,6 +8084,8 @@ def main():
         activity_mode(args, console)
     elif args.mode == "who":
         who_mode(args, console)
+    elif args.mode == "lineage":
+        lineage_mode(args, console)
 
 
 if __name__ == "__main__":
