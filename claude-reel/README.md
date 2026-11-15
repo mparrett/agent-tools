@@ -17,6 +17,8 @@ claude-reel <id> --tail 30                        # only the last 30 beats
 claude-reel <id> --since 2026-07-05               # only what landed on/after a date
 claude-reel <id> --density tldr                    # agenda only (jazz | firehose | tldr)
 claude-reel <id> --reel                            # dump the reel (pivot JSONL) instead
+claude-reel <id> --subagents brief                 # agent chips expand to the agent's run
+claude-reel <id> --context none                    # hide injected context
 ```
 
 With the project installed, `uv run claude-reel …` works via the `[project.scripts]`
@@ -24,6 +26,20 @@ entry; `python -m claude_reel …` also works.
 
 In the deck: `←`/`→` (or `j`/`k`, space) to move, `e` to expand every chip on a slide,
 `g` for the agenda. Chips are folded by default (`--density firehose` opens them).
+`/` finds text across every slide, folded chips included; Enter or `n` jumps to the next
+matching slide, Shift+Enter or `N` back. The URL tracks the slide (`deck.html#s42`), so a
+link opens on that slide.
+
+**Context.** What the harness injected into the model's requests (system prompt, token
+budget, environment updates, reminders, task notifications) shows as muted `ctx` chips
+where it happened. A repeat of identical text is one line pointing back to the slide that
+carries it ("unchanged since beat 12"); the budget is one chip per slide. Parts of a
+request that merely copy a message already in the transcript are skipped.
+
+**Subagents.** By default an agent chip names the agent. `--subagents brief` places every
+subagent at its launch (including forked skills, which have no tool call) and its chip
+expands to the agent's prompt, tool counts, final result, and a copyable command for its
+own deck.
 
 ## How it works
 

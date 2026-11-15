@@ -209,3 +209,194 @@ def test_markdown_link_href_cannot_break_out():
     out = render_markdown('[x](https://evil"onmouseover=alert)')
     assert '"onmouseover' not in out  # the quote can't close the href attribute
     assert "&quot;onmouseover" in out
+
+
+# ---- injected context (api-request-blob, prompt_snapshot) ----------------------
+
+
+def _blob(role, text):
+    # Real blobs carry no timestamp; they sit between the entries of the request they
+    # were sent with.
+    return {
+        "type": "api-request-blob",
+        "hash": "h",
+        "message": {"role": role, "content": [{"type": "text", "text": text}]},
+    }
+
+
+def _context_transcript(tmp_path):
+    return _write(
+        tmp_path,
+        [
+            {
+                "type": "attachment",
+                "timestamp": "2026-07-05T09:59:59Z",
+                "attachment": {
+                    "type": "prompt_snapshot",
+                    "systemPrompt": ["You are an agent.", "Be brief."],
+                },
+            },
+            {**_u("first ask", "2026-07-05T10:00:00Z"), "cwd": "/x/r"},
+            _blob("user", "first ask"),  # copies the prompt above
+            _blob("system", "<total_tokens>15000000 tokens left</total_tokens>"),
+            _blob("system", "# Environment update\n - cwd moved"),
+            _blob("assistant", "ok"),  # copies Claude's reply
+            _a_blocks([{"type": "text", "text": "ok"}], "2026-07-05T10:00:01Z"),
+            _blob("system", "<total_tokens>14950755 tokens left</total_tokens>"),
+            _u("second ask", "2026-07-05T10:01:00Z"),
+            _blob("system", "# Environment update\n - cwd moved"),  # same text again
+            _a_blocks([{"type": "text", "text": "done"}], "2026-07-05T10:01:01Z"),
+        ],
+    )
+
+
+def test_request_blobs_become_context_not_prose(tmp_path):
+    """The bug: blob entries carry a `message`, so their parts became beats, and the
+    token budget showed up as Claude talking."""
+    beats = extract(_context_transcript(tmp_path))["beats"]
+    says = [(b["kind"], b["text"]) for b in beats if b["kind"].endswith("_say")]
+    assert says == [
+        ("user_say", "first ask"),
+        ("assistant_say", "ok"),
+        ("user_say", "second ask"),
+        ("assistant_say", "done"),
+    ]
+    ctx = [(b["label"], b["arg"]) for b in beats if b["kind"] == "context"]
+    assert ctx == [
+        ("sysprompt", "You are an agent."),
+        ("budget", "15.00M tokens left"),
+        ("env", "Environment update"),
+        ("budget", "14.95M tokens left"),
+        ("env", "Environment update"),
+    ]
+
+
+def test_context_none_keeps_only_the_conversation(tmp_path):
+    beats = extract(_context_transcript(tmp_path), context=False)["beats"]
+    assert {b["kind"] for b in beats} == {"user_say", "assistant_say"}
+
+
+def test_injected_user_turns_show_as_context(tmp_path):
+    recs = [
+        {**_u("real prompt", "2026-07-05T10:00:00Z"), "cwd": "/x/r"},
+        _u("<system-reminder>\nmind the gap\n</system-reminder>", "2026-07-05T10:00:01Z"),
+    ]
+    beats = extract(_write(tmp_path, recs))["beats"]
+    assert [b["kind"] for b in beats] == ["user_say", "context"]
+    assert (beats[1]["label"], beats[1]["arg"]) == ("reminder", "mind the gap")
+
+
+def test_repeated_context_points_back_and_budget_collapses(tmp_path):
+    deck = curate(extract(_context_transcript(tmp_path)))
+    s0, s1 = deck["slides"]
+    ctx0 = [e for e in s0["elements"] if e["type"] == "context"]
+    # one budget chip per slide, showing where the budget went
+    budgets = [e for e in ctx0 if e["label"] == "budget"]
+    assert len(budgets) == 1 and budgets[0]["arg"] == "15.00M → 14.95M tokens left"
+    env1 = next(e for e in s1["elements"] if e["type"] == "context" and e["label"] == "env")
+    assert env1["seen"] == 1 and env1["text"] is None  # slide 1 carries the text
+    html = render(deck)
+    assert 'href="#s1">unchanged since beat 1</a>' in html
+    s1["elements"].append({**env1, "seen": 2})  # a repeat within its own slide
+    assert "repeated above" in render(deck)
+    assert 'id="s0"' in html and 'id="s2"' in html  # agenda and slides are addressable
+    assert 'id="fq"' in html  # the find box
+
+
+def test_tail_counts_conversation_not_context():
+    from claude_reel.cli import _filter_beats
+
+    beats = [{"kind": "user_say"}, {"kind": "context"}, {"kind": "assistant_say"}] + [
+        {"kind": "context"}
+    ] * 5
+    assert [b["kind"] for b in _filter_beats(beats, 1, None)][0] == "assistant_say"
+    assert len(_filter_beats(beats, 2, None)) == len(beats)
+
+
+# ---- subagents ---------------------------------------------------------------------
+
+
+def _with_subagents(tmp_path):
+    session = _write(
+        tmp_path,
+        [
+            {**_u("review it", "2026-07-05T10:00:00Z"), "cwd": "/x/r"},
+            _a_blocks(
+                [
+                    {
+                        "type": "tool_use",
+                        "id": "tA",
+                        "name": "Agent",
+                        "input": {"subagent_type": "Explore", "description": "find callers"},
+                    }
+                ],
+                "2026-07-05T10:00:01Z",
+            ),
+            _result("tA", "callers: a.py", "2026-07-05T10:00:05Z"),
+            # a forked skill: no tool call, only a launch line naming the agent
+            {
+                "type": "system",
+                "timestamp": "2026-07-05T10:00:06Z",
+                "content": 'launched {"agentId": "bbb222"}',
+            },
+        ],
+    )
+    sub_dir = session.with_suffix("") / "subagents"
+    sub_dir.mkdir(parents=True)
+    agents = {
+        "aaa111": (
+            {"agentType": "Explore", "description": "find callers", "toolUseId": "tA"},
+            "Find the callers of f",
+            "Two callers: a.py and b.py.",
+        ),
+        "bbb222": (
+            {"agentType": "general-purpose", "description": "/code-review"},
+            "Review target: 15",
+            "No findings.",
+        ),
+    }
+    for aid, (meta, prompt, final) in agents.items():
+        (sub_dir / f"agent-{aid}.meta.json").write_text(json.dumps(meta))
+        (sub_dir / f"agent-{aid}.jsonl").write_text(
+            "\n".join(
+                json.dumps(r)
+                for r in [
+                    # forked-skill prompts are flagged isMeta; the brief must still find them
+                    {**_u(prompt, "2026-07-05T10:00:02Z"), "isMeta": True},
+                    _a_blocks(
+                        [
+                            {
+                                "type": "tool_use",
+                                "id": f"x{aid}",
+                                "name": "Grep",
+                                "input": {"pattern": "f("},
+                            }
+                        ],
+                        "2026-07-05T10:00:03Z",
+                    ),
+                    _a_blocks([{"type": "text", "text": final}], "2026-07-05T10:00:04Z"),
+                ]
+            )
+        )
+    return session
+
+
+def test_subagents_none_links_tool_calls_only(tmp_path):
+    beats = extract(_with_subagents(tmp_path))["beats"]
+    call = next(b for b in beats if b["kind"] == "tool_call")
+    assert call["agentType"] == "Explore" and "subagent" not in call
+    assert not any(b["kind"] == "subagent" for b in beats)
+
+
+def test_subagents_brief_places_every_agent(tmp_path):
+    session = _with_subagents(tmp_path)
+    beats = extract(session, subagents="brief")["beats"]
+    call = next(b for b in beats if b["kind"] == "tool_call")
+    assert call["subagent"]["prompt"] == "Find the callers of f"
+    assert call["subagent"]["final"] == "Two callers: a.py and b.py."
+    assert call["subagent"]["tool_calls"] == {"Grep": 1}
+    forked = [b for b in beats if b["kind"] == "subagent"]
+    assert len(forked) == 1 and forked[0]["subagent"]["prompt"] == "Review target: 15"
+    html = render(curate({"meta": {}, "beats": beats}))
+    assert "Two callers: a.py and b.py." in html
+    assert 'data-copy="claude-reel ' in html and "agent-bbb222.jsonl --open" in html
