@@ -658,6 +658,14 @@ def parse_args():
         "--all-subagents", action="store_true", help="Show every subagent (default: 8 per level)"
     )
     lineage_parser.add_argument(
+        "--compactions",
+        choices=("inline", "summary"),
+        default="inline",
+        help="inline: each compaction among the subagents, by time (default); "
+        "summary: their times on the session's summary line (text output; "
+        "--json always carries them)",
+    )
+    lineage_parser.add_argument(
         "--limit", type=int, default=50, help="Stop adding sessions after N (default: 50)"
     )
 
@@ -5533,9 +5541,12 @@ def _lineage_lines(
     seed: str,
     max_subagents: int,
     seed_agent: Optional[str] = None,
+    inline_compactions: bool = True,
 ) -> List[Text]:
     """The tree, one rich Text per line. Sessions with no parent in the set are
-    roots; a session reachable twice is drawn once and referenced after."""
+    roots; a session reachable twice is drawn once and referenced after.
+    `inline_compactions=False` is the earlier layout: compaction times on the
+    session's summary line, and agents past the cap folded once, at the end."""
     kids: Dict[str, List[LineageEdge]] = defaultdict(list)
     has_parent: Set[str] = set()
     for e in edges:
@@ -5604,22 +5615,25 @@ def _lineage_lines(
             for i, a in enumerate(items)
             if max_subagents <= 0 or i < max_subagents or (mark and holds_seed(a))
         }
-        events = sorted(
-            [(a["start"], "agent", a) for a in items]
-            + [(c[0], "compaction", c) for c in compactions],
+        events = [(a["start"], "agent", a) for a in items]
+        if compactions:
             # An agent with no timestamps can't be placed; "~" sorts it last
-            # rather than ahead of every compaction.
-            key=lambda ev: ev[0] or "~",
-        )
+            # rather than ahead of every compaction. With no compactions the
+            # agents keep their own order, as the summary layout always had.
+            events = sorted(
+                events + [(c[0], "compaction", c) for c in compactions],
+                key=lambda ev: ev[0] or "~",
+            )
         # Hidden agents fold where they ran, one line per run, so a compaction
-        # after them still reads as after them.
+        # after them still reads as after them. In the summary layout there is
+        # nothing between them to keep in order, so they fold once, at the end.
         rows: List[Tuple[str, Any]] = []
         run = 0
         for _, kind, ev in events:
             if kind == "agent" and id(ev) not in visible:
                 run += 1
                 continue
-            if run:
+            if run and inline_compactions:
                 rows.append(("fold", run))
                 run = 0
             rows.append((kind, ev))
@@ -5669,9 +5683,11 @@ def _lineage_lines(
             lines.append(
                 Text(child_prefix + bar, style="yellow") + Text(f'"{n.topic[:100]}"', style="dim")
             )
-        # With subagents drawn, each compaction is a line among them, in time
-        # order; the summary keeps only the count. Without, it lists the times.
-        inline = bool(n.subagents)
+        # Inline (the default, with subagents drawn): each compaction is a line
+        # among them, in time order, and the summary keeps only the count. In
+        # the summary layout, or with no subagents to place them among, the
+        # summary line lists the times.
+        inline = bool(n.subagents) and inline_compactions
         if n.compactions:
             a, b = _local(n.start), _local(n.end)
             fmt = "%H:%M" if a and b and a.date() == b.date() else "%m-%d %H:%M"
@@ -5793,7 +5809,15 @@ def lineage_mode(args, console: Optional[Console]):
         print(json.dumps(doc, indent=2))
         return
     max_subagents = 0 if args.all_subagents else 8
-    for line in _lineage_lines(nodes, edges, session_file.stem, max_subagents, seed_agent):
+    lines = _lineage_lines(
+        nodes,
+        edges,
+        session_file.stem,
+        max_subagents,
+        seed_agent,
+        inline_compactions=getattr(args, "compactions", "inline") == "inline",
+    )
+    for line in lines:
         if console:
             console.print(line, no_wrap=True, overflow="ellipsis", highlight=False)
         else:
