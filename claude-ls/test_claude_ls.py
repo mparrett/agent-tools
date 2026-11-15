@@ -4181,6 +4181,12 @@ def test_compactions_sit_among_subagents_by_time_and_folds_stay_in_place(tmp_pat
     i_comp = text.index("⟳ auto compaction")
     i_fold = text.index("… 4 more subagents (--all-subagents)")
     assert i_early < i_comp < i_fold
+    # The summary layout: times on the summary line, one fold at the end.
+    lines = cl._lineage_lines(nodes, edges, _LIN["root"], 1, inline_compactions=False)
+    text = "\n".join(ln.plain for ln in lines)
+    assert "⟳ 1 compaction(s): auto" in text and "⟳ auto compaction" not in text
+    assert text.count("more subagent") == 1
+    assert text.index("⎇ Early") < text.index("… 4 more subagents") < text.index("↺ cleared")
     # Without subagents drawn, the summary keeps the times.
     nodes, edges, _ = cl.build_lineage(root, str(base), with_subagents=False)
     text = "\n".join(ln.plain for ln in cl._lineage_lines(nodes, edges, _LIN["root"], 8))
