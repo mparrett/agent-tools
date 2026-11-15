@@ -3852,3 +3852,216 @@ def test_recent_session_hints_rank_by_last_message(tmp_path):
     assert [sess for _proj_dir, sess, _when in recent] == [plain, slugged]
     # The reported time is the last message, not the mtime that outranked it.
     assert recent[1][2] == cl._parse_ts(_ts(4)).timestamp()
+
+
+# ---- lineage: ancestors and descendants across /clear, handoffs, mentions ----
+
+_LIN = {  # session ids are UUIDs: the handoff header and mention prefixes need them
+    k: f"{i:08x}-0000-4000-8000-000000000000"
+    for i, k in enumerate(["root", "cleared", "reader", "mentioner", "unrelated", "both", "sdk"], 1)
+}
+_GONE = "deadbeef-0000-4000-8000-000000000000"
+
+
+def _lin_session(proj: Path, key: str, hour: int, records=(), origin=None, entrypoint="cli"):
+    sid = _LIN.get(key, key)
+    base = {"sessionId": sid, "cwd": "/w/lin", "gitBranch": "main", "entrypoint": entrypoint}
+    if origin:
+        base["session_id"] = origin
+    out = []
+    for i, r in enumerate(
+        [
+            {"type": "user", "message": {"role": "user", "content": f"{key} topic"}},
+            {"type": "assistant", "message": {"role": "assistant", "content": "ok"}},
+            *records,
+        ]
+    ):
+        out.append(
+            {**base, "timestamp": f"2026-09-0{1 + hour // 24}T{hour % 24:02d}:{i:02d}:00Z", **r}
+        )
+    return _jsonl(proj / f"{sid}.jsonl", out)
+
+
+def _prompt(text: str) -> dict:
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def _lineage_store(tmp_path) -> Path:
+    """root -> (cleared) cleared -> (handoff) reader -> (mention) mentioner.
+    `both` mentions mentioner and `unrelated`; `sdk` is a scripted run that
+    lists sessions. root also compacted once and spawned one subagent."""
+    proj = tmp_path / "-w-lin"
+    doc = "/w/docs/handoffs/2026-09-01-x.md"
+    _lin_session(
+        proj,
+        "root",
+        1,
+        [{"type": "system", "subtype": "compact_boundary", "compactMetadata": {"trigger": "auto"}}],
+    )
+    sub = proj / _LIN["root"] / "subagents"
+    _jsonl(sub / "agent-a1.jsonl", [_say("assistant", "sub", 1)])
+    (sub / "agent-a1.meta.json").write_text(
+        json.dumps({"agentType": "Explore", "description": "dig"})
+    )
+    write = {
+        "type": "tool_use",
+        "id": "t1",
+        "name": "Write",
+        "input": {"file_path": doc, "content": f"**Session ID:** {_LIN['cleared']}"},
+    }
+    _lin_session(
+        proj,
+        "cleared",
+        2,
+        [{"type": "assistant", "message": {"content": [write]}}],
+        origin=_LIN["root"],
+    )
+    read = {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": doc}}
+    _lin_session(
+        proj,
+        "reader",
+        3,
+        [
+            {"type": "assistant", "message": {"content": [read]}},
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t2",
+                            "content": f"**Session ID:** `{_LIN['cleared']}`",
+                        }
+                    ]
+                },
+            },
+        ],
+    )
+    _lin_session(proj, "unrelated", 0)
+    _lin_session(proj, "mentioner", 4, [_prompt(f"last session was {_LIN['reader'][:8]}")])
+    _lin_session(
+        proj,
+        "both",
+        5,
+        [_prompt(f"tail session {_LIN['mentioner'][:8]} and session {_LIN['unrelated'][:8]}")],
+    )
+    _lin_session(proj, "sdk", 6, [_prompt(f"session {_LIN['root'][:8]}")], entrypoint="sdk-cli")
+    _lin_session(proj, "orphan", 7, origin=_GONE)
+    return tmp_path
+
+
+def _lin_args(base: Path, seed: str, **kw) -> SimpleNamespace:
+    args = dict(
+        base_dir=str(base),
+        file=_LIN.get(seed, seed),
+        session_id=None,
+        json=True,
+        no_subagents=False,
+        all_subagents=False,
+        limit=50,
+    )
+    return SimpleNamespace(**{**args, **kw})
+
+
+def _lin_json(base: Path, seed: str, capsys) -> dict:
+    cl.lineage_mode(_lin_args(base, seed), None)
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_lineage_follows_clear_handoff_and_mention_both_ways(tmp_path, capsys):
+    base = _lineage_store(tmp_path)
+    edges = {(e["src"], e["dst"]): e for e in _lin_json(base, "reader", capsys)["edges"]}
+    # From the middle, it reaches up to the root and down to the descendants.
+    assert set(edges) == {
+        (_LIN["root"], _LIN["cleared"]),
+        (_LIN["cleared"], _LIN["reader"]),
+        (_LIN["reader"], _LIN["mentioner"]),
+        (_LIN["mentioner"], _LIN["both"]),
+    }
+    assert edges[(_LIN["root"], _LIN["cleared"])]["kind"] == "clear"
+    # The Read and the header agree, so they are one handoff edge naming the doc.
+    hand = edges[(_LIN["cleared"], _LIN["reader"])]
+    assert hand["kind"] == "handoff" and hand["via"] == "2026-09-01-x.md"
+    assert edges[(_LIN["reader"], _LIN["mentioner"])]["kind"] == "mention"
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_lineage_never_turns_back_up_from_a_descendant(tmp_path, capsys):
+    base = _lineage_store(tmp_path)
+    ids = {s["sid"] for s in _lin_json(base, "root", capsys)["sessions"]}
+    # `both` descends from mentioner, but its other parent is not family.
+    assert _LIN["both"] in ids and _LIN["unrelated"] not in ids
+    # A scripted run listing sessions is not a descendant.
+    assert _LIN["sdk"] not in ids
+    # From `both`, walking up reaches both of its parents.
+    ids = {s["sid"] for s in _lin_json(base, "both", capsys)["sessions"]}
+    assert {_LIN["unrelated"], _LIN["root"]} <= ids
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_lineage_tree_annotates_compactions_subagents_and_a_missing_root(tmp_path, capsys):
+    base = _lineage_store(tmp_path)
+    cl.lineage_mode(_lin_args(base, "reader", json=False), None)
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert lines[0].startswith(_LIN["root"][:8])
+    assert "→" in lines[0] and "/w/lin @ main" in lines[0]  # span, cwd @ branch
+    assert "⟳ 1 compaction(s): auto" in out
+    assert "⎇ Explore" in out and '"dig"' in out
+    assert f"└── ↺ cleared {_LIN['cleared'][:8]}" in out
+    assert "✉ handoff via 2026-09-01-x.md" in out and "↪ mentioned" in out
+    assert "◀ seed" in next(ln for ln in lines if _LIN["reader"][:8] in ln)
+    # A root that retention deleted still anchors the session cleared from it.
+    cl.lineage_mode(_lin_args(base, "orphan", json=False), None)
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == f"{_GONE[:8]}  (transcript not on disk)"
+    assert "└── ↺ cleared orphan" in out
+
+
+def test_merge_edge_folds_kinds_in_a_fixed_order():
+    edges: dict = {}
+    cl._merge_edge(edges, cl.LineageEdge("a", "b", "handoff", "h.md"))
+    cl._merge_edge(edges, cl.LineageEdge("a", "b", "clear"))
+    assert edges[("a", "b")] == cl.LineageEdge("a", "b", "clear+handoff", "h.md")
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_lineage_walks_down_into_a_worktree_folder_from_the_root(tmp_path, capsys):
+    # The pane moved into a worktree: its cleared transcripts sit in another
+    # project folder. Walking down from the root must still reach them.
+    _lin_session(tmp_path / "-w-lin", "root", 1)
+    _lin_session(tmp_path / "-w-lin-wt", "cleared", 2, origin=_LIN["root"])
+    _lin_session(tmp_path / "-w-lin-wt", "reader", 3, origin=_LIN["root"])
+    edges = {(e["src"], e["dst"]) for e in _lin_json(tmp_path, "root", capsys)["edges"]}
+    assert edges == {(_LIN["root"], _LIN["cleared"]), (_LIN["cleared"], _LIN["reader"])}
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_handoff_headers_from_a_grep_or_a_later_session_are_not_links(tmp_path, capsys):
+    proj = tmp_path / "-w-lin"
+    for key, hour in (("root", 1), ("cleared", 2), ("reader", 3)):
+        _lin_session(proj, key, hour)
+    grep = "\n".join(f"**Session ID:** {_LIN[k]}" for k in ("root", "cleared", "reader"))
+    result = {"type": "tool_result", "tool_use_id": "t", "content": grep}
+    _lin_session(proj, "mentioner", 4, [{"type": "user", "message": {"content": [result]}}])
+    # `root` started first, so a header naming the later `reader` is not its parent.
+    later = {
+        "type": "tool_result",
+        "tool_use_id": "t",
+        "content": f"**Session ID:** {_LIN['reader']}",
+    }
+    _jsonl(
+        proj / f"{_LIN['root']}.jsonl",
+        [
+            *[json.loads(ln) for ln in (proj / f"{_LIN['root']}.jsonl").read_text().splitlines()],
+            {
+                "type": "user",
+                "timestamp": "2026-09-01T09:00:00Z",
+                "entrypoint": "cli",
+                "message": {"content": [later]},
+            },
+        ],
+    )
+    assert _lin_json(tmp_path, "mentioner", capsys)["edges"] == []
+    assert _lin_json(tmp_path, "root", capsys)["edges"] == []
