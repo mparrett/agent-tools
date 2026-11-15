@@ -4007,7 +4007,7 @@ def test_lineage_tree_annotates_compactions_subagents_and_a_missing_root(tmp_pat
     lines = out.splitlines()
     assert lines[0].startswith(_LIN["root"][:8])
     assert "→" in lines[0] and "/w/lin @ main" in lines[0]  # span, cwd @ branch
-    assert "⟳ 1 compaction(s): auto" in out
+    assert "⟳ 1 compaction(s)\n" in out and "⟳ auto compaction" in out
     assert "⎇ Explore" in out and '"dig"' in out
     assert f"└── ↺ cleared {_LIN['cleared'][:8]}" in out
     assert "✉ handoff via 2026-09-01-x.md" in out and "↪ mentioned" in out
@@ -4152,3 +4152,26 @@ def test_search_resume_by_a_subagents_id_resumes_its_session(tmp_path, monkeypat
     for sel in ("1", aid[:8], f"agent-{aid}"):
         cl.search_content_mode(_search_args(base, query=["agent 0 says"], resume=sel), None)
         assert captured.pop("session") == _LIN["root"], sel
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_compactions_sit_among_subagents_by_time_and_folds_stay_in_place(tmp_path):
+    base = _lineage_store(tmp_path)  # root compacts at 01:02 UTC
+    sub = base / "-w-lin" / _LIN["root"] / "subagents"
+    early = _say("assistant", "early", 0)
+    early["timestamp"] = "2026-09-01T00:30:00.000Z"
+    _jsonl(sub / "agent-e0e0e0e0e0e0e0e0e.jsonl", [early])
+    (sub / "agent-e0e0e0e0e0e0e0e0e.meta.json").write_text(json.dumps({"agentType": "Early"}))
+    _with_agents(base, 3)  # these run after the compaction
+    root = base / "-w-lin" / f"{_LIN['root']}.jsonl"
+    nodes, edges, _ = cl.build_lineage(root, str(base))
+    text = "\n".join(ln.plain for ln in cl._lineage_lines(nodes, edges, _LIN["root"], 1))
+    # Early agent, then the compaction, then the later agents folded after it.
+    i_early = text.index("⎇ Early")
+    i_comp = text.index("⟳ auto compaction")
+    i_fold = text.index("… 4 more subagents (--all-subagents)")
+    assert i_early < i_comp < i_fold
+    # Without subagents drawn, the summary keeps the times.
+    nodes, edges, _ = cl.build_lineage(root, str(base), with_subagents=False)
+    text = "\n".join(ln.plain for ln in cl._lineage_lines(nodes, edges, _LIN["root"], 8))
+    assert "⟳ 1 compaction(s): auto" in text and "⟳ auto compaction" not in text

@@ -5223,7 +5223,8 @@ class LineageNode:
     cwd: str = ""
     branch: str = ""
     topic: str = ""
-    compactions: List[Tuple[str, str]] = field(default_factory=list)  # (timestamp, trigger)
+    # (timestamp, trigger, tokens before, tokens after); the counts can be None
+    compactions: List[Tuple[str, str, Optional[int], Optional[int]]] = field(default_factory=list)
     subagents: List[Dict] = field(default_factory=list)  # roots of the subagent tree
 
 
@@ -5404,8 +5405,15 @@ def _lineage_facts(sid: str, path: Path, with_subagents: bool) -> LineageNode:
                     except json.JSONDecodeError:
                         continue
                     if rec.get("subtype") == "compact_boundary":
-                        trigger = (rec.get("compactMetadata") or {}).get("trigger") or "?"
-                        node.compactions.append((rec.get("timestamp") or "", trigger))
+                        cm = rec.get("compactMetadata") or {}
+                        node.compactions.append(
+                            (
+                                rec.get("timestamp") or "",
+                                cm.get("trigger") or "?",
+                                cm.get("preTokens"),
+                                cm.get("postTokens"),
+                            )
+                        )
     except OSError:
         return node
     node.topic = get_session_preview(path, topic_only=True)[1]
@@ -5496,6 +5504,10 @@ def _local(ts: str) -> Optional[datetime]:
     return dt.astimezone() if dt else None
 
 
+def _kilo(tokens: int) -> str:
+    return f"{round(tokens / 1000)}k" if tokens >= 1000 else str(tokens)
+
+
 def _span(start: str, end: str) -> str:
     """`10-29 09:12 → 11:40 (2h28m)`, the end's date shown only if it differs."""
     a, b = _local(start), _local(end)
@@ -5570,24 +5582,61 @@ def _lineage_lines(
         lines.append(line)
         agents(a["children"], prefix + ("    " if last else "│   "), tail=False, mark=mark)
 
-    def agents(items: List[Dict], prefix: str, tail: bool, mark: bool) -> None:
-        """`tail`: session children follow, so even the last agent isn't `└`."""
+    def compaction(c: Tuple, prefix: str, last: bool) -> None:
+        ts, trigger, pre, post = c
+        when = _local(ts).strftime("%m-%d %H:%M") if _local(ts) else "?"
+        drop = f" · {_kilo(pre)} → {_kilo(post)}" if pre and post else ""
+        lines.append(
+            Text(prefix + ("└── " if last else "├── "), style="yellow")
+            + Text(f"⟳ {trigger} compaction {when}{drop}", style="magenta")
+        )
+
+    def agents(
+        items: List[Dict], prefix: str, tail: bool, mark: bool, compactions: Sequence = ()
+    ) -> None:
+        """`tail`: session children follow, so even the last agent isn't `└`.
+        `compactions`, when given, go in among the agents by time, so it shows
+        which context each subagent ran in."""
         # The seed subagent (and the chain of agents above it) is always shown,
         # whatever the cap: it is the one the user asked about.
-        shown = [
-            a
+        visible = {
+            id(a)
             for i, a in enumerate(items)
             if max_subagents <= 0 or i < max_subagents or (mark and holds_seed(a))
-        ]
-        hidden = len(items) - len(shown)
-        for i, a in enumerate(shown):
-            agent(a, prefix, last=(i == len(shown) - 1 and not hidden and not tail), mark=mark)
-        if hidden:
-            more = "├── " if tail else "└── "
-            lines.append(
-                Text(prefix + more, style="yellow")
-                + Text(f"… {hidden} more subagents (--all-subagents)", style="dim")
-            )
+        }
+        events = sorted(
+            [(a["start"], "agent", a) for a in items]
+            + [(c[0], "compaction", c) for c in compactions],
+            key=lambda ev: ev[0],
+        )
+        # Hidden agents fold where they ran, one line per run, so a compaction
+        # after them still reads as after them.
+        rows: List[Tuple[str, Any]] = []
+        run = 0
+        for _, kind, ev in events:
+            if kind == "agent" and id(ev) not in visible:
+                run += 1
+                continue
+            if run:
+                rows.append(("fold", run))
+                run = 0
+            rows.append((kind, ev))
+        if run:
+            rows.append(("fold", run))
+        hinted = False
+        for i, (kind, ev) in enumerate(rows):
+            last = i == len(rows) - 1 and not tail
+            if kind == "agent":
+                agent(ev, prefix, last=last, mark=mark)
+            elif kind == "compaction":
+                compaction(ev, prefix, last=last)
+            else:
+                hint = "" if hinted else " (--all-subagents)"
+                hinted = True
+                lines.append(
+                    Text(prefix + ("└── " if last else "├── "), style="yellow")
+                    + Text(f"… {ev} more subagent{'s' if ev != 1 else ''}{hint}", style="dim")
+                )
 
     def session(sid: str, prefix: str, connector: str, via: Optional[LineageEdge]) -> None:
         n = nodes[sid]
@@ -5618,17 +5667,25 @@ def _lineage_lines(
             lines.append(
                 Text(child_prefix + bar, style="yellow") + Text(f'"{n.topic[:100]}"', style="dim")
             )
+        # With subagents drawn, each compaction is a line among them, in time
+        # order; the summary keeps only the count. Without, it lists the times.
+        inline = bool(n.subagents)
         if n.compactions:
             a, b = _local(n.start), _local(n.end)
             fmt = "%H:%M" if a and b and a.date() == b.date() else "%m-%d %H:%M"
             when = ", ".join(
-                f"{t} {_local(ts).strftime(fmt) if _local(ts) else '?'}" for ts, t in n.compactions
+                f"{c[1]} {_local(c[0]).strftime(fmt) if _local(c[0]) else '?'}"
+                for c in n.compactions
             )
-            lines.append(
-                Text(child_prefix + bar, style="yellow")
-                + Text(f"⟳ {len(n.compactions)} compaction(s): {when}", style="dim")
-            )
-        agents(n.subagents, child_prefix, tail=bool(children), mark=sid == seed)
+            summary = f"⟳ {len(n.compactions)} compaction(s)" + ("" if inline else f": {when}")
+            lines.append(Text(child_prefix + bar, style="yellow") + Text(summary, style="dim"))
+        agents(
+            n.subagents,
+            child_prefix,
+            tail=bool(children),
+            mark=sid == seed,
+            compactions=n.compactions if inline else (),
+        )
         for i, e in enumerate(children):
             last = i == len(children) - 1
             session(e.dst, child_prefix, "└── " if last else "├── ", e)
