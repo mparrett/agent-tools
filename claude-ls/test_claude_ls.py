@@ -4193,6 +4193,27 @@ def test_compactions_sit_among_subagents_by_time_and_folds_stay_in_place(tmp_pat
     assert "⟳ 1 compaction(s): auto" in text and "⟳ auto compaction" not in text
 
 
+def test_summary_layout_keeps_an_untimed_agent_where_the_tree_put_it():
+    node = cl.LineageNode("s1", None, "2026-09-01T00:00:00Z", "2026-09-01T02:00:00Z")
+    node.compactions = [("2026-09-01T01:00:00Z", "auto", None, None)]
+
+    def ag(i, start):
+        return {
+            "id": i,
+            "type": i,
+            "description": "",
+            "start": start,
+            "end": start,
+            "tools": 0,
+            "children": [],
+        }
+
+    node.subagents = [ag("Untimed", ""), ag("Timed", "2026-09-01T01:30:00Z")]
+    lines = cl._lineage_lines({"s1": node}, [], "s1", 8, inline_compactions=False)
+    text = "\n".join(ln.plain for ln in lines)
+    assert text.index("⎇ Untimed") < text.index("⎇ Timed")
+
+
 def test_compaction_line_keeps_a_zero_count_and_untimed_agents_go_last():
     node = cl.LineageNode("s1", None, "2026-09-01T00:00:00Z", "2026-09-01T02:00:00Z")
     node.compactions = [("2026-09-01T01:00:00Z", "manual", 12000, 0)]
