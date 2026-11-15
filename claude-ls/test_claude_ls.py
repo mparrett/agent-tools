@@ -3981,6 +3981,16 @@ def test_lineage_follows_clear_handoff_and_mention_both_ways(tmp_path, capsys):
     }
     assert edges[(_LIN["root"], _LIN["cleared"])]["kind"] == "clear"
     # The Read and the header agree, so they are one handoff edge naming the doc.
+    doc = _lin_json(base, "root", capsys)
+    (root,) = [s for s in doc["sessions"] if s["sid"] == _LIN["root"]]
+    assert root["compactions"] == [
+        {
+            "timestamp": "2026-09-01T01:02:00Z",
+            "trigger": "auto",
+            "tokens_before": None,
+            "tokens_after": None,
+        }
+    ]
     hand = edges[(_LIN["cleared"], _LIN["reader"])]
     assert hand["kind"] == "handoff" and hand["via"] == "2026-09-01-x.md"
     assert edges[(_LIN["reader"], _LIN["mentioner"])]["kind"] == "mention"
@@ -4175,3 +4185,21 @@ def test_compactions_sit_among_subagents_by_time_and_folds_stay_in_place(tmp_pat
     nodes, edges, _ = cl.build_lineage(root, str(base), with_subagents=False)
     text = "\n".join(ln.plain for ln in cl._lineage_lines(nodes, edges, _LIN["root"], 8))
     assert "⟳ 1 compaction(s): auto" in text and "⟳ auto compaction" not in text
+
+
+def test_compaction_line_keeps_a_zero_count_and_untimed_agents_go_last():
+    node = cl.LineageNode("s1", None, "2026-09-01T00:00:00Z", "2026-09-01T02:00:00Z")
+    node.compactions = [("2026-09-01T01:00:00Z", "manual", 12000, 0)]
+    blank = {
+        "id": "b1",
+        "type": "Blank",
+        "description": "",
+        "start": "",
+        "end": "",
+        "tools": 0,
+        "children": [],
+    }
+    node.subagents = [blank]
+    text = "\n".join(ln.plain for ln in cl._lineage_lines({"s1": node}, [], "s1", 8))
+    assert "⟳ manual compaction" in text and "· 12k → 0" in text
+    assert text.index("⟳ manual compaction") < text.index("⎇ Blank")

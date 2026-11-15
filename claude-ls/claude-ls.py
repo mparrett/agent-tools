@@ -5585,7 +5585,7 @@ def _lineage_lines(
     def compaction(c: Tuple, prefix: str, last: bool) -> None:
         ts, trigger, pre, post = c
         when = _local(ts).strftime("%m-%d %H:%M") if _local(ts) else "?"
-        drop = f" · {_kilo(pre)} → {_kilo(post)}" if pre and post else ""
+        drop = f" · {_kilo(pre)} → {_kilo(post)}" if pre is not None and post is not None else ""
         lines.append(
             Text(prefix + ("└── " if last else "├── "), style="yellow")
             + Text(f"⟳ {trigger} compaction {when}{drop}", style="magenta")
@@ -5607,7 +5607,9 @@ def _lineage_lines(
         events = sorted(
             [(a["start"], "agent", a) for a in items]
             + [(c[0], "compaction", c) for c in compactions],
-            key=lambda ev: ev[0],
+            # An agent with no timestamps can't be placed; "~" sorts it last
+            # rather than ahead of every compaction.
+            key=lambda ev: ev[0] or "~",
         )
         # Hidden agents fold where they ran, one line per run, so a compaction
         # after them still reads as after them.
@@ -5776,7 +5778,15 @@ def lineage_mode(args, console: Optional[Console]):
             "seed_agent": seed_agent,
             "truncated": truncated,
             "sessions": [
-                {**asdict(n), "path": str(n.path) if n.path else None} for n in nodes.values()
+                {
+                    **asdict(n),
+                    "path": str(n.path) if n.path else None,
+                    "compactions": [
+                        dict(zip(("timestamp", "trigger", "tokens_before", "tokens_after"), c))
+                        for c in n.compactions
+                    ],
+                }
+                for n in nodes.values()
             ],
             "edges": [asdict(e) for e in edges],
         }
