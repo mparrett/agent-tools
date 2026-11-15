@@ -4,6 +4,8 @@ claude-reel <id | substr | path.jsonl>   # write a deck, print its path
 claude-reel <id> --tail 30 --open        # last 30 beats, open in the browser
 claude-reel <id> --since 2026-07-05       # only what landed on/after that date
 claude-reel <id> --reel                   # dump the reel (pivot format) instead
+claude-reel <id> --subagents brief        # agent chips expand to the agent's run
+claude-reel <id> --context none           # hide what the harness injected
 """
 
 import argparse
@@ -24,7 +26,15 @@ def _filter_beats(beats, tail, since):
         cut10 = len(since) == 10
         out = [b for b in out if not b.get("ts") or (b["ts"][:10] if cut10 else b["ts"]) >= since]
     if tail:
-        out = out[-tail:]
+        # Count the conversation, not the injected context riding along with it: a
+        # token-budget beat lands on every request and would crowd out the work.
+        kept = 0
+        for i in range(len(out) - 1, -1, -1):
+            if out[i]["kind"] != "context":
+                kept += 1
+                if kept == tail:
+                    out = out[i:]
+                    break
     return out
 
 
@@ -54,6 +64,20 @@ def main(argv=None) -> int:
         default="jazz",
         help="jazz: chips folded (default) · firehose: chips open · tldr: agenda only",
     )
+    p.add_argument(
+        "--context",
+        choices=("chips", "none"),
+        default="chips",
+        help="chips: injected context (budget, reminders, system prompt) as muted chips,"
+        " repeats pointing back to their first slide (default) · none: hide it",
+    )
+    p.add_argument(
+        "--subagents",
+        choices=("none", "brief"),
+        default="none",
+        help="none: agent chips name the agent (default) · brief: place every subagent at"
+        " its launch; its chip shows prompt, tools, result, and the command for its deck",
+    )
     p.add_argument("-o", "--out", metavar="PATH", help="output file (default: ./<id>.reel.html)")
     p.add_argument("--open", action="store_true", help="open the deck in your browser")
     p.add_argument(
@@ -67,7 +91,7 @@ def main(argv=None) -> int:
         print(f"claude-reel: no session matching '{args.target}'", file=sys.stderr)
         return 1
 
-    reel = extract(path)
+    reel = extract(path, context=args.context == "chips", subagents=args.subagents)
     reel["beats"] = _filter_beats(reel["beats"], args.tail, args.since)
 
     if args.reel:

@@ -6,6 +6,7 @@ renderer; tool output is escaped.
 """
 
 import html
+from pathlib import Path
 
 from .markdown import render_markdown
 
@@ -127,6 +128,27 @@ h1.title {
 .fill { height: 100%; width: 0; background: var(--amber); transition: width 0.2s ease; }
 .pos { flex: 0 0 auto; min-width: 62px; text-align: right; font-family: var(--mono); font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) { .reel { scroll-behavior: auto; } .tri, .fill { transition: none; } }
+/* Context the harness injected: present, but quieter than the work itself. */
+.chip.ctx { border-left: 2px dashed var(--line); background: transparent; }
+.chip.ctx > summary, .chip.flat .row { color: var(--muted); font-size: 0.76rem; padding: 5px 13px; }
+.chip.flat .row { display: flex; align-items: center; gap: 10px; font-family: var(--mono); }
+.chip.flat .row::before { content: ""; width: 5px; flex: 0 0 auto; }
+.ck.ctx { color: var(--muted); }
+.chip.ctx .arg { color: var(--ink-soft); }
+.chip .meta a { color: var(--cyan); text-decoration: none; }
+.chip .meta a:hover { text-decoration: underline; }
+.sub-body { border-top: 1px solid var(--line); padding: 12px 14px; background: var(--bg); font-size: 0.84rem; color: var(--ink-soft); max-height: 420px; overflow: auto; }
+.sub-body h4 { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin: 12px 0 5px; font-weight: 500; }
+.sub-body h4:first-child { margin-top: 0; }
+.sub-body .txt { white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 0.78rem; }
+.sub-body .cmd { display: flex; gap: 8px; align-items: center; }
+.sub-body .cmd code { flex: 1 1 auto; font-family: var(--mono); font-size: 0.76rem; color: var(--cyan); background: var(--surface2); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; overflow-x: auto; white-space: nowrap; }
+.copy { font-family: var(--mono); font-size: 0.7rem; color: var(--amber); background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 4px 9px; cursor: pointer; }
+.find { position: fixed; top: 58px; right: 22px; z-index: 5; display: none; align-items: center; gap: 8px; padding: 7px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); font-family: var(--mono); font-size: 0.78rem; color: var(--muted); }
+.find.on { display: flex; }
+.find input { width: min(260px, 50vw); background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: inherit; }
+.find input:focus { outline: 1px solid var(--amber); }
+.hit > summary, .hit.say, .hit .row { box-shadow: inset 2px 0 0 var(--amber); background: var(--surface2); }
 """
 
 JS = """
@@ -141,10 +163,16 @@ JS = """
   var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   var last = slides.length - 1;
   var idx = 0;
-  function pad(n){ return ('0' + n).slice(-2); }
+  function pad(n){ return n < 10 ? '0' + n : '' + n; }
   function clamp(i){ return Math.max(0, Math.min(last, i)); }
   function go(i){ idx = clamp(i); reel.scrollTo({ left: idx * reel.clientWidth, behavior: reduce ? 'auto' : 'smooth' }); paint(); }
+  function fromHash(){ var m = /^#s(\\d+)$/.exec(location.hash); return m ? clamp(parseInt(m[1], 10)) : null; }
+  // The hash is written once a move settles, not on every frame of a smooth scroll:
+  // mid-scroll writes would leave the URL pointing at a slide passed on the way.
+  var settle;
+  function remember(){ clearTimeout(settle); settle = setTimeout(function (){ if (location.hash !== '#s' + idx) history.replaceState(null, '', '#s' + idx); }, 250); }
   function paint(){
+    remember();
     curEl.textContent = pad(idx);
     posEl.textContent = pad(idx) + ' / ' + pad(last);
     fill.style.width = (last ? (idx / last) * 100 : 100) + '%';
@@ -159,7 +187,60 @@ JS = """
     raf = requestAnimationFrame(function () { raf = null; var i = Math.round(reel.scrollLeft / reel.clientWidth); if (i !== idx) { idx = i; paint(); } });
   });
   document.querySelectorAll('.arow').forEach(function (row) { row.addEventListener('click', function () { go(parseInt(row.dataset.goto, 10)); }); });
+  window.addEventListener('hashchange', function () { var h = fromHash(); if (h !== null && h !== idx) go(h); });
+
+  // Find: "/" opens; Enter / n go to the next slide whose text matches, Shift+Enter / N back.
+  // Matching uses textContent, so folded chips count; matched chips open on arrival.
+  var find = document.getElementById('find'), fq = document.getElementById('fq'), fc = document.getElementById('fc');
+  var texts = null, query = '', hits = [];
+  function search(q){
+    query = q.toLowerCase();
+    if (!texts) texts = slides.map(function (s){ return s.textContent.toLowerCase(); });
+    hits = [];
+    if (query) texts.forEach(function (t, i){ if (t.indexOf(query) >= 0) hits.push(i); });
+    fc.textContent = query ? hits.length + ' slide' + (hits.length === 1 ? '' : 's') : '';
+  }
+  function mark(i){
+    document.querySelectorAll('.hit').forEach(function (x){ x.classList.remove('hit'); });
+    var first = null;
+    slides[i].querySelectorAll('.chip, .say').forEach(function (el){
+      if (el.textContent.toLowerCase().indexOf(query) < 0) return;
+      el.classList.add('hit');
+      if (el.tagName === 'DETAILS') el.open = true;
+      first = first || el;
+    });
+    if (first) first.scrollIntoView({ block: 'center' });
+  }
+  function step(dir){
+    if (!hits.length) return;
+    var j = dir > 0 ? hits.find(function (h){ return h > idx; }) : hits.slice().reverse().find(function (h){ return h < idx; });
+    if (j === undefined) j = dir > 0 ? hits[0] : hits[hits.length - 1];
+    go(j); mark(j);
+    fc.textContent = (hits.indexOf(j) + 1) + ' / ' + hits.length;
+  }
+  function closeFind(){ find.classList.remove('on'); fq.blur(); }
+  fq.addEventListener('input', function (){ search(fq.value); });
+  fq.addEventListener('keydown', function (e){
+    if (e.key === 'Enter') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeFind(); }
+    e.stopPropagation();
+  });
+
+  document.addEventListener('click', function (e){
+    var b = e.target.closest && e.target.closest('.copy');
+    if (!b) return;
+    var t = b.dataset.copy;
+    function done(){ b.textContent = 'copied'; setTimeout(function (){ b.textContent = 'copy'; }, 1200); }
+    if (navigator.clipboard) navigator.clipboard.writeText(t).then(done, function (){ window.prompt('Copy:', t); });
+    else window.prompt('Copy:', t);
+  });
+
   document.addEventListener('keydown', function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === '/') { e.preventDefault(); find.classList.add('on'); fq.focus(); fq.select(); return; }
+    if (e.key === 'n' && query) { e.preventDefault(); step(1); return; }
+    if (e.key === 'N' && query) { e.preventDefault(); step(-1); return; }
+    if (e.key === 'Escape') { closeFind(); return; }
     if (e.key === 'ArrowRight' || e.key === 'j' || e.key === 'PageDown') { e.preventDefault(); go(idx + 1); }
     else if (e.key === 'ArrowLeft' || e.key === 'k' || e.key === 'PageUp') { e.preventDefault(); go(idx - 1); }
     else if (e.key === ' ') { e.preventDefault(); go(idx + (e.shiftKey ? -1 : 1)); }
@@ -168,6 +249,12 @@ JS = """
     else if (e.key === 'e') { var d = slides[idx].querySelectorAll('details'); var anyClosed = Array.prototype.some.call(d, function (x){ return !x.open; }); d.forEach(function (x){ x.open = anyClosed; }); }
   });
   window.addEventListener('resize', function () { reel.scrollLeft = idx * reel.clientWidth; });
+  var start = fromHash();
+  if (start !== null) {
+    // Jump, don't glide: the browser has already begun its own smooth anchor scroll.
+    idx = start; reel.style.scrollBehavior = 'auto'; reel.scrollLeft = idx * reel.clientWidth;
+    requestAnimationFrame(function (){ reel.style.scrollBehavior = ''; });
+  }
   paint();
 })();
 """
@@ -183,7 +270,73 @@ def _fmt_ts(iso) -> str:
     return iso[5:16].replace("T", " ")  # MM-DD HH:MM
 
 
-def _chip_html(el, open_by_default: bool) -> str:
+# Seeing the system prompt whole is the point, so the clip sits well above it: real
+# prompt_snapshot text ran ~40k chars as of 2026-11-15.
+CONTEXT_CLIP = 60_000
+
+
+def _context_html(el, open_by_default: bool, slide_no: int = 0) -> str:
+    metaparts = []
+    if el.get("count", 1) > 1:
+        metaparts.append(f"{el['count']}×")
+    if el.get("seen") is not None:
+        n = el["seen"]
+        if n == slide_no:
+            metaparts.append("repeated above")
+        else:
+            metaparts.append(f'<a href="#s{n}">unchanged since beat {n}</a>')
+    meta = f'<span class="meta">{" · ".join(metaparts)}</span>' if metaparts else ""
+    head = f'<span class="ck ctx">{_esc(el["label"])}</span><span class="arg">{_esc(el["arg"])}</span>{meta}'
+    if not el.get("text"):
+        return f'<div class="chip ctx flat"><div class="row">{head}</div></div>'
+    body = el["text"]
+    if len(body) > CONTEXT_CLIP:
+        body = body[:CONTEXT_CLIP] + "\n… [clipped]"
+    return (
+        f'<details class="chip ctx"{" open" if open_by_default else ""}>'
+        f'<summary><span class="tri"></span>{head}</summary>'
+        f'<div class="chip-body">{_esc(body)}</div></details>'
+    )
+
+
+def _clip(s, n):
+    s = (s or "").strip()
+    return s if len(s) <= n else s[:n] + "\n… [clipped]"
+
+
+def _shorthome(p: str) -> str:
+    home = str(Path.home())
+    return "~" + p[len(home) :] if p.startswith(home + "/") else p
+
+
+def _subagent_body(sub: dict, result) -> str:
+    """An agent chip's body in --subagents brief: what it was asked, what it did, what
+    it came back with, and the command for its own deck."""
+    parts = []
+    if sub.get("prompt"):
+        parts.append(f'<h4>prompt</h4><div class="txt">{_esc(_clip(sub["prompt"], 1200))}</div>')
+    tools = sub.get("tool_calls") or {}
+    if tools:
+        counts = " · ".join(f"{k} {v}" for k, v in sorted(tools.items(), key=lambda kv: -kv[1]))
+        span = ""
+        if sub.get("first_ts") and sub.get("last_ts"):
+            span = f" — {_fmt_ts(sub['first_ts'])} → {_fmt_ts(sub['last_ts'])}"
+        parts.append(f'<h4>tools</h4><div class="txt">{_esc(counts + span)}</div>')
+    final = sub.get("final") or result
+    if final:
+        parts.append(f'<h4>result</h4><div class="txt">{_esc(_clip(final, 2400))}</div>')
+    if sub.get("path"):
+        cmd = f"claude-reel {_shorthome(sub['path'])} --open"
+        parts.append(
+            f'<h4>full deck</h4><div class="cmd"><code>{_esc(cmd)}</code>'
+            f'<button class="copy" data-copy="{_esc(cmd)}">copy</button></div>'
+        )
+    return f'<div class="sub-body">{"".join(parts)}</div>'
+
+
+def _chip_html(el, open_by_default: bool, slide_no: int = 0) -> str:
+    if el["type"] == "context":
+        return _context_html(el, open_by_default, slide_no)
     if el["type"] == "thinking":
         label, arg, stat, count, err = "think", "reasoning", None, 1, False
         body = el.get("text") or ""
@@ -211,7 +364,12 @@ def _chip_html(el, open_by_default: bool) -> str:
         f'<summary><span class="tri"></span>'
         f'<span class="ck {ck_cls}">{_esc(label)}</span>'
         f'<span class="arg">{_esc(arg)}</span>{meta_html}</summary>'
-        f'<div class="chip-body">{_esc(body)}</div></details>'
+        + (
+            _subagent_body(el["subagent"], el.get("result"))
+            if el.get("subagent")
+            else f'<div class="chip-body">{_esc(body)}</div>'
+        )
+        + "</details>"
     )
 
 
@@ -219,7 +377,7 @@ def _slide_html(slide, total_beats, open_chips: bool) -> str:
     beatno = slide["index"] + 1
     when = _fmt_ts(slide["ts_range"][0])
     parts = [
-        '<section class="slide"><div class="inner">',
+        f'<section class="slide" id="s{beatno}"><div class="inner">',
         f'<div class="eyebrow"><span class="beatno">beat {beatno}</span>'
         + (f'<span class="dot">·</span> {_esc(when)}' if when else "")
         + "</div>",
@@ -233,8 +391,8 @@ def _slide_html(slide, total_beats, open_chips: bool) -> str:
             chip_buf.clear()
 
     for el in slide["elements"]:
-        if el["type"] in ("tool", "thinking"):
-            chip_buf.append(_chip_html(el, open_chips))
+        if el["type"] in ("tool", "thinking", "context"):
+            chip_buf.append(_chip_html(el, open_chips, beatno))
             continue
         flush_chips()
         who = "you" if el["type"] == "user" else "claude"
@@ -276,7 +434,7 @@ def _agenda_html(deck) -> str:
             f'<span class="lbl2">{_esc(a["title"])}</span>{bd}</button>'
         )
     return (
-        '<section class="slide"><div class="inner">'
+        '<section class="slide" id="s0"><div class="inner">'
         '<div class="eyebrow">while you were away</div>'
         '<div class="agenda-head"><h1 class="title">Session recap</h1>'
         f'<p class="sub">{sub}</p></div>'
@@ -331,5 +489,6 @@ def render(deck: dict) -> str:
     <button class="nav" id="next" aria-label="Next slide" title="Next (→)">›</button>
   </div>
 </div>
+<div class="find" id="find"><span>/</span><input id="fq" type="search" placeholder="find in session" aria-label="Find in session"><span id="fc"></span></div>
 <script>{JS}</script>
 </body></html>"""

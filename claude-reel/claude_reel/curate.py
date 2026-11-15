@@ -51,7 +51,72 @@ def _tool_element(call, result):
     if result:
         el["result"] = result.get("text", "")
         el["is_error"] = result.get("is_error", False)
+    if call.get("subagent"):
+        el["subagent"] = call["subagent"]
     return el
+
+
+def _subagent_element(b):
+    """A subagent launched with no tool call of its own (a forked skill)."""
+    return {
+        "type": "tool",
+        "ts": b.get("ts"),
+        "label": "agent",
+        "arg": b.get("agentType") or "agent",
+        "stat": (b.get("description") or "")[:40] or None,
+        "count": 1,
+        "result": None,
+        "is_error": False,
+        "subagent": b.get("subagent"),
+    }
+
+
+def _add_context(cur, b, first_seen, slide_no):
+    """Append a context beat to the slide under construction.
+
+    Identical context repeats constantly (the same reminder on every request), so only
+    its first occurrence carries the text; later ones point back to that slide. The
+    token budget changes every request: one chip per slide shows where it went."""
+    if b["label"] == "budget":
+        prev = next((e for e in cur if e.get("type") == "context" and e["label"] == "budget"), None)
+        if prev:
+            start = prev["arg"].split(" → ")[0].removesuffix(" tokens left")
+            prev["arg"] = f"{start} → {b['arg']}"
+            prev["count"] += 1
+            return
+        cur.append({**_ctx_base(b), "text": None})
+        return
+    key = b.get("key")
+    el = _ctx_base(b)
+    if key in first_seen:
+        el["text"] = None
+        el["seen"] = first_seen[key]
+    else:
+        first_seen[key] = slide_no
+    last = cur[-1] if cur else None
+    if (
+        last
+        and last.get("type") == "context"
+        and last.get("key") == key
+        and last.get("seen") is not None
+        and el.get("seen") is not None
+    ):
+        last["count"] += 1
+        return
+    cur.append(el)
+
+
+def _ctx_base(b):
+    return {
+        "type": "context",
+        "ts": None,  # injected context shouldn't stretch a slide's time range
+        "label": b["label"],
+        "arg": b["arg"],
+        "text": b["text"],
+        "key": b.get("key"),
+        "count": 1,
+        "seen": None,
+    }
 
 
 def _slide_badges(elements):
@@ -102,6 +167,7 @@ def curate(reel: dict, density: str = "jazz") -> dict:
     cur = []  # elements of the slide under construction
     title = ""
     index = 0
+    first_seen = {}  # context key -> the slide number its text first appeared on
 
     def flush():
         nonlocal cur, title, index
@@ -114,7 +180,10 @@ def curate(reel: dict, density: str = "jazz") -> dict:
     for b in beats:
         kind = b["kind"]
         if kind == "user_say":
-            flush()
+            # Context alone doesn't make a slide (the system prompt lands before the
+            # first ask); it rides into the slide this prompt opens.
+            if any(e["type"] != "context" for e in cur):
+                flush()
             title = _title_from_text(b["text"])
             cur.append({"type": "user", "ts": b.get("ts"), "text": b["text"]})
         elif kind == "assistant_say":
@@ -133,6 +202,7 @@ def curate(reel: dict, density: str = "jazz") -> dict:
                 and cur[-1].get("type") == "tool"
                 and cur[-1]["label"] == el["label"]
                 and cur[-1]["arg"] == el["arg"]
+                and not (el.get("subagent") or cur[-1].get("subagent"))
             ):
                 prev = cur[-1]
                 prev["count"] += 1
@@ -141,6 +211,11 @@ def curate(reel: dict, density: str = "jazz") -> dict:
                     prev["result"] = el["result"]
             else:
                 cur.append(el)
+        elif kind == "subagent":
+            cur.append(_subagent_element(b))
+        elif kind == "context":
+            # Slide numbers in the deck count the agenda as 0, so this slide is index + 1.
+            _add_context(cur, b, first_seen, index + 1)
         # tool_result beats are folded into their call above; nothing to emit here
     flush()
 
