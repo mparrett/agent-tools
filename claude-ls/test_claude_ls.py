@@ -3392,8 +3392,22 @@ def _subagent_session(tmp_path) -> Path:
                 "timestamp": "2026-09-01T10:02:00.000Z",
                 "message": {"role": "assistant", "content": [nested_call]},
             },
+            {  # a forked skill invoked through the Skill tool: only the result names it
+                "type": "user",
+                "timestamp": "2026-09-01T10:02:10.000Z",
+                "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]},
+                "toolUseResult": {"status": "forked", "agentId": "skill1"},
+            },
             _say("assistant", "tool1 done", 3),
         ],
+    )
+    _jsonl(sub / "agent-skill1.jsonl", [_say("assistant", "skill says", 2)])
+    # No launch record anywhere, but the sidecar names its parent.
+    kid = _say("assistant", "kid says", 2)
+    kid["timestamp"] = "2026-09-01T10:02:30.000Z"
+    _jsonl(sub / "agent-kid1.jsonl", [kid])
+    (sub / "agent-kid1.meta.json").write_text(
+        json.dumps({"parentAgentId": "tool1", "spawnDepth": 2})
     )
     (sub / "agent-tool1.meta.json").write_text(
         json.dumps({"agentType": "Explore", "description": "find it", "toolUseId": "toolu_A"})
@@ -3420,6 +3434,8 @@ def test_export_subagents_splices_each_transcript_at_its_launch(tmp_path, capsys
         "parent asks",
         "tool1 brief",
         "nested says",
+        "skill says",
+        "kid says",
         "tool1 done",
         "parent after agent",
         "fork says",
@@ -3434,7 +3450,20 @@ def test_export_subagents_splices_each_transcript_at_its_launch(tmp_path, capsys
     assert "> tool1 brief\n> second line" in out
     # Quoting nests: the nested agent's text is two levels deep.
     assert "> > nested says" in out
+    assert "> > skill says" in out and "> > kid says" in out
     assert "> tool1 done" in out and "> > tool1 done" not in out
+
+
+def test_splice_subagents_places_each_agent_once_across_files(tmp_path):
+    # A continued session repeats the launch lines and keeps a copy of the
+    # subagents dir; with `placed` shared, the second file splices nothing new.
+    session = _subagent_session(tmp_path)
+    entries = cl.load_raw_entries(str(session))
+    placed: dict = {}
+    first = cl._splice_subagents(entries, session, placed)
+    second = cl._splice_subagents(entries, session, placed)
+    assert sum(e["type"] == "subagent" for e in first) == 3  # tool1, fork1, stray1
+    assert not any(e["type"] == "subagent" for e in second)
 
 
 def test_export_leaves_subagents_out_by_default(tmp_path, capsys):

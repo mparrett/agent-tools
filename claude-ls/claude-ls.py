@@ -5042,20 +5042,42 @@ def _spawned_by(entry: Dict, pool: Dict[str, Dict], by_tool: Dict[str, str]) -> 
         text = entry.get("content") if entry.get("type") == "system" else content
         if isinstance(text, str) and "agentId" in text:
             found += [a for a in _AGENT_ID_REF.findall(text) if a in pool]
+        # A forked skill the model invoked through the Skill tool has neither a
+        # toolUseId nor a launch line: its tool_result carries the agent id.
+        result = entry.get("toolUseResult")
+        if isinstance(result, dict) and result.get("agentId") in pool:
+            found.append(result["agentId"])
     return found
 
 
-def _splice_subagents(entries: List[Dict], session_path: Path) -> List[Dict]:
+def _insert_by_time(seq: List[Dict], sub: Dict) -> None:
+    # ISO-8601 UTC strings from one writer compare correctly as text.
+    idx = next(
+        (i for i, e in enumerate(seq) if (e.get("timestamp") or "") > sub["timestamp"]),
+        len(seq),
+    )
+    seq.insert(idx, sub)
+
+
+def _splice_subagents(
+    entries: List[Dict], session_path: Path, placed: Optional[Dict[str, Dict]] = None
+) -> List[Dict]:
     """The session's entries with each subagent's transcript inserted, as one
     `subagent` entry, right after the record that spawned it. A background agent's
     whole run therefore sits at its launch point, not spread across the parent's
     later turns. Subagents with no recoverable launch record go in by start time,
-    so nothing on disk is silently dropped."""
+    under their `parentAgentId` when the sidecar names one, so nothing on disk is
+    silently dropped.
+
+    `placed` (agent id -> its spliced entry) is shared across the files of one
+    export: a continued session repeats its predecessor's launch lines and keeps
+    a copy of its subagents, and each should appear once."""
     pool = _subagent_pool(session_path)
     if not pool:
         return entries
+    if placed is None:
+        placed = {}
     by_tool = {p["meta"]["toolUseId"]: aid for aid, p in pool.items() if p["meta"].get("toolUseId")}
-    placed: Set[str] = set()
 
     def attach(seq: List[Dict]) -> List[Dict]:
         out: List[Dict] = []
@@ -5067,30 +5089,22 @@ def _splice_subagents(entries: List[Dict], session_path: Path) -> List[Dict]:
         return out
 
     def build(aid: str) -> Dict:
-        placed.add(aid)  # before recursing: a transcript can't splice itself in
+        node = {"type": "subagent", "agent_id": aid, "meta": pool[aid]["meta"]}
+        placed[aid] = node  # before recursing: a transcript can't splice itself in
         sub = load_raw_entries(str(pool[aid]["path"]))
-        return {
-            "type": "subagent",
-            "agent_id": aid,
-            "meta": pool[aid]["meta"],
-            "timestamp": next((e["timestamp"] for e in sub if e.get("timestamp")), ""),
-            "entries": attach(sub),
-        }
+        node["timestamp"] = next((e["timestamp"] for e in sub if e.get("timestamp")), "")
+        node["entries"] = attach(sub)
+        return node
 
     result = attach(entries)
-    # Shallowest first, so an orphaned parent claims its own children before
-    # they could be filed as orphans themselves.
-    orphans: List[Dict] = []
+    # Shallowest first, so an orphaned parent is built (and claims its own
+    # children) before any child looks for it.
     for aid in sorted(pool, key=lambda a: pool[a]["meta"].get("spawnDepth") or 1):
-        if aid not in placed:
-            orphans.append(build(aid))
-    for sub in sorted(orphans, key=lambda s: s["timestamp"]):
-        # ISO-8601 UTC strings from one writer compare correctly as text.
-        idx = next(
-            (i for i, e in enumerate(result) if (e.get("timestamp") or "") > sub["timestamp"]),
-            len(result),
-        )
-        result.insert(idx, sub)
+        if aid in placed:
+            continue
+        sub = build(aid)
+        parent = placed.get(pool[aid]["meta"].get("parentAgentId") or "")
+        _insert_by_time(parent["entries"] if parent else result, sub)
     return result
 
 
@@ -5134,6 +5148,7 @@ def export_mode(args, console: Optional[Console]):
         session_files = [session_file]
 
     subagents = getattr(args, "subagents", False)
+    placed: Dict[str, Dict] = {}  # one per export, across followed files
     # Load entries from all files, inserting session boundary markers
     all_entries = []
     for i, sf in enumerate(session_files):
@@ -5147,7 +5162,7 @@ def export_mode(args, console: Optional[Console]):
             )
         file_entries = load_raw_entries(str(sf))
         if subagents:
-            file_entries = _splice_subagents(file_entries, Path(sf))
+            file_entries = _splice_subagents(file_entries, Path(sf), placed)
         if file_entries and all_entries and all_entries[-1].get("type") == "session_boundary":
             all_entries[-1]["timestamp"] = file_entries[0].get("timestamp", "")
         all_entries.extend(file_entries)
