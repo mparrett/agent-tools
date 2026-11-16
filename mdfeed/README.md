@@ -181,8 +181,24 @@ macOS only, and it needs rebuilding if the clone moves.
 `/` search · `Tab` Recent/Plans · `j/k` section · `n/p` files · `x` filter (cycle
 projects) · `a` show all · `g#` jump to heading · `e/c` expand/collapse all · `b`
 copy file path · `s` rendered ⇄ raw source (textarea, select-all friendly) · `y`
-copy the raw markdown · `d` diff · `z` zen · `t` theme · `f` size. Refresh is the
-`↻` button in the header.
+copy the raw markdown · `d` diff · `z` zen · `t` theme · `f` size · `,` reading
+preferences. Refresh is the `↻` button in the header.
+
+### Reading preferences
+
+The **Aa** button (or `,`) opens a panel of reading settings, each saved in the
+browser and applied before the page first draws:
+
+- **Typeface**: Instrument Sans (default), [Atkinson Hyperlegible
+  Next](https://www.brailleinstitute.org/freefont/) with its matching mono for
+  code, or the system font. Atkinson is drawn to keep look-alike characters
+  (`Il1`, `O0`) apart, which helps low-vision readers.
+- **Text size**: S, M, L, XL (14 to 20px). `f` cycles through them.
+- **Line spacing** and **column width** for the document text.
+- **Theme**: Auto, Light or Dark, also on the `t` key.
+
+Changing a setting keeps your place in the document. Settings sync across open
+tabs, and **reset** returns them all to their defaults.
 
 When the file you are reading changes on disk, a pill offers `r` refresh or `d`
 diff. Diff redlines what is on disk now against what the tab last showed —

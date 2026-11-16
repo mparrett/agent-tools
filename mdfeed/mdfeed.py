@@ -349,7 +349,11 @@ INDEX_HTML = """<!DOCTYPE html>
 <title>mdfeed</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap">
+<!-- One stylesheet for every typeface the prefs panel offers. Listing a family
+     here costs only its @font-face rules: the browser fetches a font file the
+     first time text is drawn in it, so readers who never pick Atkinson never
+     download it. -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Atkinson+Hyperlegible+Next:ital,wght@0,400..700;1,400..700&family=Atkinson+Hyperlegible+Mono:wght@400..700&display=swap">
 <style>
   /* Palette: Warm Burnout (warmburnout.com) — warm, earthy, low-strain. */
   :root {
@@ -374,13 +378,34 @@ INDEX_HTML = """<!DOCTYPE html>
     --mono: 'SF Mono', Monaco, monospace;
     --radius: 6px;
     --fs: 16px;
+    --lh: 1.7;      /* body-text line height (prefs: spacing) */
+    --col: 820px;   /* reading column width (prefs: width) */
     /* Zen-mode gutter vignette. Derived from --bg so it tracks the active
        theme; biased toward black so edges recede. Dark themes override this
        with a stronger value (see below) — a near-black bg has little room
        left to darken, so the light-mode strength is invisible there. */
     --vignette: color-mix(in srgb, var(--bg) 67%, #000);
   }
+  /* Reading preferences (the Aa panel). Each is a data-* attribute on <html>,
+     absent at its default, set before first paint by the <head> script. */
   :root[data-size="small"] { --fs: 14px; }
+  :root[data-size="large"] { --fs: 18px; }
+  :root[data-size="xlarge"] { --fs: 20px; }
+  :root[data-spacing="compact"] { --lh: 1.5; }
+  :root[data-spacing="relaxed"] { --lh: 1.95; }
+  :root[data-width="narrow"] { --col: 680px; }
+  :root[data-width="wide"] { --col: 1040px; }
+  /* Typefaces come as a UI + mono pair, chosen together: Atkinson's mono cut
+     shares its letterform rules (distinct 0/O, 1/l/I), which is the point of
+     picking it, and mixing faces independently is a choice nobody asked for. */
+  :root[data-font="atkinson"] {
+    --font: 'Atkinson Hyperlegible Next', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    --mono: 'Atkinson Hyperlegible Mono', 'SF Mono', Monaco, monospace;
+  }
+  :root[data-font="system"] {
+    --font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Monaco, monospace;
+  }
   /* Dark vars apply two ways: when the system prefers dark and the user
      hasn't forced light (auto mode), or when the user explicitly picks dark. */
   @media (prefers-color-scheme: dark) {
@@ -458,7 +483,7 @@ INDEX_HTML = """<!DOCTYPE html>
   .fchip.active { color: var(--bg); background: var(--accent); border-color: var(--accent); }
   .fchip.more { color: var(--accent); font-weight: 600; }
   #preview { flex: 1; overflow-y: auto; padding: 24px 32px; max-width: 100%; font-size: var(--fs); }
-  .preview-inner { max-width: 820px; margin: 0 auto; }
+  .preview-inner { max-width: var(--col); margin: 0 auto; }
   #viewtabs { display: flex; padding: 8px 10px 2px; }
   .vtab { flex: 1; text-align: center; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); background: transparent; border: 1px solid var(--border); padding: 5px 8px; cursor: pointer; }
   .vtab:first-child { border-radius: 6px 0 0 6px; }
@@ -519,7 +544,7 @@ INDEX_HTML = """<!DOCTYPE html>
   #preview h1, #preview h2, #preview h3 { border-bottom: 1px solid var(--border); padding-bottom: 6px; font-weight: 600; }
   #preview h1 { font-size: 1.8em; margin-top: 0; font-weight: 400; }
   #preview h2 { font-size: 1.4em; }
-  #preview p, #preview ul, #preview ol { line-height: 1.7; }
+  #preview p, #preview ul, #preview ol { line-height: var(--lh); }
   #preview pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; overflow-x: auto; }
   #preview code { background: var(--code-bg); padding: 2px 5px; border-radius: 3px; font-size: 0.9em; font-family: var(--mono); }
   #preview pre code { background: none; padding: 0; }
@@ -586,12 +611,12 @@ INDEX_HTML = """<!DOCTYPE html>
   :root[data-reader] #preview {
     background: linear-gradient(90deg,
       var(--vignette) 0,
-      var(--vignette) calc((100% - 820px) / 12),
-      color-mix(in srgb, var(--vignette), transparent 55%) calc((100% - 820px) / 4.5),
-      transparent calc((100% - 820px) / 3),
-      transparent calc(100% - (100% - 820px) / 3),
-      color-mix(in srgb, var(--vignette), transparent 55%) calc(100% - (100% - 820px) / 4.5),
-      var(--vignette) calc(100% - (100% - 820px) / 12),
+      var(--vignette) calc((100% - var(--col)) / 12),
+      color-mix(in srgb, var(--vignette), transparent 55%) calc((100% - var(--col)) / 4.5),
+      transparent calc((100% - var(--col)) / 3),
+      transparent calc(100% - (100% - var(--col)) / 3),
+      color-mix(in srgb, var(--vignette), transparent 55%) calc(100% - (100% - var(--col)) / 4.5),
+      var(--vignette) calc(100% - (100% - var(--col)) / 12),
       var(--vignette) 100%);
   }
   /* Zen header: collapse the control cluster to a minimal status line
@@ -644,7 +669,70 @@ INDEX_HTML = """<!DOCTYPE html>
     :root[data-mobile-view="preview"] #list { display: none; }
     :root[data-mobile-view="preview"] #back-btn { display: inline-flex; align-items: center; }
   }
+  /* ── Reading preferences panel (Aa button, ',' key) ─────────────────────── */
+  #prefs { position: fixed; top: 44px; right: 14px; z-index: 30; width: 300px; background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 6px 24px color-mix(in srgb, var(--text) 18%, transparent); padding: 10px 12px 12px; font-size: 12px; }
+  #prefs[hidden] { display: none; }
+  #prefs .prow { margin-top: 10px; }
+  #prefs .prow:first-child { margin-top: 0; }
+  #prefs .plabel { color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+  #prefs .pseg { display: flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  #prefs .pseg button { flex: 1; font-family: var(--font); font-size: 12px; color: var(--muted); background: var(--bg); border: 0; border-left: 1px solid var(--border); padding: 5px 4px; cursor: pointer; }
+  #prefs .pseg button:first-child { border-left: 0; }
+  #prefs .pseg button:hover { color: var(--text); }
+  #prefs .pseg button[aria-pressed="true"] { color: var(--bg); background: var(--accent); }
+  #prefs .pseg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* Each typeface option is drawn in its own face, so the choice is visible. */
+  #prefs .pseg button[data-face="atkinson"] { font-family: 'Atkinson Hyperlegible Next', sans-serif; }
+  #prefs .pseg button[data-face="system"] { font-family: system-ui, sans-serif; }
+  #prefs .pseg button[data-face="instrument"] { font-family: 'Instrument Sans', sans-serif; }
+  #prefs .pfoot { margin-top: 10px; display: flex; justify-content: space-between; align-items: center; color: var(--faint); font-size: 10px; }
+  #prefs .pfoot button { font-family: var(--font); font-size: 11px; color: var(--muted); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+  /* On a phone the header row overflows, and theme is also in the panel, so
+     its standalone button makes room for Aa. The key hints have no keyboard. */
+  @media (max-width: 640px) {
+    #prefs { left: 12px; right: 12px; top: 52px; width: auto; }
+    #prefs .pfoot span, #theme-toggle { display: none; }
+  }
+  /* A pref change cross-fades (view transition) unless motion is reduced. */
+  ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 160ms; }
+  @media (prefers-reduced-motion: reduce) {
+    ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+  }
 </style>
+<script>
+  // Reading preferences, applied before first paint so a stored font or size
+  // never flashes the default first. This table is the single definition: the
+  // main script reads it back from window.mdfeedPrefs to build the Aa panel.
+  // A pref at its default is stored as absent and sets no attribute, so the
+  // stylesheet's :root values are the defaults. Keys and values match what
+  // the old theme and size toggles stored, so existing choices carry over.
+  (() => {
+    const PREFS = {
+      font:    { key: 'mdfeed-font',    attr: 'data-font',    def: 'instrument', label: 'Typeface',
+                 opts: [['instrument', 'Instrument'], ['atkinson', 'Atkinson'], ['system', 'System']] },
+      size:    { key: 'mdfeed-size',    attr: 'data-size',    def: 'regular',    label: 'Text size',
+                 opts: [['small', 'S'], ['regular', 'M'], ['large', 'L'], ['xlarge', 'XL']] },
+      spacing: { key: 'mdfeed-spacing', attr: 'data-spacing', def: 'normal',     label: 'Line spacing',
+                 opts: [['compact', 'Compact'], ['normal', 'Normal'], ['relaxed', 'Relaxed']] },
+      width:   { key: 'mdfeed-width',   attr: 'data-width',   def: 'normal',     label: 'Column width',
+                 opts: [['narrow', 'Narrow'], ['normal', 'Normal'], ['wide', 'Wide']] },
+      theme:   { key: 'mdfeed-theme',   attr: 'data-theme',   def: 'auto',       label: 'Theme',
+                 opts: [['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']] },
+    };
+    const read = (p) => {
+      let v = null;
+      try { v = localStorage.getItem(p.key); } catch (e) {}
+      return p.opts.some(o => o[0] === v) ? v : p.def;
+    };
+    const apply = (p, v) => {
+      if (v === p.def) document.documentElement.removeAttribute(p.attr);
+      else document.documentElement.setAttribute(p.attr, v);
+    };
+    for (const p of Object.values(PREFS)) apply(p, read(p));
+    try { if (localStorage.getItem('mdfeed-reader') === '1') document.documentElement.setAttribute('data-reader', ''); } catch (e) {}
+    window.mdfeedPrefs = { PREFS, read, apply };
+  })();
+</script>
 </head>
 <body>
 <header>
@@ -662,10 +750,10 @@ INDEX_HTML = """<!DOCTYPE html>
   <span class="zen-only zen-path" id="zen-path"></span>
   <button id="source-toggle" class="hbtn zen-hide" title="Raw markdown source (s) · copy it (y)">source</button>
   <button id="theme-toggle" class="hbtn zen-hide" title="Theme (t)">auto</button>
-  <button id="size-toggle" class="hbtn zen-hide" title="Text size (f)">regular</button>
+  <button id="prefs-btn" class="hbtn zen-hide" title="Reading preferences: typeface, size, spacing, width (,)" aria-haspopup="dialog" aria-expanded="false" aria-controls="prefs">Aa</button>
   <button id="diff-btn" class="hbtn zen-hide" title="Diff against what you last saw (d)">diff</button>
   <button id="refresh-btn" class="hbtn zen-hide" title="Refresh (r)" style="font-size:14px;padding:1px 6px;line-height:1">↻</button>
-  <span class="status kbd-hints zen-hide">/ search<span class="sep">·</span>⇥ recent/plans<span class="sep">·</span>j/k section<span class="sep">·</span>e/c expand<span class="sep">·</span>g# jump<span class="sep">·</span>b copy path<span class="sep">·</span>s source<span class="sep">·</span>y copy md<span class="sep">·</span>d diff<span class="sep">·</span>z zen<span class="sep">·</span>t theme<span class="sep">·</span>f size</span>
+  <span class="status kbd-hints zen-hide">/ search<span class="sep">·</span>⇥ recent/plans<span class="sep">·</span>j/k section<span class="sep">·</span>e/c expand<span class="sep">·</span>g# jump<span class="sep">·</span>b copy path<span class="sep">·</span>s source<span class="sep">·</span>y copy md<span class="sep">·</span>d diff<span class="sep">·</span>z zen<span class="sep">·</span>t theme<span class="sep">·</span>f size<span class="sep">·</span>, prefs</span>
 </header>
 <main>
   <aside id="list">
@@ -680,6 +768,7 @@ INDEX_HTML = """<!DOCTYPE html>
   <div id="fresh-pill" title="The file you're viewing changed on disk"><span class="dot"></span><span id="fresh-pill-text"></span></div>
 </main>
 <div class="toast" id="toast"></div>
+<div id="prefs" role="dialog" aria-label="Reading preferences" hidden></div>
 <script>
 (() => {
   /*@HTMLDIFF_ENGINE@*/
@@ -1599,6 +1688,7 @@ INDEX_HTML = """<!DOCTYPE html>
     else if (e.key === 't') { e.preventDefault(); cycleTheme(); }
     else if (e.key === 'f') { e.preventDefault(); cycleSize(); }
     else if (e.key === 'z') { e.preventDefault(); toggleReader(); }
+    else if (e.key === ',') { e.preventDefault(); togglePrefs(); }
     else if (e.key === 'b') { e.preventDefault(); if (selectedPath) { navigator.clipboard.writeText(selectedPath); toast('path copied'); } }
     else if (e.key === 'e') { e.preventDefault(); setAllCollapsed(false); }
     else if (e.key === 'c') { e.preventDefault(); setAllCollapsed(true); }
@@ -1608,46 +1698,152 @@ INDEX_HTML = """<!DOCTYPE html>
     else if (e.key === 'y') { e.preventDefault(); copySource(); }
   });
 
-  // Theme: auto (follow system) → light → dark, persisted. In auto mode the
-  // attribute is cleared so the prefers-color-scheme media query takes over.
+  // Reading preferences. The table and the attribute writer live in the
+  // <head> script (window.mdfeedPrefs) so stored choices land before first
+  // paint; this half owns changing them: the Aa panel, the t/f cycle keys,
+  // font loading, keeping the reader's place, and cross-tab sync.
+  const { PREFS, read: readPref, apply: applyPref } = window.mdfeedPrefs;
   const $themeToggle = document.getElementById('theme-toggle');
-  const THEMES = ['auto', 'light', 'dark'];
-  let themePref = localStorage.getItem('mdfeed-theme') || 'auto';
+  const $prefsBtn = document.getElementById('prefs-btn');
+  const $prefs = document.getElementById('prefs');
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
-  function applyTheme() {
-    const root = document.documentElement;
-    if (themePref === 'auto') root.removeAttribute('data-theme');
-    else root.setAttribute('data-theme', themePref);
-    $themeToggle.textContent = themePref;
+  // Faces a typeface needs before the swap. Google's CSS only declares them;
+  // nothing downloads until text is drawn in the face, so switching without
+  // this paints old font, then fallback, then new font. Loading first makes it
+  // one step. Capped so an offline viewer still switches (to the fallback).
+  const FONT_FACES = {
+    atkinson: ['400 16px "Atkinson Hyperlegible Next"', '600 16px "Atkinson Hyperlegible Next"',
+               'italic 400 16px "Atkinson Hyperlegible Next"', '400 12px "Atkinson Hyperlegible Mono"'],
+    instrument: ['400 16px "Instrument Sans"', '600 16px "Instrument Sans"'],
+  };
+  function loadFaces(font) {
+    const faces = FONT_FACES[font];
+    if (!faces || !document.fonts || !document.fonts.load) return Promise.resolve();
+    const all = Promise.all(faces.map(f => document.fonts.load(f).catch(() => {})));
+    return Promise.race([all, new Promise(r => setTimeout(r, 1500))]);
   }
-  function cycleTheme() {
-    themePref = THEMES[(THEMES.indexOf(themePref) + 1) % THEMES.length];
-    localStorage.setItem('mdfeed-theme', themePref);
-    applyTheme();
-    toast('theme: ' + themePref);
+
+  // A size, spacing, width or face change reflows the document. Pin the first
+  // block visible at the top of the preview and put it back where it was, so
+  // changing the text size mid-read does not lose the reader's place.
+  function captureAnchor() {
+    const top = $preview.getBoundingClientRect().top;
+    for (const el of $preview.querySelectorAll('.preview-inner > *')) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom > top) return { el, offset: r.top - top };
+    }
+    return null;
   }
+  function restoreAnchor(a) {
+    if (!a || !a.el.isConnected) return;
+    const top = $preview.getBoundingClientRect().top;
+    $preview.scrollTop += (a.el.getBoundingClientRect().top - top) - a.offset;
+  }
+
+  function renderPrefsChrome() {
+    $themeToggle.textContent = readPref(PREFS.theme);
+    if ($prefs.hidden) return;
+    for (const btn of $prefs.querySelectorAll('button[data-pref]')) {
+      btn.setAttribute('aria-pressed', String(readPref(PREFS[btn.dataset.pref]) === btn.dataset.value));
+    }
+  }
+
+  async function setPref(name, value) {
+    const p = PREFS[name];
+    if (name === 'font') await loadFaces(value);
+    const swap = () => {
+      const anchor = captureAnchor();
+      try {
+        if (value === p.def) localStorage.removeItem(p.key);
+        else localStorage.setItem(p.key, value);
+      } catch (e) {}
+      applyPref(p, value);
+      restoreAnchor(anchor);
+      renderPrefsChrome();
+    };
+    // Cross-fade the change rather than snapping. Skipped under reduced
+    // motion; where the API is missing the swap simply happens.
+    if (document.startViewTransition && !reducedMotion.matches) document.startViewTransition(swap);
+    else swap();
+  }
+  function cyclePref(name) {
+    const p = PREFS[name];
+    const vals = p.opts.map(o => o[0]);
+    const next = vals[(vals.indexOf(readPref(p)) + 1) % vals.length];
+    setPref(name, next);
+    toast(p.label.toLowerCase() + ': ' + p.opts.find(o => o[0] === next)[1].toLowerCase());
+  }
+  const cycleTheme = () => cyclePref('theme');
+  const cycleSize = () => cyclePref('size');
+
+  function buildPrefsPanel() {
+    const rows = Object.entries(PREFS).map(([name, p]) =>
+      '<div class="prow"><div class="plabel">' + p.label + '</div>' +
+      '<div class="pseg" role="group" aria-label="' + p.label + '">' +
+      p.opts.map(([v, text]) =>
+        '<button type="button" data-pref="' + name + '" data-value="' + v + '"' +
+        (name === 'font' ? ' data-face="' + v + '"' : '') + '>' + text + '</button>').join('') +
+      '</div></div>');
+    $prefs.innerHTML = rows.join('') +
+      '<div class="pfoot"><span>f size · t theme · Esc close</span>' +
+      '<button type="button" id="prefs-reset">reset</button></div>';
+  }
+  function openPrefs() {
+    if (!$prefs.firstChild) buildPrefsPanel();
+    $prefs.hidden = false;
+    $prefsBtn.setAttribute('aria-expanded', 'true');
+    $prefsBtn.classList.add('active');
+    renderPrefsChrome();
+    const cur = $prefs.querySelector('button[aria-pressed="true"]');
+    if (cur) cur.focus({ preventScroll: true });
+  }
+  function closePrefs(refocus) {
+    if ($prefs.hidden) return;
+    $prefs.hidden = true;
+    $prefsBtn.setAttribute('aria-expanded', 'false');
+    $prefsBtn.classList.remove('active');
+    if (refocus) $prefsBtn.focus({ preventScroll: true });
+  }
+  const togglePrefs = () => ($prefs.hidden ? openPrefs() : closePrefs(true));
+
+  $prefs.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    if (btn.id === 'prefs-reset') {
+      for (const [name, p] of Object.entries(PREFS)) if (readPref(p) !== p.def) setPref(name, p.def);
+      return;
+    }
+    if (btn.dataset.pref) setPref(btn.dataset.pref, btn.dataset.value);
+  });
+  // Keys typed inside the panel stay there: Esc or ',' closes it, arrows move
+  // within a row, and the global single-letter shortcuts must not fire while a
+  // segment has focus.
+  $prefs.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' || e.key === ',') { e.preventDefault(); closePrefs(true); }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const seg = [...e.target.parentElement.querySelectorAll('button')];
+      const i = seg.indexOf(e.target);
+      if (i >= 0) {
+        e.preventDefault();
+        seg[(i + (e.key === 'ArrowRight' ? 1 : seg.length - 1)) % seg.length].focus();
+      }
+    }
+    e.stopPropagation();
+  });
+  document.addEventListener('click', (e) => {
+    if (!$prefs.hidden && !$prefs.contains(e.target) && e.target !== $prefsBtn) closePrefs(false);
+  });
+  $prefsBtn.addEventListener('click', togglePrefs);
   $themeToggle.addEventListener('click', cycleTheme);
-  applyTheme();
 
-  // Text size: regular → small, persisted. Drives --fs on <html> via data-size.
-  const $sizeToggle = document.getElementById('size-toggle');
-  const SIZES = ['regular', 'small'];
-  let sizePref = localStorage.getItem('mdfeed-size') || 'regular';
-
-  function applySize() {
-    const root = document.documentElement;
-    if (sizePref === 'regular') root.removeAttribute('data-size');
-    else root.setAttribute('data-size', sizePref);
-    $sizeToggle.textContent = sizePref;
-  }
-  function cycleSize() {
-    sizePref = SIZES[(SIZES.indexOf(sizePref) + 1) % SIZES.length];
-    localStorage.setItem('mdfeed-size', sizePref);
-    applySize();
-    toast('size: ' + sizePref);
-  }
-  $sizeToggle.addEventListener('click', cycleSize);
-  applySize();
+  // Another tab changed a pref: follow it without animating or re-storing.
+  window.addEventListener('storage', (e) => {
+    for (const p of Object.values(PREFS)) {
+      if (e.key === p.key) { applyPref(p, readPref(p)); renderPrefsChrome(); }
+    }
+  });
+  renderPrefsChrome();
 
   // Reader view: hide the list panel and strip content rules. Persisted.
   const $readerToggle = document.getElementById('reader-toggle');
@@ -1713,11 +1909,16 @@ INDEX_HTML = INDEX_HTML.replace(
     "/*@HTMLDIFF_ENGINE@*/",
     'const htmlDiff = (() => {\n"use strict";\n' + _ENGINE_JS + "\nreturn htmlDiff;\n})();",
 )
-_SCRIPT_BODY = re.search(r"<script>(.*)</script>", INDEX_HTML, re.DOTALL).group(1)
-_SCRIPT_HASH = base64.b64encode(hashlib.sha256(_SCRIPT_BODY.encode("utf-8")).digest()).decode()
+# Two inline scripts: the small <head> one that applies stored reading prefs
+# before first paint, and the UI script. Each gets its own hash.
+_SCRIPT_BODIES = re.findall(r"<script>(.*?)</script>", INDEX_HTML, re.DOTALL)
+_SCRIPT_HASHES = " ".join(
+    f"'sha256-{base64.b64encode(hashlib.sha256(b.encode('utf-8')).digest()).decode()}'"
+    for b in _SCRIPT_BODIES
+)
 CSP = (
     "default-src 'none'; "
-    f"script-src 'sha256-{_SCRIPT_HASH}'; "
+    f"script-src {_SCRIPT_HASHES}; "
     "style-src 'unsafe-inline' https://fonts.googleapis.com; "
     "font-src https://fonts.gstatic.com; "
     "connect-src 'self'; "
