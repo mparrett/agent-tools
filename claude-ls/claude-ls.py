@@ -371,8 +371,10 @@ def parse_args():
             "Find sessions containing literal text (not a regex; case-insensitive\n"
             "unless --case-sensitive).\n\n"
             "Each row shows two times, local with the zone name:\n"
-            "  match  when the earliest matching message was written\n"
-            "  last   the session's last activity (rows sort by this)\n\n"
+            "  first  when the query first appears in the session (the snippet\n"
+            "         shown is the best match, which may be later)\n"
+            "  last   the session's last activity (rows sort by this)\n"
+            "Compact rows write them as `first → last`.\n\n"
             "Covers: user and assistant text, thinking, tool inputs and tool results,\n"
             "summaries, and subagent transcripts, across the whole file, including\n"
             "turns from before a compaction. With --codex, Codex rollouts that are\n"
@@ -2986,42 +2988,31 @@ def _role_selected(role: str, exclude: set, include: set) -> bool:
     return not include or any(inc in role for inc in include)
 
 
-def first_match_time(
-    session_path: Path,
-    query: str,
-    case_sensitive: bool = False,
-    exclude_types: Optional[set] = None,
-    include_types: Optional[set] = None,
-) -> Optional[datetime]:
-    """When the earliest message containing `query` was written, under the same
-    literal match and type filters as the snippets. None when that message's entry
-    has no timestamp.
-
-    A session's mtime is its *last* activity, which can be a day after the
-    message a search is really asking about; dating the match by it misdated
-    an event by most of a day.
-    """
-    if not query:
-        return None
-    pattern = re.compile(re.escape(query), 0 if case_sensitive else re.IGNORECASE)
-    exclude = exclude_types or set()
-    include = include_types or set()
-    for role, text, ts in iter_session_prose_timed(session_path):
-        if _role_selected(role, exclude, include) and pattern.search(text):
-            return _parse_ts(ts) if ts else None
-    return None
+def _stamp(dt: datetime, fmt: str) -> Tuple[str, str]:
+    """(local time, zone name) for dt. The zone is taken for that date: PDT and
+    PST rows occur in one search, so a fixed label would be wrong for half."""
+    local = dt.astimezone()
+    return local.strftime(fmt), local.strftime("%Z")
 
 
-def _local_stamp(dt: datetime, with_year: bool) -> str:
-    """Local time with its zone name, taken for that date: PDT and PST both
-    occur in one search, so a fixed label would be wrong for half the rows."""
-    return dt.astimezone().strftime("%Y-%m-%d %H:%M %Z" if with_year else "%m-%d %H:%M %Z")
-
-
-def _search_times(match_at: Optional[datetime], mtime: float, with_year: bool) -> str:
-    match = _local_stamp(match_at, with_year) if match_at else "?"
-    last = _local_stamp(datetime.fromtimestamp(mtime).astimezone(), with_year)
-    return f"match {match}  last {last}"
+def _search_times(first_at: Optional[datetime], mtime: float, expanded: bool) -> str:
+    """The row's two times: when the query first appears, and the session's last
+    activity. Rows sort by the second, but a search usually asks about the first,
+    and showing only the last misdated an event by most of a day."""
+    last_dt = datetime.fromtimestamp(mtime).astimezone()
+    if expanded:
+        fmt = "%Y-%m-%d %H:%M"
+        first = " ".join(_stamp(first_at, fmt)) if first_at else "?"
+        return f"first {first} · last {' '.join(_stamp(last_dt, fmt))}"
+    # Compact rows are width-bound: arrow instead of labels (a legend line names
+    # them), and the zone once unless the two times differ.
+    last, last_zone = _stamp(last_dt, "%m-%d %H:%M")
+    if first_at is None:
+        return f"? → {last} {last_zone}"
+    first, first_zone = _stamp(first_at, "%m-%d %H:%M")
+    if first_zone == last_zone:
+        return f"{first} → {last} {last_zone}"
+    return f"{first} {first_zone} → {last} {last_zone}"
 
 
 def get_session_matches(
@@ -3033,7 +3024,28 @@ def get_session_matches(
     include_types: Optional[set] = None,
     width: int = 50,
 ) -> List[Tuple[str, str]]:
-    """Return up to max_matches (role_tag, snippet) tuples for query in session prose.
+    """Return up to max_matches (role_tag, snippet) tuples for query in session prose."""
+    return get_session_matches_timed(
+        session_path, query, max_matches, case_sensitive, exclude_types, include_types, width
+    )[0]
+
+
+def get_session_matches_timed(
+    session_path: Path,
+    query: str,
+    max_matches: int = 3,
+    case_sensitive: bool = False,
+    exclude_types: Optional[set] = None,
+    include_types: Optional[set] = None,
+    width: int = 50,
+) -> Tuple[List[Tuple[str, str]], Optional[datetime]]:
+    """get_session_matches, plus when the query first appears in the session.
+
+    The time is the earliest matching fragment's entry timestamp in file order,
+    under the same filters; None when that entry has none. It is the first
+    occurrence, not the time of the snippet chosen: the ranking below picks the
+    best snippet, while a provenance question wants the earliest hit. Taken in
+    the same pass, since the scan always meets the earliest hit first.
 
     Skips matches in non-prose JSON fields (signature, encrypted_index). Ranks
     matches by word-boundary score so substring-of-base64 hits sink below real
@@ -3042,10 +3054,12 @@ def get_session_matches(
     chars of context shown on each side of a match.
     """
     if not query:
-        return []
+        return [], None
     haystack_flags = 0 if case_sensitive else re.IGNORECASE
     pattern = re.compile(re.escape(query), haystack_flags)
 
+    first_at: Optional[datetime] = None
+    seen_first = False
     exclude = exclude_types or set()
     include = include_types or set()
     candidates: List[Tuple[int, str, str]] = []  # (score, role, snippet)
@@ -3061,11 +3075,14 @@ def get_session_matches(
     def _enough() -> bool:
         return prose_n >= max_matches or len(candidates) >= hard_cap
 
-    for role, text in iter_session_prose(session_path):
+    for role, text, ts in iter_session_prose_timed(session_path):
         if not _role_selected(role, exclude, include):
             continue
         is_prose = role not in _TOOLISH_ROLES
         for m in pattern.finditer(text):
+            if not seen_first:
+                seen_first = True
+                first_at = _parse_ts(ts) if ts else None
             score = _boundary_score(text, m.start(), m.end())
             ctx_start = max(0, m.start() - width)
             ctx_end = min(len(text), m.end() + width)
@@ -3093,7 +3110,7 @@ def get_session_matches(
     # boundary score — so the single snippet shown by default is a real sentence,
     # not a filename or log line that happens to contain the query.
     candidates.sort(key=lambda c: (c[1] in _TOOLISH_ROLES, -c[0]))
-    return [(role, snippet) for _, role, snippet in candidates[:max_matches]]
+    return [(role, snippet) for _, role, snippet in candidates[:max_matches]], first_at
 
 
 def resolve_session_file(args, base_dir: str) -> Optional[Path]:
@@ -3419,13 +3436,15 @@ def search_content_mode(args, console: Optional[Console]):
     # computed for brief, to confirm a real prose hit and skip noise-only
     # sessions). A narrower window keeps the default snippet on one line.
     per_session = max_matches if force_context else 1
-    snippet_width = width if force_context else min(width, 30)
+    # 20 a side, down from 30, pays for the row's second time and keeps it as
+    # wide as before.
+    snippet_width = width if force_context else min(width, 20)
 
     enriched: List[Tuple[Path, Path, float, List[Tuple[str, str]], Optional[datetime]]] = []
     for proj, sess, mtime in matches:
         if len(enriched) >= count:  # checked first, so -n 0 / negative shows none
             break
-        snippets = get_session_matches(
+        snippets, first_at = get_session_matches_timed(
             sess,
             query,
             max_matches=per_session,
@@ -3436,14 +3455,7 @@ def search_content_mode(args, console: Optional[Console]):
         )
         if not snippets:
             continue  # query only hit base64/excluded fields — not real prose
-        match_at = first_match_time(
-            sess,
-            query,
-            case_sensitive=case_sensitive,
-            exclude_types=exclude_types,
-            include_types=include_types,
-        )
-        enriched.append((proj, sess, mtime, snippets, match_at))
+        enriched.append((proj, sess, mtime, snippets, first_at))
 
     # -r picks a result and hands off to the resume machinery instead of listing.
     # An offset addresses the rows we'd show (enriched, in display order); a
@@ -3514,7 +3526,7 @@ def search_content_mode(args, console: Optional[Console]):
 
     # Number rows so `-r N` is discoverable: the leading index is the offset.
     idx_w = len(str(len(enriched)))
-    for row_i, (proj, sess, mtime, snippets, match_at) in enumerate(enriched, start=1):
+    for row_i, (proj, sess, mtime, snippets, first_at) in enumerate(enriched, start=1):
         idx_str = f"{row_i:>{idx_w}}"
         proj_name = format_project_identifier(proj.name)
         owner = subagent_owner(sess)
@@ -3522,7 +3534,7 @@ def search_content_mode(args, console: Optional[Console]):
         if force_context:
             # Expanded: full id, working dir, where edits/PRs landed, all snippets.
             working_dir = project_folder_to_cwd(proj.name)
-            time_str = _search_times(match_at, mtime, with_year=True)
+            time_str = _search_times(first_at, mtime, expanded=True)
             path_display = str(sess).replace(str(Path.home()), "~", 1)
             work_line = ""
             if show_work:
@@ -3568,7 +3580,7 @@ def search_content_mode(args, console: Optional[Console]):
             # stem[:8] is the literal "rollout-" for every rollout, so route both
             # stores through the shared helper.
             short_id = sess.stem[len("agent-") :][:8] if owner else short_id_for_path(sess)
-            time_str = _search_times(match_at, mtime, with_year=False)
+            time_str = _search_times(first_at, mtime, expanded=False)
             snippet = snippets[0][1]
             if no_color:
                 line = f"{idx_str}  {short_id}  {time_str}  {proj_name}{sub_note}"
@@ -3615,10 +3627,15 @@ def search_content_mode(args, console: Optional[Console]):
         hints.append("-r <#> to resume")
     if hints:
         footer += " — " + " · ".join(hints)
-    if no_color:
-        print(footer)
-    else:
-        console.print(footer, style="dim")
+    # Below the rows, not above: a script reading the first line expects a row.
+    lines = [footer]
+    if shown and not force_context:
+        lines.append("times: first match → last activity, local")
+    for line in lines:
+        if no_color:
+            print(line)
+        else:
+            console.print(line, style="dim")
 
 
 def list_messages(args, console: Optional[Console]):

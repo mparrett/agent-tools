@@ -217,7 +217,11 @@ def _timed_session(path: Path, entries) -> Path:
     return path
 
 
-def test_first_match_time_is_the_earliest_matching_message(tmp_path):
+def _first_at(sess, query, **kw):
+    return cl.get_session_matches_timed(sess, query, **kw)[1]
+
+
+def test_first_time_is_the_earliest_matching_message(tmp_path):
     sess = _timed_session(
         tmp_path / "s.jsonl",
         [
@@ -226,23 +230,47 @@ def test_first_match_time_is_the_earliest_matching_message(tmp_path):
             ("user", "2026-11-15T22:27:00Z", "widget again, much later"),
         ],
     )
-    assert cl.first_match_time(sess, "widget") == datetime(2026, 11, 15, 3, 10, tzinfo=timezone.utc)
+    assert _first_at(sess, "widget") == datetime(2026, 11, 15, 3, 10, tzinfo=timezone.utc)
     # Type filters apply as they do to snippets: only the user's later mention counts.
-    assert cl.first_match_time(sess, "widget", include_types={"user"}) == datetime(
+    assert _first_at(sess, "widget", include_types={"user"}) == datetime(
         2026, 11, 15, 22, 27, tzinfo=timezone.utc
     )
-    assert cl.first_match_time(sess, "absent") is None
+    assert _first_at(sess, "absent") is None
 
 
-def test_first_match_time_reads_a_rollout(tmp_path):
-    rollout = _rollout_in_store(tmp_path / "codex", "/w/widget", "the zephyr parser")
-    assert cl.first_match_time(rollout, "zephyr") == datetime(
-        2026, 8, 1, 9, 0, 1, tzinfo=timezone.utc
+def test_first_time_is_the_earliest_hit_even_when_a_later_snippet_wins(tmp_path):
+    # The snippet ranks prose over tool output; the time stays the first occurrence.
+    path = tmp_path / "s.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "timestamp": "2026-11-15T03:00:00Z",
+                "message": {"content": [{"type": "tool_result", "content": "ran widget.py"}]},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-11-15T09:00:00Z",
+                "message": {"content": [{"type": "text", "text": "The widget works."}]},
+            }
+        )
+        + "\n"
     )
+    snippets, first_at = cl.get_session_matches_timed(path, "widget", max_matches=1)
+    assert snippets[0][0] == "asst"
+    assert first_at == datetime(2026, 11, 15, 3, 0, tzinfo=timezone.utc)
+
+
+def test_first_time_reads_a_rollout(tmp_path):
+    rollout = _rollout_in_store(tmp_path / "codex", "/w/widget", "the zephyr parser")
+    assert _first_at(rollout, "zephyr") == datetime(2026, 8, 1, 9, 0, 1, tzinfo=timezone.utc)
 
 
 @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
-def test_search_row_labels_match_and_last_times_with_zone(tmp_path, monkeypatch, capsys):
+def test_search_row_shows_first_and_last_times_with_zone(tmp_path, monkeypatch, capsys):
     # The match was sent in the evening of 11-14 Pacific; the session ran on
     # into 11-15. The row must date the match, not just the session's end.
     monkeypatch.setenv("TZ", "America/Los_Angeles")
@@ -262,7 +290,11 @@ def test_search_row_labels_match_and_last_times_with_zone(tmp_path, monkeypatch,
         os.utime(sess, (end, end))
         cl.search_content_mode(_search_args(base), None)
         out = capsys.readouterr().out
-        assert "match 11-14 19:10 PST  last 11-15 14:27 PST" in out
+        assert "times: first match → last activity, local" in out
+        assert "11-14 19:10 → 11-15 14:27 PST" in out
+        cl.search_content_mode(_search_args(base, show_context=True), None)
+        out = capsys.readouterr().out
+        assert "first 2026-11-14 19:10 PST · last 2026-11-15 14:27 PST" in out
     finally:
         monkeypatch.delenv("TZ")
         time.tzset()
