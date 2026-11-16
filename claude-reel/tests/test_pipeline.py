@@ -460,12 +460,16 @@ def _lineage():
             s("pare0000", "2026-07-03"),
             s("sibl0000", "2026-07-04"),
             s("next0000", "2026-07-06"),
+            s("othr0000", "2026-07-05"),  # a second parent of next0000
+            s("nephew00", "2026-07-07"),  # the sibling's own sequel
         ],
         "edges": [
             {"src": "gran0000", "dst": "pare0000", "kind": "handoff"},
             {"src": "pare0000", "dst": "seed0000", "kind": "clear"},
             {"src": "pare0000", "dst": "sibl0000", "kind": "mention"},
             {"src": "seed0000", "dst": "next0000", "kind": "clear+mention"},
+            {"src": "othr0000", "dst": "next0000", "kind": "mention"},
+            {"src": "sibl0000", "dst": "nephew00", "kind": "handoff"},
         ],
     }
 
@@ -479,7 +483,14 @@ def test_family_sorts_sessions_relative_to_this_one():
         ("pare0000", 1, "clear"),
     ]
     assert [(r["sid"], r["kind"]) for r in fam["sequels"]] == [("next0000", "clear+mention")]
-    assert [(r["sid"], r["via"]) for r in fam["related"]] == [("sibl0000", "pare0000")]
+    assert [(r["sid"], r["hops"], r["direction"], r["via"]) for r in fam["related"]] == [
+        ("sibl0000", 2, "from", "pare0000"),
+        ("othr0000", 2, "to", "next0000"),
+        ("nephew00", 3, "from", "sibl0000"),
+    ]
+    # the file lineage was given is the seed, even if the transcript's own id differs
+    resumed = {**_lineage(), "seed": "pare0000"}
+    assert "seed0000" in [r["sid"] for r in family(resumed, "seed0000")["sequels"]]
     assert fam["compactions"][0]["tokens_after"] == 15440
     assert family(None, "seed0000")["previously"] == []
 
@@ -512,11 +523,15 @@ def test_credits_card_closes_the_deck_and_the_agenda_points_to_it(tmp_path):
     html = render(deck)
     last = len(deck["slides"]) + 1
     assert f'id="s{last}"' in html and "The cast &amp; the family" in html
-    assert f'2 subagents · 4 related sessions <a href="#s{last}">→ credits</a>' in html
+    assert f'2 subagents · 6 related sessions <a href="#s{last}">→ credits</a>' in html
     assert "after /clear · 2 links back" in html  # grandparent, two links up
     assert "mentioned from pare0000" in html
     assert 'data-copy="claude-reel next0000 --open"' in html
     assert "auto 07-05 12:00 202k → 15k" in html
+    assert "mentioned to next0000" in html
+    assert 'class="beats"' in html
+    deck["density"] = "tldr"  # no beat slides rendered, so no links into them
+    assert 'class="beats"' not in render(deck)
 
 
 def test_no_credits_without_anything_to_credit(tmp_path):

@@ -67,7 +67,11 @@ def family(lineage: dict | None, seed_sid: str) -> dict:
     if not lineage:
         return empty
     sessions = {s["sid"]: s for s in lineage.get("sessions") or [] if s.get("sid")}
-    seed = next((sid for sid in sessions if sid.startswith(seed_sid)), lineage.get("seed"))
+    # lineage names its own seed (the file it was given); a transcript's sessionId can
+    # be another node of the family, e.g. in a resumed file, so it's only the fallback.
+    seed = lineage.get("seed")
+    if seed not in sessions:
+        seed = next((sid for sid in sessions if sid.startswith(seed_sid)), None)
     if seed not in sessions:
         return empty
     fwd, back = {}, {}
@@ -96,18 +100,35 @@ def family(lineage: dict | None, seed_sid: str) -> dict:
     return {
         "previously": ordered(row(s, *up[s]) for s in up),
         "sequels": ordered(row(s, *down[s]) for s in down),
-        "related": ordered(_related(s, back, row) for s in rest),
+        "related": ordered(_related(seed, rest, fwd, back, row)),
         "compactions": sessions[seed].get("compactions") or [],
     }
 
 
-def _related(sid, back, row):
-    """A family member that is neither ancestor nor descendant (a predecessor's other
-    sequel): labelled by the link that brought it in."""
-    src, kind = next(iter(back.get(sid) or []), (None, "family"))
-    r = row(sid, 1, kind)
-    r["via"] = src
-    return r
+def _related(seed, rest, fwd, back, row):
+    """Family members that are neither ancestors nor descendants (a predecessor's other
+    sequel, a sequel's other parent). An undirected walk from this session gives each
+    its real distance and the link that reaches it: `via` is the neighbour on that path,
+    and `direction` says whether the link runs from it ("from") or to it ("to")."""
+    rest = set(rest)
+    adj = {}
+    for a, outs in fwd.items():
+        for b, k in outs:
+            adj.setdefault(a, []).append((b, k, "from"))  # b was reached from a
+            adj.setdefault(b, []).append((a, k, "to"))  # a links to b
+    out, seen, q = [], {seed}, deque([(seed, 0)])
+    while q:
+        node, hops = q.popleft()
+        for nxt, kind, direction in adj.get(node, ()):
+            if nxt in seen:
+                continue
+            seen.add(nxt)
+            q.append((nxt, hops + 1))
+            if nxt in rest:
+                r = row(nxt, hops + 1, kind)
+                r["via"], r["direction"] = node, direction
+                out.append(r)
+    return out
 
 
 def cast(pool_meta: list, agent_slides: dict) -> list:

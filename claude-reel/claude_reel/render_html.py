@@ -441,7 +441,7 @@ def _kind_words(kind: str) -> str:
 def _session_credit(r: dict, direction: str) -> str:
     how = _kind_words(r["kind"])
     if r.get("via"):
-        how += f" from {r['via'][:8]}"
+        how += f" {r.get('direction') or 'from'} {r['via'][:8]}"
     if r["hops"] > 1:
         how += f" · {r['hops']} links {direction}"
     span = _fmt_ts(r["start"]) + (f" → {_fmt_ts(r['end'])}" if r.get("end") else "")
@@ -459,9 +459,9 @@ def _session_credit(r: dict, direction: str) -> str:
     )
 
 
-def _cast_credit(g: dict) -> str:
+def _cast_credit(g: dict, link_beats: bool = True) -> str:
     beats = ""
-    if g["slides"]:
+    if g["slides"] and link_beats:
         links = "".join(f'<a href="#s{n}">{n}</a>' for n in g["slides"][:24])
         more = f" +{len(g['slides']) - 24}" if len(g["slides"]) > 24 else ""
         beats = f'<div class="beats">beats {links}{_esc(more)}</div>'
@@ -493,6 +493,8 @@ def credits_count(credits: dict | None) -> tuple[int, int]:
 
 
 def _credits_html(deck, slide_no: int) -> str:
+    # A tldr deck renders no beat slides, so links to them would all land here.
+    link_beats = deck.get("density") != "tldr"
     c = deck.get("credits") or {}
     fam = c.get("family") or {}
     parts = [
@@ -505,7 +507,7 @@ def _credits_html(deck, slide_no: int) -> str:
         parts += [_session_credit(r, "back") for r in reversed(fam["previously"])]
     if c.get("cast"):
         parts.append("<h2>Featuring</h2>")
-        parts += [_cast_credit(g) for g in c["cast"]]
+        parts += [_cast_credit(g, link_beats) for g in c["cast"]]
     if fam.get("compactions"):
         n = len(fam["compactions"])
         parts.append(f"<h2>Compacted {n}×</h2>")
