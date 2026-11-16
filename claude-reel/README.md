@@ -19,6 +19,7 @@ claude-reel <id> --density tldr                    # agenda only (jazz | firehos
 claude-reel <id> --reel                            # dump the reel (pivot JSONL) instead
 claude-reel <id> --subagents brief                 # agent chips expand to the agent's run
 claude-reel <id> --context none                    # hide injected context
+claude-reel <id> --no-credits                      # skip the closing credits card
 ```
 
 With the project installed, `uv run claude-reel …` works via the `[project.scripts]`
@@ -35,6 +36,16 @@ budget, environment updates, reminders, task notifications) shows as muted `ctx`
 where it happened. A repeat of identical text is one line pointing back to the slide that
 carries it ("unchanged since beat 12"); the budget is one chip per slide. Parts of a
 request that merely copy a message already in the transcript are skipped.
+
+**Credits.** The last slide is a closing card. *Featuring* lists the subagents, grouped
+by type and by what they were asked (a slash command by its name), each linking to the
+slides it appears on. *Previously*, *Sequels* and *Also in the family* list the sessions
+linked to this one by /clear, handoffs, and mentions, each with a copyable command for its
+own deck; the session's compactions sit between them. The agenda's cast line
+("42 subagents · 3 related sessions → credits") links there. Sessions and compactions
+come from `claude-ls lineage --json`, which scans the whole store and adds seconds to a
+build; without claude-ls on PATH the card shows the subagents alone. `--no-credits` skips
+the card.
 
 **Subagents.** By default an agent chip names the agent. `--subagents brief` places every
 subagent at its launch (including forked skills, which have no tool call) and its chip
@@ -60,6 +71,8 @@ transcript.jsonl ──[extract]──▶ reel (beats) ──[curate]──▶ d
 - `markdown.py` — a small, escape-first Markdown → HTML renderer (untrusted transcript
   text can't inject markup).
 - `render_html.py` — slides → a single self-contained HTML deck (no CDN, inline CSS/JS).
+- `credits.py` — the closing card: subagents from the session's own pool, family and
+  compactions from `claude-ls lineage --json` (a subprocess, so no import of claude-ls).
 - `cli.py` — entry point.
 
 The `reel` is deliberately a stable, dumpable format (`--reel`): a later Sonnet-skill

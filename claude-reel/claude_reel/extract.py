@@ -351,7 +351,11 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
 
     def sub_fields(aid):
         meta = pool[aid]["meta"]
-        out = {"agentType": meta.get("agentType"), "description": meta.get("description")}
+        out = {
+            "agent_id": aid,
+            "agentType": meta.get("agentType"),
+            "description": meta.get("description"),
+        }
         if brief and pool[aid]["path"]:
             placed.add(aid)
             out["subagent"] = _subagent_brief(pool[aid]["path"])
@@ -491,6 +495,15 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
         "input_tokens": usage_in,
         "output_tokens": usage_out,
         "first_prompt": first_prompt,
+        # Every subagent on disk, for the credits; placement is the beats' business.
+        "subagents": [
+            {
+                "id": aid,
+                "type": p["meta"].get("agentType"),
+                "description": p["meta"].get("description"),
+            }
+            for aid, p in pool.items()
+        ],
     }
     return {"meta": meta, "beats": beats}
 

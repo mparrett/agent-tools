@@ -53,6 +53,8 @@ def _tool_element(call, result):
         el["is_error"] = result.get("is_error", False)
     if call.get("subagent"):
         el["subagent"] = call["subagent"]
+    if call.get("agent_id"):
+        el["agent_id"] = call["agent_id"]
     return el
 
 
@@ -68,6 +70,7 @@ def _subagent_element(b):
         "result": None,
         "is_error": False,
         "subagent": b.get("subagent"),
+        "agent_id": b.get("agent_id"),
     }
 
 
@@ -222,7 +225,17 @@ def curate(reel: dict, density: str = "jazz") -> dict:
     agenda = [
         {"n": s["index"], "title": s["title"], "badge": _lead_badge(s["badges"])} for s in slides
     ]
-    return {"meta": reel["meta"], "slides": slides, "agenda": agenda, "density": density}
+    # agent id -> the deck slide its chip sits on (agenda is slide 0), for the credits
+    agent_slides = {
+        e["agent_id"]: s["index"] + 1 for s in slides for e in s["elements"] if e.get("agent_id")
+    }
+    return {
+        "meta": reel["meta"],
+        "slides": slides,
+        "agenda": agenda,
+        "density": density,
+        "agent_slides": agent_slides,
+    }
 
 
 def _lead_badge(badges):
