@@ -2883,13 +2883,34 @@ def search_session_content(
 # the query as a base64 substring.
 
 
-def iter_content_fragments(content: Any) -> Iterator[Tuple[str, str]]:
+def _strings_in(value: Any) -> Iterator[str]:
+    """Every string inside a JSON value, depth first."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings_in(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings_in(v)
+
+
+def iter_content_fragments(
+    content: Any, full_tool_input: bool = False
+) -> Iterator[Tuple[str, str]]:
     """Yield (kind, text) fragments from a message.content payload.
 
     kind ∈ {"text", "think", "tool_in", "tool"}. This is the single owner of the
     Claude block-type vocabulary — every text-extraction path routes through here,
     so teaching the tool a second transcript format (e.g. Codex's input_text/
     output_text blocks) is a change in one place, not four.
+
+    A tool call's input yields only its short descriptive fields by default.
+    ``full_tool_input`` yields every string in it (a Write's file content, an
+    Edit's old and new text), which search needs: text often first appears in a
+    file a session wrote. It stays opt-in because the work-signal pass reads PR
+    links from these fragments, and a link inside a written file is not a PR
+    the session worked on.
     """
     if isinstance(content, str):
         yield ("text", content)
@@ -2906,7 +2927,11 @@ def iter_content_fragments(content: Any) -> Iterator[Tuple[str, str]]:
             yield ("think", block["thinking"])
         elif btype == "tool_use":
             tin = block.get("input")
-            if isinstance(tin, dict):
+            if isinstance(tin, dict) and full_tool_input:
+                for val in _strings_in(tin):
+                    if val:
+                        yield ("tool_in", val)
+            elif isinstance(tin, dict):
                 for key in ("command", "description", "query", "pattern", "prompt"):
                     val = tin.get(key)
                     if isinstance(val, str):
@@ -2958,7 +2983,7 @@ def iter_session_prose_timed(file_path: Path) -> Iterator[Tuple[str, str, Option
             if not isinstance(msg, dict):
                 continue
             top_role = "asst" if etype == "assistant" else "user"
-            for kind, text in iter_content_fragments(msg.get("content")):
+            for kind, text in iter_content_fragments(msg.get("content"), full_tool_input=True):
                 yield (top_role if kind == "text" else kind, text, ts)
 
 
