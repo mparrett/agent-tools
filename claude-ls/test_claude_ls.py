@@ -14,7 +14,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -169,15 +171,133 @@ def test_search_errors_clearly_when_rg_missing(tmp_path, monkeypatch):
         cl.search_session_content(str(base), "zshrc")
 
 
-@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
-def test_search_exits_nonzero_on_rg_error(tmp_path):
-    # A failed search (invalid regex -> rg exit 2, no output) must not masquerade
-    # as an empty result; it exits nonzero so callers can tell them apart.
+def test_search_exits_nonzero_on_rg_error(tmp_path, monkeypatch):
+    # A failed search (rg exit 2, no output) must not masquerade as an empty
+    # result; it exits nonzero so callers can tell them apart. The query is
+    # literal now, so a bad pattern no longer produces the failure; fake it.
     base = tmp_path / "projects"
     _make_corpus(base)
+    monkeypatch.setattr(cl.shutil, "which", lambda _name: "/usr/bin/rg")
+    monkeypatch.setattr(
+        cl.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, stdout="", stderr="rg: boom"),
+    )
     with pytest.raises(SystemExit) as exc:
-        cl.search_session_content(str(base), "[")  # unclosed character class
+        cl.search_session_content(str(base), "zshrc")
     assert exc.value.code != 0
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_search_query_is_literal_text(tmp_path):
+    # Regex metacharacters are text: `[` used to kill rg as an unclosed class,
+    # and `.` must not stand in for any character.
+    base = tmp_path / "projects"
+    _make_corpus(base, "motif lead [5 0 0 4 3] then abc")
+    assert [s.name for _, s, _ in cl.search_session_content(str(base), "lead [5 0 0")] == [
+        "sess.jsonl"
+    ]
+    assert cl.search_session_content(str(base), "a.c") == []
+
+
+def _timed_session(path: Path, entries) -> Path:
+    path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "type": role,
+                    "timestamp": ts,
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+            + "\n"
+            for role, ts, text in entries
+        )
+    )
+    return path
+
+
+def _first_at(sess, query, **kw):
+    return cl.get_session_matches_timed(sess, query, **kw)[1]
+
+
+def test_first_time_is_the_earliest_matching_message(tmp_path):
+    sess = _timed_session(
+        tmp_path / "s.jsonl",
+        [
+            ("user", "2026-11-15T03:00:00Z", "nothing here"),
+            ("assistant", "2026-11-15T03:10:00Z", "the widget appears"),
+            ("user", "2026-11-15T22:27:00Z", "widget again, much later"),
+        ],
+    )
+    assert _first_at(sess, "widget") == datetime(2026, 11, 15, 3, 10, tzinfo=timezone.utc)
+    # Type filters apply as they do to snippets: only the user's later mention counts.
+    assert _first_at(sess, "widget", include_types={"user"}) == datetime(
+        2026, 11, 15, 22, 27, tzinfo=timezone.utc
+    )
+    assert _first_at(sess, "absent") is None
+
+
+def test_first_time_is_the_earliest_hit_even_when_a_later_snippet_wins(tmp_path):
+    # The snippet ranks prose over tool output; the time stays the first occurrence.
+    path = tmp_path / "s.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "timestamp": "2026-11-15T03:00:00Z",
+                "message": {"content": [{"type": "tool_result", "content": "ran widget.py"}]},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-11-15T09:00:00Z",
+                "message": {"content": [{"type": "text", "text": "The widget works."}]},
+            }
+        )
+        + "\n"
+    )
+    snippets, first_at = cl.get_session_matches_timed(path, "widget", max_matches=1)
+    assert snippets[0][0] == "asst"
+    assert first_at == datetime(2026, 11, 15, 3, 0, tzinfo=timezone.utc)
+
+
+def test_first_time_reads_a_rollout(tmp_path):
+    rollout = _rollout_in_store(tmp_path / "codex", "/w/widget", "the zephyr parser")
+    assert _first_at(rollout, "zephyr") == datetime(2026, 8, 1, 9, 0, 1, tzinfo=timezone.utc)
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_search_row_shows_first_and_last_times_with_zone(tmp_path, monkeypatch, capsys):
+    # The match was sent in the evening of 11-14 Pacific; the session ran on
+    # into 11-15. The row must date the match, not just the session's end.
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    try:
+        base = tmp_path / "projects"
+        proj = base / "-proj"
+        proj.mkdir(parents=True)
+        sess = _timed_session(
+            proj / "aaaa1111.jsonl",
+            [
+                ("assistant", "2026-11-15T03:10:00Z", "widget here"),
+                ("user", "2026-11-15T22:27:00Z", "bye"),
+            ],
+        )
+        end = datetime(2026, 11, 15, 22, 27, tzinfo=timezone.utc).timestamp()
+        os.utime(sess, (end, end))
+        cl.search_content_mode(_search_args(base), None)
+        out = capsys.readouterr().out
+        assert "times: first match → last activity, local" in out
+        assert "11-14 19:10 → 11-15 14:27 PST" in out
+        cl.search_content_mode(_search_args(base, show_context=True), None)
+        out = capsys.readouterr().out
+        assert "first 2026-11-14 19:10 PST · last 2026-11-15 14:27 PST" in out
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
 
 
 @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
