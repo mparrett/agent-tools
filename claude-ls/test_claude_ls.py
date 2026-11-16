@@ -304,6 +304,44 @@ def test_first_time_finds_text_that_first_appears_in_a_written_file(tmp_path):
     assert {role for role, _ in snippets} == {"user", "tool_in"}
 
 
+def test_a_written_file_does_not_crowd_out_later_prose(tmp_path):
+    body = "".join(f"widget line {i}\n" for i in range(60))
+    sess = tmp_path / "s.jsonl"
+    sess.write_text(
+        _write_call("2026-10-20T12:00:00Z", "/w/log.txt", body)
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-10-20T13:00:00Z",
+                "message": {"content": [{"type": "text", "text": "The widget works now."}]},
+            }
+        )
+        + "\n"
+    )
+    snippets, _ = cl.get_session_matches_timed(sess, "widget", max_matches=1)
+    assert snippets[0][0] == "asst"
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_search_finds_a_quoted_query_inside_written_file_content(tmp_path):
+    # On disk the quotes are escaped (\"lead\"); the query is typed plain.
+    base = tmp_path / "projects"
+    proj = base / "-proj"
+    proj.mkdir(parents=True)
+    (proj / "s.jsonl").write_text(
+        _write_call("2026-10-20T12:00:00Z", "/w/a.clj", '(def x "lead")\n') + "\n"
+    )
+    assert [s.name for _, s, _ in cl.search_session_content(str(base), '"lead"')] == ["s.jsonl"]
+
+
+def test_opaque_tool_input_is_not_a_match(tmp_path):
+    blob = "QUJD" * 40 + "widget" + "QUJD" * 40  # base64-like, no whitespace
+    sess = tmp_path / "s.jsonl"
+    sess.write_text(_write_call("2026-10-20T12:00:00Z", "/w/blob.bin", blob) + "\n")
+    assert cl.get_session_matches_timed(sess, "widget") == ([], None)
+
+
 def test_content_fragments_keep_tool_input_narrow_by_default():
     # The work-signal pass reads PR links from these fragments; a link inside a
     # written file must not count as a PR the session worked on.

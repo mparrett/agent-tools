@@ -2815,7 +2815,13 @@ def search_session_content(
     # treat it. Without it rg read it as a regex, so `[5 0 0` died as an
     # unclosed character class and `a.c` pre-matched sessions the literal pass
     # then found nothing in.
-    cmd = ["rg", "-l", "-F", *ignore_flags, *case_flag, "--", query] + targets
+    # rg reads raw JSONL, where quotes, backslashes and line breaks in the text
+    # are escaped; the decoded passes after it see them plain. Match either
+    # form, or a query with a quote never reaches those passes.
+    # ensure_ascii=False: the transcripts store non-ASCII text raw.
+    forms = dict.fromkeys([query, json.dumps(query, ensure_ascii=False)[1:-1]])
+    patterns = [arg for form in forms for arg in ("-e", form)]
+    cmd = ["rg", "-l", "-F", *ignore_flags, *case_flag, *patterns, "--"] + targets
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
@@ -2895,6 +2901,13 @@ def _strings_in(value: Any) -> Iterator[str]:
             yield from _strings_in(v)
 
 
+def _is_opaque(value: str) -> bool:
+    """A long run with no whitespace: base64, a token, an encoded payload. Search
+    skips these in tool inputs, where a query can match by accident inside one
+    and put a noise session in a result slot with a false first-seen time."""
+    return len(value) > 200 and not any(c.isspace() for c in value)
+
+
 def iter_content_fragments(
     content: Any, full_tool_input: bool = False
 ) -> Iterator[Tuple[str, str]]:
@@ -2929,7 +2942,7 @@ def iter_content_fragments(
             tin = block.get("input")
             if isinstance(tin, dict) and full_tool_input:
                 for val in _strings_in(tin):
-                    if val:
+                    if val and not _is_opaque(val):
                         yield ("tool_in", val)
             elif isinstance(tin, dict):
                 for key in ("command", "description", "query", "pattern", "prompt"):
@@ -3127,6 +3140,11 @@ def get_session_matches_timed(
             if is_prose:
                 prose_n += 1
             if _enough():
+                break
+            # One candidate per tool fragment: a written file can hold the query
+            # on dozens of lines, and they would fill the hard cap before the
+            # scan reached the prose the ranking prefers.
+            if not is_prose:
                 break
         if _enough():
             break
