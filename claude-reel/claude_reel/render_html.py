@@ -148,6 +148,23 @@ h1.title {
 .find.on { display: flex; }
 .find input { width: min(260px, 50vw); background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: inherit; }
 .find input:focus { outline: 1px solid var(--amber); }
+/* Credits: the closing card, set like the end of a film. */
+.credits .inner { text-align: center; }
+.credits h2 { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.22em; text-transform: uppercase; color: var(--amber); font-weight: 500; margin: 34px 0 12px; }
+.credit { margin: 0 auto 14px; max-width: 600px; }
+.credit .who { font-family: var(--serif); font-size: 1.12rem; color: var(--ink); }
+.credit .who .sid { font-family: var(--mono); font-size: 0.82rem; color: var(--cyan); margin-right: 8px; }
+.credit .how { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.credit .what { color: var(--ink-soft); font-style: italic; font-size: 0.95rem; overflow-wrap: anywhere; }
+.credit .when { font-family: var(--mono); font-size: 0.74rem; color: var(--muted); }
+.credit .cmd { display: inline-flex; gap: 8px; align-items: center; margin-top: 4px; }
+.credit .cmd code { font-family: var(--mono); font-size: 0.72rem; color: var(--cyan); }
+.credit .beats { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.08em; color: var(--muted); }
+.credit .beats a { font-family: var(--mono); font-size: 0.74rem; color: var(--cyan); text-decoration: none; margin: 0 3px; }
+.credits .fin { font-family: var(--serif); font-style: italic; color: var(--muted); margin-top: 40px; }
+.castline { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); margin: -14px 0 22px; }
+.castline a { color: var(--cyan); text-decoration: none; }
+.castline a:hover { text-decoration: underline; }
 .hit > summary, .hit.say, .hit .row { box-shadow: inset 2px 0 0 var(--amber); background: var(--surface2); }
 """
 
@@ -165,7 +182,9 @@ JS = """
   var idx = 0;
   function pad(n){ return n < 10 ? '0' + n : '' + n; }
   function clamp(i){ return Math.max(0, Math.min(last, i)); }
-  function go(i){ idx = clamp(i); reel.scrollTo({ left: idx * reel.clientWidth, behavior: reduce ? 'auto' : 'smooth' }); paint(); }
+  // Glide to a neighbour; jump anywhere further (a link to the credits, a find hit),
+  // since gliding past a hundred slides takes seconds and shows nothing useful.
+  function go(i){ i = clamp(i); var far = Math.abs(i - idx) > 3; idx = i; reel.style.scrollBehavior = far ? 'auto' : ''; reel.scrollTo({ left: idx * reel.clientWidth, behavior: (reduce || far) ? 'auto' : 'smooth' }); paint(); }
   function fromHash(){ var m = /^#s(\\d+)$/.exec(location.hash); return m ? clamp(parseInt(m[1], 10)) : null; }
   // The hash is written once a move settles, not on every frame of a smooth scroll:
   // mid-scroll writes would leave the URL pointing at a slide passed on the way.
@@ -412,7 +431,114 @@ def _slide_html(slide, total_beats, open_chips: bool) -> str:
     return "".join(parts)
 
 
-def _agenda_html(deck) -> str:
+_KIND_WORDS = {"clear": "after /clear", "handoff": "handoff", "mention": "mentioned"}
+
+
+def _kind_words(kind: str) -> str:
+    return " + ".join(_KIND_WORDS.get(k, k) for k in (kind or "").split("+"))
+
+
+def _session_credit(r: dict, direction: str) -> str:
+    how = _kind_words(r["kind"])
+    if r.get("via"):
+        how += f" from {r['via'][:8]}"
+    if r["hops"] > 1:
+        how += f" · {r['hops']} links {direction}"
+    span = _fmt_ts(r["start"]) + (f" → {_fmt_ts(r['end'])}" if r.get("end") else "")
+    where = r["where"] + (f" @ {r['branch']}" if r.get("branch") else "")
+    cmd = f"claude-reel {r['sid'][:8]} --open"
+    return (
+        '<div class="credit">'
+        f'<div class="how">{_esc(how)}</div>'
+        f'<div class="who"><span class="sid">{_esc(r["sid"][:8])}</span>{_esc(where)}</div>'
+        + (f'<div class="what">“{_esc(r["topic"])}”</div>' if r["topic"] else "")
+        + f'<div class="when">{_esc(span)}</div>'
+        f'<div class="cmd"><code>{_esc(cmd)}</code>'
+        f'<button class="copy" data-copy="{_esc(cmd)}">copy</button></div>'
+        "</div>"
+    )
+
+
+def _cast_credit(g: dict) -> str:
+    beats = ""
+    if g["slides"]:
+        links = "".join(f'<a href="#s{n}">{n}</a>' for n in g["slides"][:24])
+        more = f" +{len(g['slides']) - 24}" if len(g["slides"]) > 24 else ""
+        beats = f'<div class="beats">beats {links}{_esc(more)}</div>'
+    role = g["role"] or "(no description)"
+    return (
+        '<div class="credit">'
+        f'<div class="how">{_esc(g["type"])}{" ×" + str(g["count"]) if g["count"] > 1 else ""}</div>'
+        f'<div class="who">{_esc(role)}</div>{beats}</div>'
+    )
+
+
+def _compactions_line(comps: list) -> str:
+    def one(c):
+        t = _fmt_ts(c.get("timestamp"))
+        b, a = c.get("tokens_before"), c.get("tokens_after")
+        size = f" {round(b / 1000)}k → {round(a / 1000)}k" if b and a else ""
+        return f"{c.get('trigger') or 'compact'} {t}{size}"
+
+    return "<br>".join(_esc(one(c)) for c in comps)
+
+
+def credits_count(credits: dict | None) -> tuple[int, int]:
+    """(subagents, related sessions) the credits card lists."""
+    if not credits:
+        return 0, 0
+    fam = credits.get("family") or {}
+    sessions = sum(len(fam.get(k) or []) for k in ("previously", "sequels", "related"))
+    return sum(g["count"] for g in credits.get("cast") or []), sessions
+
+
+def _credits_html(deck, slide_no: int) -> str:
+    c = deck.get("credits") or {}
+    fam = c.get("family") or {}
+    parts = [
+        f'<section class="slide credits" id="s{slide_no}"><div class="inner">',
+        '<div class="eyebrow" style="justify-content:center">credits</div>',
+        '<h1 class="title">The cast &amp; the family</h1>',
+    ]
+    if fam.get("previously"):
+        parts.append("<h2>Previously</h2>")
+        parts += [_session_credit(r, "back") for r in reversed(fam["previously"])]
+    if c.get("cast"):
+        parts.append("<h2>Featuring</h2>")
+        parts += [_cast_credit(g) for g in c["cast"]]
+    if fam.get("compactions"):
+        n = len(fam["compactions"])
+        parts.append(f"<h2>Compacted {n}×</h2>")
+        parts.append(
+            f'<div class="credit"><div class="when">{_compactions_line(fam["compactions"])}</div></div>'
+        )
+    if fam.get("sequels"):
+        parts.append("<h2>Sequels</h2>")
+        parts += [_session_credit(r, "on") for r in fam["sequels"]]
+    if fam.get("related"):
+        parts.append("<h2>Also in the family</h2>")
+        parts += [_session_credit(r, "") for r in fam["related"]]
+    if not c.get("lineage"):
+        parts.append(
+            '<p class="fin">Sessions before and after this one need claude-ls on PATH.</p>'
+        )
+    parts.append('<p class="fin">fin.</p></div></section>')
+    return "".join(parts)
+
+
+def _castline_html(deck, credits_slide: int | None) -> str:
+    agents, sessions = credits_count(deck.get("credits"))
+    if credits_slide is None or not (agents or sessions):
+        return ""
+    bits = []
+    if agents:
+        bits.append(f"{agents} subagent{'s' if agents != 1 else ''}")
+    if sessions:
+        bits.append(f"{sessions} related session{'s' if sessions != 1 else ''}")
+    return f'<p class="castline">{" · ".join(bits)} <a href="#s{credits_slide}">→ credits</a></p>'
+
+
+def _agenda_html(deck, credits_slide: int | None = None) -> str:
     meta = deck["meta"]
     n = len(deck["slides"])
     sub = (
@@ -438,6 +564,7 @@ def _agenda_html(deck) -> str:
         '<div class="eyebrow">while you were away</div>'
         '<div class="agenda-head"><h1 class="title">Session recap</h1>'
         f'<p class="sub">{sub}</p></div>'
+        f"{_castline_html(deck, credits_slide)}"
         f'<div class="agenda-list">{"".join(rows)}</div>'
         "</div></section>"
     )
@@ -453,9 +580,16 @@ def render(deck: dict) -> str:
             f" → {_fmt_ts(meta['last_ts'])}" if meta.get("last_ts") else ""
         )
 
-    slides_html = [_agenda_html(deck)]
-    if deck.get("density") != "tldr":
-        slides_html += [_slide_html(s, total, open_chips) for s in deck["slides"]]
+    body = (
+        [_slide_html(s, total, open_chips) for s in deck["slides"]]
+        if deck.get("density") != "tldr"
+        else []
+    )
+    agents, sessions = credits_count(deck.get("credits"))
+    credits_slide = len(body) + 1 if (agents or sessions) else None
+    slides_html = [_agenda_html(deck, credits_slide), *body]
+    if credits_slide is not None:
+        slides_html.append(_credits_html(deck, credits_slide))
 
     session_meta = (
         f"<span>{_esc(meta.get('project') or 'session')}"

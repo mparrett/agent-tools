@@ -14,7 +14,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from . import __version__, sessions
+from . import __version__, credits, sessions
 from .curate import curate
 from .extract import extract
 from .render_html import render
@@ -78,6 +78,11 @@ def main(argv=None) -> int:
         help="none: agent chips name the agent (default) · brief: place every subagent at"
         " its launch; its chip shows prompt, tools, result, and the command for its deck",
     )
+    p.add_argument(
+        "--no-credits",
+        action="store_true",
+        help="skip the closing credits card (its lineage lookup scans the whole store)",
+    )
     p.add_argument("-o", "--out", metavar="PATH", help="output file (default: ./<id>.reel.html)")
     p.add_argument("--open", action="store_true", help="open the deck in your browser")
     p.add_argument(
@@ -99,6 +104,13 @@ def main(argv=None) -> int:
         return 0
 
     deck = curate(reel, density=args.density)
+    if not args.no_credits:
+        lineage = credits.fetch_lineage(path)
+        deck["credits"] = {
+            "cast": credits.cast(reel["meta"].get("subagents") or [], deck["agent_slides"]),
+            "family": credits.family(lineage, reel["meta"]["session_id"]),
+            "lineage": lineage is not None,
+        }
     out = Path(args.out) if args.out else Path.cwd() / f"{reel['meta']['session_id'][:8]}.reel.html"
     out.write_text(render(deck), encoding="utf-8")
     print(out)
