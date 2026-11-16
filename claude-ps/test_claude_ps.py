@@ -1064,7 +1064,8 @@ def _orphan_fleet():
         _proc(pid="100", ppid="1", args="claude bg-pty-host --bg-pty-host x", cwd="/w/host"),
         _proc(pid="101", ppid="100", args="claude bg-spare --bg-spare x", cwd="/w/maru"),
         _proc(pid="200", ppid="50", args="claude --resume", cwd="/w/maru"),
-        _proc(pid="300", ppid="60", args="claude", cwd="/w/other"),
+        _proc(pid="300", ppid="60", args="claude", cwd="/w/maru"),
+        _proc(pid="400", ppid="70", args="claude", cwd="/w/unrelated"),
     ]
     table = {
         "1": ("0", "9-00:00:00", "/sbin/launchd"),
@@ -1075,6 +1076,8 @@ def _orphan_fleet():
         "200": ("50", "10:00", "claude --resume"),
         "300": ("60", "10:00", "claude"),
         "310": ("300", "01:00", _SNAP.format("sh   watch-prs.sh")),
+        "400": ("70", "10:00", "claude"),
+        "410": ("400", "01:00", _SNAP.format("sh watch-prs.sh")),
     }
     registry = {
         "101": {"session_id": "4e426cec-aaaa", "proc_start": None},
@@ -1095,7 +1098,8 @@ def test_orphan_detail_finds_the_session_in_the_subtree_and_its_replacements(tmp
     assert d["idle_minutes"] == 0
     assert d["shells"] == ["sh watch-prs.sh"]
     assert d["same_session_elsewhere"] == ["200"]
-    # Whitespace differences in the payload do not hide a restart.
+    # Whitespace differences in the payload do not hide a restart, and the same
+    # command in another project (400) is not one.
     assert d["same_commands_elsewhere"] == ["300"]
 
 
@@ -1114,6 +1118,10 @@ def test_idle_minutes_reads_the_newest_transcript(tmp_path):
         f.write_text("")
         os.utime(f, (time.time() - age, time.time() - age))
     assert cp.transcript_idle_minutes("s1", tmp_path) == 10
+    # A subagent writing now makes a quiet main transcript count as active.
+    (tmp_path / "a" / "s1" / "subagents").mkdir(parents=True)
+    (tmp_path / "a" / "s1" / "subagents" / "agent-1.jsonl").write_text("")
+    assert cp.transcript_idle_minutes("s1", tmp_path) == 0
     assert cp.transcript_idle_minutes("missing", tmp_path) is None
 
 
@@ -1127,11 +1135,11 @@ def test_orphan_lines_name_session_activity_and_replacements():
                 "idle_minutes": 125,
                 "shells": ["a", "b"],
                 "same_session_elsewhere": ["200"],
-                "same_commands_elsewhere": [],
+                "same_commands_elsewhere": ["300"],
             }
         ],
         [],
     )
     assert lines[0] == "  100  4e426cec · /w/maru · last active 2h ago · holding 2 shells"
     assert lines[1].endswith("same session also running under 200")
-    assert len(lines) == 2
+    assert lines[2].endswith("same shell command in the same cwd under 300")

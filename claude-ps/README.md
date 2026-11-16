@@ -59,9 +59,11 @@ The Claude daemon itself always runs under launchd and is never counted.
 
 An orphan is often still active, so the listing says what each one is doing:
 the session it runs, its cwd, when its transcript was last written, and how many
-shells it holds. It also names any non-orphaned process running the **same
-session** (resumed elsewhere) or the **same shell command** (restarted elsewhere).
-Either one means the orphan's work continues without it. `--json` carries the
+shells it holds; subagent transcripts count toward the last write. It also names
+any non-orphaned process running the **same session** (resumed elsewhere) or the
+**same shell command in the same cwd** (restarted elsewhere). Those are hints that
+the orphan has been replaced, not proof: a command match says the work is being
+done again, not that the orphan has nothing else in flight. `--json` carries the
 same facts under `orphan_detail`, and `--tree` shows the orphan's process tree.
 
 ## Held shells

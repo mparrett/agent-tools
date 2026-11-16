@@ -246,19 +246,40 @@ def memory_by_pid():
     return {r[0]: int(r[1]) for r in rows if len(r) == 2 and r[1].isdigit()}
 
 
-def session_memory(pid, procs, mem, stop=()):
+def children_of(table):
+    """{ppid: [pid, ...]} over an all_processes() table."""
+    children = {}
+    for pid, (ppid, _etime, _cmd) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    return children
+
+
+def descendants(children, root, stop=()):
+    """root and every process under it, not descending into pids in `stop`.
+
+    The seen-set guards against a cycle, which a pid reused between the two
+    halves of a ps snapshot can produce.
+    """
+    seen, todo = set(), [root]
+    while todo:
+        pid = todo.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        todo.extend(c for c in children.get(pid, ()) if c not in stop)
+    return seen
+
+
+def session_memory(pid, procs, mem, stop=(), children=None):
     """KB held by pid and its descendants: language servers, MCP servers and
     tool shells a session starts are its cost. A descendant in `stop` (another
-    listed claude) is counted on its own row instead."""
-    children = {}
-    for child, (ppid, _etime, _cmd) in procs.items():
-        children.setdefault(ppid, []).append(child)
-    total, todo = 0, [pid]
-    while todo:
-        p = todo.pop()
-        total += mem.get(p, 0)
-        todo.extend(c for c in children.get(p, ()) if c not in stop)
-    return total
+    listed claude) is counted on its own row instead.
+
+    Pass `children` when calling once per listed process, so the table is
+    indexed once rather than per call."""
+    if children is None:
+        children = children_of(procs)
+    return sum(mem.get(p, 0) for p in descendants(children, pid, stop))
 
 
 # On Linux a session manager can claim orphans before init does: `systemd --user`
@@ -307,9 +328,14 @@ def transcript_idle_minutes(session_id, root=None):
     The transcript is the one record every turn and tool call appends to, so its
     mtime is the session's last activity. Globbed across project slugs because a
     session's slug is where it started, which its cwd no longer says.
+
+    Subagent transcripts under `<slug>/<session-id>/` count too: a session waiting
+    on a long subagent writes nothing to its own transcript until it returns, and
+    reading that as idle is how a busy session gets killed.
     """
+    base = Path(root or TRANSCRIPTS)
     try:
-        paths = list(Path(root or TRANSCRIPTS).glob(f"*/{session_id}.jsonl"))
+        paths = [*base.glob(f"*/{session_id}.jsonl"), *base.glob(f"*/{session_id}/**/*.jsonl")]
     except OSError:
         return None
     mtimes = []
@@ -337,23 +363,12 @@ def describe_orphans(procs, table, registry, transcripts=None):
     for a foreground claude but a `bg-spare` child for a background host, so the
     orphan's whole subtree is searched.
     """
-    children = {}
-    for pid, (ppid, _, _) in table.items():
-        children.setdefault(ppid, []).append(pid)
+    children = children_of(table)
     listed = {p["pid"]: p for p in procs}
-
-    def subtree(root):
-        seen, stack = set(), [root]
-        while stack:
-            pid = stack.pop()
-            if pid not in seen:
-                seen.add(pid)
-                stack.extend(children.get(pid, []))
-        return seen
 
     orphans = [p for p in procs if is_orphan(p)]
     owned = {
-        o["pid"]: sorted((pid for pid in subtree(o["pid"]) if pid in listed), key=int)
+        o["pid"]: sorted((pid for pid in descendants(children, o["pid"]) if pid in listed), key=int)
         for o in orphans
     }
     orphaned = {pid for pids in owned.values() for pid in pids}
@@ -363,10 +378,13 @@ def describe_orphans(procs, table, registry, transcripts=None):
     def norm(command):
         return " ".join(command.split())
 
+    # Keyed by cwd as well as command: `just test` or `gh pr checks --watch` in an
+    # unrelated project is a coincidence, not a restart of the orphan's work.
     live_commands = {}
     for row in shells:
         if row["claude_pid"] not in orphaned:
-            live_commands.setdefault(norm(row["command"]), set()).add(row["claude_pid"])
+            key = (listed[row["claude_pid"]]["cwd"], norm(row["command"]))
+            live_commands.setdefault(key, set()).add(row["claude_pid"])
 
     out = []
     for o in orphans:
@@ -377,12 +395,13 @@ def describe_orphans(procs, table, registry, transcripts=None):
         same_session = [
             pid for pid in listed if sid and sessions[pid] == sid and pid not in orphaned
         ]
-        same_commands = {pid for c in held for pid in live_commands.get(norm(c), ())}
+        cwd = listed[session_pid]["cwd"] if session_pid else o["cwd"]
+        same_commands = {pid for c in held for pid in live_commands.get((cwd, norm(c)), ())}
         out.append(
             {
                 "pid": o["pid"],
                 "session_id": sid,
-                "cwd": listed[session_pid]["cwd"] if session_pid else o["cwd"],
+                "cwd": cwd,
                 "idle_minutes": transcript_idle_minutes(sid, transcripts) if sid else None,
                 "shells": held,
                 "same_session_elsewhere": sorted(same_session, key=int),
@@ -416,7 +435,7 @@ def orphan_lines(details, prefixes):
             lines.append(f"         ↳ same session also running under {pids}")
         if d["same_commands_elsewhere"]:
             pids = ", ".join(d["same_commands_elsewhere"])
-            lines.append(f"         ↳ same shell command also running under {pids}")
+            lines.append(f"         ↳ same shell command in the same cwd under {pids}")
     return lines
 
 
@@ -527,9 +546,7 @@ def collect_shells(procs, claude_pids, ancestry=()):
     and blocked on what. Whether the call was backgrounded is decided separately,
     from the transcript: nothing in the process tree distinguishes the two.
     """
-    children = {}
-    for pid, (ppid, _, _) in procs.items():
-        children.setdefault(ppid, []).append(pid)
+    children = children_of(procs)
 
     rows = []
     for cpid in claude_pids:
@@ -1265,8 +1282,11 @@ def main(argv=None):
     if mem:
         table_procs = all_processes()
         listed = {p["pid"] for p in procs}
+        children = children_of(table_procs)
         for p in procs:
-            p["mem_kb"] = session_memory(p["pid"], table_procs, mem, stop=listed - {p["pid"]})
+            p["mem_kb"] = session_memory(
+                p["pid"], table_procs, mem, stop=listed - {p["pid"]}, children=children
+            )
     if args.sort == "mem":
         procs.sort(key=lambda p: p.get("mem_kb") or 0, reverse=True)
     elif args.sort == "cpu":
