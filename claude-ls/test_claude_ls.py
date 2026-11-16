@@ -264,6 +264,100 @@ def test_first_time_is_the_earliest_hit_even_when_a_later_snippet_wins(tmp_path)
     assert first_at == datetime(2026, 11, 15, 3, 0, tzinfo=timezone.utc)
 
 
+def _write_call(ts: str, path: str, content: str) -> str:
+    return json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": ts,
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {"file_path": path, "content": content},
+                    }
+                ]
+            },
+        }
+    )
+
+
+def test_first_time_finds_text_that_first_appears_in_a_written_file(tmp_path):
+    # Provenance: text often first exists in a file a session wrote, and only
+    # later in prose. Search must see the Write input, not just a tool's
+    # descriptive fields, or the first time is hours late.
+    sess = tmp_path / "s.jsonl"
+    sess.write_text(
+        _write_call("2026-10-20T12:27:28Z", "/w/motif.edn", "{:lead [5 0 0 4 3 0]}\n")
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "timestamp": "2026-10-20T14:01:53Z",
+                "message": {"content": "motif lead [5 0 0 4 3]"},
+            }
+        )
+        + "\n"
+    )
+    snippets, first_at = cl.get_session_matches_timed(sess, "[5 0 0 4 3", max_matches=3)
+    assert first_at == datetime(2026, 10, 20, 12, 27, 28, tzinfo=timezone.utc)
+    assert {role for role, _ in snippets} == {"user", "tool_in"}
+
+
+def test_a_written_file_does_not_crowd_out_later_prose(tmp_path):
+    body = "".join(f"widget line {i}\n" for i in range(60))
+    sess = tmp_path / "s.jsonl"
+    sess.write_text(
+        _write_call("2026-10-20T12:00:00Z", "/w/log.txt", body)
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-10-20T13:00:00Z",
+                "message": {"content": [{"type": "text", "text": "The widget works now."}]},
+            }
+        )
+        + "\n"
+    )
+    snippets, _ = cl.get_session_matches_timed(sess, "widget", max_matches=1)
+    assert snippets[0][0] == "asst"
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_search_finds_a_quoted_query_inside_written_file_content(tmp_path):
+    # On disk the quotes are escaped (\"lead\"); the query is typed plain.
+    base = tmp_path / "projects"
+    proj = base / "-proj"
+    proj.mkdir(parents=True)
+    (proj / "s.jsonl").write_text(
+        _write_call("2026-10-20T12:00:00Z", "/w/a.clj", '(def x "lead")\n') + "\n"
+    )
+    assert [s.name for _, s, _ in cl.search_session_content(str(base), '"lead"')] == ["s.jsonl"]
+
+
+def test_opaque_tool_input_is_not_a_match(tmp_path):
+    blob = "QUJD" * 40 + "widget" + "QUJD" * 40  # base64-like, no whitespace
+    sess = tmp_path / "s.jsonl"
+    sess.write_text(_write_call("2026-10-20T12:00:00Z", "/w/blob.bin", blob) + "\n")
+    assert cl.get_session_matches_timed(sess, "widget") == ([], None)
+
+
+def test_content_fragments_keep_tool_input_narrow_by_default():
+    # The work-signal pass reads PR links from these fragments; a link inside a
+    # written file must not count as a PR the session worked on.
+    content = [
+        {
+            "type": "tool_use",
+            "name": "Write",
+            "input": {"file_path": "/w/notes.md", "content": "see github.com/o/r/pull/7"},
+        }
+    ]
+    assert list(cl.iter_content_fragments(content)) == []
+    assert ("tool_in", "see github.com/o/r/pull/7") in list(
+        cl.iter_content_fragments(content, full_tool_input=True)
+    )
+
+
 def test_first_time_reads_a_rollout(tmp_path):
     rollout = _rollout_in_store(tmp_path / "codex", "/w/widget", "the zephyr parser")
     assert _first_at(rollout, "zephyr") == datetime(2026, 8, 1, 9, 0, 1, tzinfo=timezone.utc)
