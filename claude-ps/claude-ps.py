@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -260,10 +261,163 @@ def session_memory(pid, procs, mem, stop=()):
     return total
 
 
+# On Linux a session manager can claim orphans before init does: `systemd --user`
+# is a child subreaper, so a background host whose daemon exits is reparented to
+# it rather than to pid 1. The kernel does not expose the subreaper flag, so the
+# name stands in for it. A claude deliberately run as a user unit would also
+# match; nothing ships that way.
+SUBREAPERS = {"systemd"}
+
+
 def is_orphan(p):
-    """Parent gone, adopted by launchd/init. The Claude daemon runs that way by
-    design, so it is not one; a background-session host whose daemon exited is."""
-    return p["ppid"] == "1" and " daemon run" not in p["args"]
+    """Parent gone, adopted by launchd/init or a subreaper. The Claude daemon runs
+    that way by design, so it is not one; a background-session host whose daemon
+    exited is."""
+    if " daemon run" in p["args"]:
+        return False
+    return p["ppid"] == "1" or p.get("parent_comm") in SUBREAPERS
+
+
+def resolve_parent_comms(procs):
+    """Set `parent_comm` on each row, for is_orphan's subreaper check.
+
+    Linux only: launchd is the only adopter on macOS, so the extra ps call would
+    buy nothing there.
+    """
+    if sys.platform == "darwin":
+        return
+    ppids = sorted({p["ppid"] for p in procs if p["ppid"] != "1"})
+    if not ppids:
+        return
+    result = subprocess.run(
+        ["ps", "-o", "pid=,comm=", "-p", ",".join(ppids)], capture_output=True, text=True
+    )
+    comms = {}
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            comms[parts[0]] = parts[1].strip()
+    for p in procs:
+        p["parent_comm"] = comms.get(p["ppid"])
+
+
+def transcript_idle_minutes(session_id, root=None):
+    """Minutes since this session last wrote its transcript, or None if not found.
+
+    The transcript is the one record every turn and tool call appends to, so its
+    mtime is the session's last activity. Globbed across project slugs because a
+    session's slug is where it started, which its cwd no longer says.
+    """
+    try:
+        paths = list(Path(root or TRANSCRIPTS).glob(f"*/{session_id}.jsonl"))
+    except OSError:
+        return None
+    mtimes = []
+    for path in paths:
+        try:
+            mtimes.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    if not mtimes:
+        return None
+    return max(0, int((time.time() - max(mtimes)) // 60))
+
+
+def describe_orphans(procs, table, registry, transcripts=None):
+    """What each orphan is still doing, and whether it has been replaced.
+
+    An orphan is often a live session, not debris: when the daemon exits its
+    background hosts keep running their sessions, with no daemon to attach to. So
+    the useful answer is which session it runs, whether that session is still
+    active, what shells it holds, and whether a non-orphaned process now runs the
+    same session (resumed elsewhere) or the same commands (restarted elsewhere).
+    The last is what says killing the orphan loses nothing.
+
+    The session record sits on the session process, which is the orphan itself
+    for a foreground claude but a `bg-spare` child for a background host, so the
+    orphan's whole subtree is searched.
+    """
+    children = {}
+    for pid, (ppid, _, _) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    listed = {p["pid"]: p for p in procs}
+
+    def subtree(root):
+        seen, stack = set(), [root]
+        while stack:
+            pid = stack.pop()
+            if pid not in seen:
+                seen.add(pid)
+                stack.extend(children.get(pid, []))
+        return seen
+
+    orphans = [p for p in procs if is_orphan(p)]
+    owned = {
+        o["pid"]: sorted((pid for pid in subtree(o["pid"]) if pid in listed), key=int)
+        for o in orphans
+    }
+    orphaned = {pid for pids in owned.values() for pid in pids}
+    sessions = {pid: registry_session_for(p, registry) for pid, p in listed.items()}
+    shells = collect_shells(table, list(listed), own_ancestry(table))
+
+    def norm(command):
+        return " ".join(command.split())
+
+    live_commands = {}
+    for row in shells:
+        if row["claude_pid"] not in orphaned:
+            live_commands.setdefault(norm(row["command"]), set()).add(row["claude_pid"])
+
+    out = []
+    for o in orphans:
+        mine = owned[o["pid"]]
+        session_pid = next((pid for pid in mine if sessions[pid]), None)
+        sid = sessions[session_pid] if session_pid else None
+        held = [row["command"] for row in shells if row["claude_pid"] in mine]
+        same_session = [
+            pid for pid in listed if sid and sessions[pid] == sid and pid not in orphaned
+        ]
+        same_commands = {pid for c in held for pid in live_commands.get(norm(c), ())}
+        out.append(
+            {
+                "pid": o["pid"],
+                "session_id": sid,
+                "cwd": listed[session_pid]["cwd"] if session_pid else o["cwd"],
+                "idle_minutes": transcript_idle_minutes(sid, transcripts) if sid else None,
+                "shells": held,
+                "same_session_elsewhere": sorted(same_session, key=int),
+                "same_commands_elsewhere": sorted(same_commands, key=int),
+            }
+        )
+    return out
+
+
+def format_idle(minutes):
+    if minutes is None:
+        return "no transcript found"
+    if minutes < 60:
+        return f"last active {minutes}m ago"
+    if minutes < 1440:
+        return f"last active {minutes // 60}h ago"
+    return f"last active {minutes // 1440}d ago"
+
+
+def orphan_lines(details, prefixes):
+    """Footer lines for the listing, one block per orphan."""
+    lines = []
+    for d in details:
+        sid = d["session_id"][:8] if d["session_id"] else "no session record"
+        cwd = shorten_cwd(d["cwd"], prefixes) or "?"
+        shells = len(d["shells"])
+        held = f" · holding {shells} shell{'s' if shells != 1 else ''}" if shells else ""
+        lines.append(f"  {d['pid']}  {sid} · {cwd} · {format_idle(d['idle_minutes'])}{held}")
+        if d["same_session_elsewhere"]:
+            pids = ", ".join(d["same_session_elsewhere"])
+            lines.append(f"         ↳ same session also running under {pids}")
+        if d["same_commands_elsewhere"]:
+            pids = ", ".join(d["same_commands_elsewhere"])
+            lines.append(f"         ↳ same shell command also running under {pids}")
+    return lines
 
 
 def format_mem(kb):
@@ -1089,6 +1243,8 @@ def main(argv=None):
         print("No Claude processes found.")
         return
 
+    resolve_parent_comms(procs)
+
     # Orphan selection needs only ppid and args, so skip the tmux, memory and sort
     # work the listing does.
     if args.tree is not None:
@@ -1104,6 +1260,7 @@ def main(argv=None):
 
     procs.sort(key=lambda p: p["started"] or datetime.min)
 
+    table_procs = None
     mem = memory_by_pid()
     if mem:
         table_procs = all_processes()
@@ -1123,14 +1280,25 @@ def main(argv=None):
     # pay the claude-ls call when --status (or --status JSON) is requested, never
     # on the default listing.
     status = args.status
+    registry = None
     if status:
+        registry = load_session_registry()
         rows = fetch_pending_rows()
         annotate_waiting(
             procs,
             waiting_by_cwd(rows),
             waiting_by_session(rows),
-            load_session_registry(),
+            registry,
         )
+
+    details = {}
+    if any(is_orphan(p) for p in procs):
+        found = describe_orphans(
+            procs,
+            table_procs if table_procs is not None else all_processes(),
+            registry if registry is not None else load_session_registry(),
+        )
+        details = {d["pid"]: d for d in found}
 
     if args.json:
         out = []
@@ -1147,6 +1315,9 @@ def main(argv=None):
                 "version": p.get("version"),
                 "command": classify_command(p["args"]),
             }
+            if p["pid"] in details:
+                d = details[p["pid"]]
+                row["orphan_detail"] = {k: v for k, v in d.items() if k != "pid"}
             if status:
                 row["waiting"] = p["waiting"]
                 row["waiting_minutes"] = p["waiting_minutes"]
@@ -1171,6 +1342,9 @@ def main(argv=None):
             f"\n[yellow]⚠ {len(orphans)} orphaned (parent gone, PID in yellow): "
             f"{', '.join(p['pid'] for p in orphans)}[/yellow]"
         )
+        # Text, not markup: the cwd is process text and may hold brackets.
+        for line in orphan_lines([details[p["pid"]] for p in orphans], prefixes):
+            console.print(Text(line, style="dim"))
 
     old = [p for p in procs if p["started"] and (datetime.now() - p["started"]).days >= 3]
     if old:

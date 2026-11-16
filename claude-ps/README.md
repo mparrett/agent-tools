@@ -49,6 +49,21 @@ Live view:
 watch -n2 ./claude-ps.py --color
 ```
 
+## Orphans
+
+A process is orphaned when its parent exits and launchd (or, on Linux, init or
+`systemd --user`) adopts it. The common case is a background session whose daemon
+exited, say on an update: the session keeps running in its `bg-pty-host`, but no
+daemon tracks it any more, so it can't be attached to and stays on its old build.
+The Claude daemon itself always runs under launchd and is never counted.
+
+An orphan is often still active, so the listing says what each one is doing:
+the session it runs, its cwd, when its transcript was last written, and how many
+shells it holds. It also names any non-orphaned process running the **same
+session** (resumed elsewhere) or the **same shell command** (restarted elsewhere).
+Either one means the orphan's work continues without it. `--json` carries the
+same facts under `orphan_detail`, and `--tree` shows the orphan's process tree.
+
 ## Held shells
 
 `--shells` answers a different question from the listing: not which sessions are

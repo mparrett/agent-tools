@@ -26,6 +26,16 @@ cp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cp)
 
 
+_real_resolve_parent_comms = cp.resolve_parent_comms
+
+
+@pytest.fixture(autouse=True)
+def _no_parent_lookup(monkeypatch):
+    # main() looks up each listed process's parent with a real `ps` on Linux, and
+    # fixture pids are real pids on the CI runner. Its own tests call the original.
+    monkeypatch.setattr(cp, "resolve_parent_comms", lambda procs: None)
+
+
 def _fake_run(stdout, returncode=0):
     return lambda *a, **k: SimpleNamespace(stdout=stdout, returncode=returncode)
 
@@ -1011,3 +1021,117 @@ def test_color_is_detected_without_the_flag(monkeypatch):
     cp.main([])
     cp.main(["--color"])
     assert [kw["force_terminal"] for kw in seen] == [None, True]
+
+
+# ── orphan detail ────────────────────────────────────────────────────────────
+
+_SNAP = "/bin/zsh -c source /h/.claude/shell-snapshots/snapshot-zsh-1.sh && eval '{}' < /dev/null"
+
+
+def test_a_subreaper_parent_counts_as_orphaning():
+    host = _proc(pid="500", ppid="900", args="claude bg-pty-host --bg-pty-host x")
+    host["parent_comm"] = "systemd"
+    shell_child = _proc(pid="501", ppid="900", args="claude")
+    shell_child["parent_comm"] = "zsh"
+    assert [cp.is_orphan(host), cp.is_orphan(shell_child)] == [True, False]
+
+
+def test_resolve_parent_comms_reads_each_parent_once(monkeypatch):
+    monkeypatch.setattr(cp.sys, "platform", "linux")
+    seen = []
+
+    def run(argv, **k):
+        seen.append(argv)
+        return SimpleNamespace(stdout=" 900 systemd\n 901 zsh\n", returncode=0)
+
+    monkeypatch.setattr(cp.subprocess, "run", run)
+    procs = [_proc(pid="500", ppid="900"), _proc(pid="501", ppid="901"), _proc(pid="2", ppid="1")]
+    _real_resolve_parent_comms(procs)
+    assert seen == [["ps", "-o", "pid=,comm=", "-p", "900,901"]]
+    assert [p["parent_comm"] for p in procs] == ["systemd", "zsh", None]
+
+
+def test_resolve_parent_comms_skips_macos(monkeypatch):
+    monkeypatch.setattr(cp.sys, "platform", "darwin")
+    monkeypatch.setattr(cp.subprocess, "run", lambda *a, **k: pytest.fail("ps ran"))
+    _real_resolve_parent_comms([_proc(pid="500", ppid="900")])
+
+
+def _orphan_fleet():
+    """An orphaned background host whose session also runs, resumed, under a live
+    claude elsewhere, and a watcher command that a third session restarted."""
+    procs = [
+        _proc(pid="100", ppid="1", args="claude bg-pty-host --bg-pty-host x", cwd="/w/host"),
+        _proc(pid="101", ppid="100", args="claude bg-spare --bg-spare x", cwd="/w/maru"),
+        _proc(pid="200", ppid="50", args="claude --resume", cwd="/w/maru"),
+        _proc(pid="300", ppid="60", args="claude", cwd="/w/other"),
+    ]
+    table = {
+        "1": ("0", "9-00:00:00", "/sbin/launchd"),
+        "100": ("1", "4-00:00:00", "claude bg-pty-host"),
+        "101": ("100", "4-00:00:00", "claude bg-spare"),
+        "110": ("101", "01:00", _SNAP.format("sh watch-prs.sh")),
+        "111": ("110", "00:10", "sleep 60"),
+        "200": ("50", "10:00", "claude --resume"),
+        "300": ("60", "10:00", "claude"),
+        "310": ("300", "01:00", _SNAP.format("sh   watch-prs.sh")),
+    }
+    registry = {
+        "101": {"session_id": "4e426cec-aaaa", "proc_start": None},
+        "200": {"session_id": "4e426cec-aaaa", "proc_start": None},
+        "300": {"session_id": "99999999-bbbb", "proc_start": None},
+    }
+    return procs, table, registry
+
+
+def test_orphan_detail_finds_the_session_in_the_subtree_and_its_replacements(tmp_path):
+    procs, table, registry = _orphan_fleet()
+    (tmp_path / "-w-maru").mkdir()
+    (tmp_path / "-w-maru" / "4e426cec-aaaa.jsonl").write_text("{}")
+    [d] = cp.describe_orphans(procs, table, registry, transcripts=tmp_path)
+    assert d["pid"] == "100"
+    # The record and cwd belong to the bg-spare child, not the host.
+    assert (d["session_id"], d["cwd"]) == ("4e426cec-aaaa", "/w/maru")
+    assert d["idle_minutes"] == 0
+    assert d["shells"] == ["sh watch-prs.sh"]
+    assert d["same_session_elsewhere"] == ["200"]
+    # Whitespace differences in the payload do not hide a restart.
+    assert d["same_commands_elsewhere"] == ["300"]
+
+
+def test_orphan_detail_with_no_record_or_transcript(tmp_path):
+    procs, table, _ = _orphan_fleet()
+    [d] = cp.describe_orphans(procs, table, {}, transcripts=tmp_path)
+    assert d["session_id"] is None and d["cwd"] == "/w/host"
+    assert d["idle_minutes"] is None
+    assert d["same_session_elsewhere"] == []
+
+
+def test_idle_minutes_reads_the_newest_transcript(tmp_path):
+    for slug, age in (("a", 7200), ("b", 600)):
+        (tmp_path / slug).mkdir()
+        f = tmp_path / slug / "s1.jsonl"
+        f.write_text("")
+        os.utime(f, (time.time() - age, time.time() - age))
+    assert cp.transcript_idle_minutes("s1", tmp_path) == 10
+    assert cp.transcript_idle_minutes("missing", tmp_path) is None
+
+
+def test_orphan_lines_name_session_activity_and_replacements():
+    lines = cp.orphan_lines(
+        [
+            {
+                "pid": "100",
+                "session_id": "4e426cec-aaaa",
+                "cwd": "/w/maru",
+                "idle_minutes": 125,
+                "shells": ["a", "b"],
+                "same_session_elsewhere": ["200"],
+                "same_commands_elsewhere": [],
+            }
+        ],
+        [],
+    )
+    assert lines[0] == "  100  4e426cec · /w/maru · last active 2h ago · holding 2 shells"
+    assert lines[1].endswith("same session also running under 200")
+    assert len(lines) == 2
