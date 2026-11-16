@@ -561,6 +561,24 @@ def test_tree_is_off_bare_or_takes_pids():
     assert cp.parse_args(["--tree", "12", "34"]).tree == ["12", "34"]
 
 
+@pytest.mark.parametrize("bad", ["1234x", "matt", "0", "-5"])
+def test_tree_rejects_anything_but_a_pid(bad, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cp.parse_args(["--tree", bad] if not bad.startswith("-") else [f"--tree={bad}"])
+    assert exc.value.code == 2
+
+
+def test_tree_reports_a_pid_that_has_exited(monkeypatch, capsys):
+    def gone(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(cp.shutil, "which", lambda name: "/bin/pstree")
+    monkeypatch.setattr(cp.os, "kill", gone)
+    monkeypatch.setattr(cp.subprocess, "run", lambda *a, **k: pytest.fail("pstree ran"))
+    assert cp.render_trees(["12"]) == 1
+    assert "no process 12" in capsys.readouterr().err
+
+
 def test_tree_rejects_the_other_output_modes(capsys):
     with pytest.raises(SystemExit) as exc:
         cp.parse_args(["--tree", "--json"])
@@ -570,7 +588,10 @@ def test_tree_rejects_the_other_output_modes(capsys):
 def test_tree_with_pids_skips_discovery(monkeypatch):
     calls = []
     monkeypatch.setattr(cp.shutil, "which", lambda name: "/bin/pstree")
-    monkeypatch.setattr(cp.subprocess, "run", lambda argv, **k: calls.append(argv))
+    monkeypatch.setattr(cp.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(
+        cp.subprocess, "run", lambda argv, **k: calls.append(argv) or SimpleNamespace(returncode=0)
+    )
     monkeypatch.setattr(cp, "get_claude_pids", lambda: pytest.fail("discovery ran"))
     with pytest.raises(SystemExit) as exc:
         cp.main(["--tree", "12", "34"])
@@ -588,8 +609,8 @@ def test_bare_tree_shows_only_orphans(monkeypatch):
     monkeypatch.setattr(cp, "get_claude_pids", lambda: ["10", "11", "20"])
     monkeypatch.setattr(cp, "get_lsof_facts", lambda pids: {})
     monkeypatch.setattr(cp, "collect_procs", lambda *a, **k: [dict(p) for p in procs])
-    monkeypatch.setattr(cp, "get_tmux_tty_map", lambda: {})
-    monkeypatch.setattr(cp, "memory_by_pid", lambda: {})
+    monkeypatch.setattr(cp, "get_tmux_tty_map", lambda: pytest.fail("tmux queried"))
+    monkeypatch.setattr(cp, "memory_by_pid", lambda: pytest.fail("memory scanned"))
     monkeypatch.setattr(cp, "render_trees", lambda pids: shown.extend(pids) or 0)
     with pytest.raises(SystemExit):
         cp.main(["--tree"])

@@ -43,6 +43,14 @@ SESSIONS_DIR = Path(
 LSTART_FMT = "%a %b %d %H:%M:%S %Y"
 
 
+def pid_arg(value):
+    # Validated here because psmisc pstree reads a non-numeric argument as a user
+    # name and prints that user's whole forest, so a typo would look like success.
+    if not value.isdigit() or int(value) < 1:
+        raise argparse.ArgumentTypeError(f"not a PID: {value!r}")
+    return value
+
+
 def parse_args(argv=None):
     """Parse the command line.
 
@@ -93,6 +101,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--tree",
         nargs="*",
+        type=pid_arg,
         metavar="PID",
         help=(
             "show `pstree -p` for each PID; with no PIDs, for each orphaned "
@@ -1025,11 +1034,23 @@ def render_trees(pids):
     if not pstree:
         print("claude-ps: --tree needs pstree (brew install pstree)", file=sys.stderr)
         return 1
+    status = 0
     for i, pid in enumerate(pids):
         if i:
             print(flush=True)
-        subprocess.run([pstree, "-p", pid])
-    return 0
+        # Neither pstree reports a missing pid: one prints nothing, the other only
+        # the root of the tree. Check first so a pid that has exited is an error.
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            print(f"claude-ps: no process {pid}", file=sys.stderr)
+            status = 1
+            continue
+        except PermissionError:
+            pass
+        if subprocess.run([pstree, "-p", pid]).returncode:
+            status = 1
+    return status
 
 
 def main(argv=None):
@@ -1068,6 +1089,15 @@ def main(argv=None):
         print("No Claude processes found.")
         return
 
+    # Orphan selection needs only ppid and args, so skip the tmux, memory and sort
+    # work the listing does.
+    if args.tree is not None:
+        orphans = [p["pid"] for p in sorted(procs, key=lambda p: int(p["pid"])) if is_orphan(p)]
+        if not orphans:
+            print("No orphaned Claude processes; pass PIDs to --tree for specific ones.")
+            return
+        sys.exit(render_trees(orphans))
+
     tmux_map = get_tmux_tty_map()
     for p in procs:
         p["session"] = tmux_map.get(p["tty"], "")
@@ -1084,13 +1114,6 @@ def main(argv=None):
         procs.sort(key=lambda p: p.get("mem_kb") or 0, reverse=True)
     elif args.sort == "cpu":
         procs.sort(key=lambda p: float(p["cpu_pct"]), reverse=True)
-
-    if args.tree is not None:
-        orphans = [p["pid"] for p in procs if is_orphan(p)]
-        if not orphans:
-            print("No orphaned Claude processes; pass PIDs to --tree for specific ones.")
-            return
-        sys.exit(render_trees(orphans))
 
     if args.shells:
         render_shells(procs, args.json, args.color)
