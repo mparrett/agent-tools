@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -89,7 +90,19 @@ def parse_args(argv=None):
             "Overrides the PROJECT_DIRS env var, which overrides the default."
         ),
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--tree",
+        nargs="*",
+        metavar="PID",
+        help=(
+            "show `pstree -p` for each PID; with no PIDs, for each orphaned "
+            "session, which is where a stuck tool shell usually hides"
+        ),
+    )
+    args = parser.parse_args(argv)
+    if args.tree is not None and (args.json or args.shells or args.status):
+        parser.error("--tree cannot be combined with --json, --shells or --status")
+    return args
 
 
 def project_dir_prefixes(cli_dirs=()):
@@ -1001,8 +1014,29 @@ def render_shells(claude_procs, as_json, force_color):
         )
 
 
+def render_trees(pids):
+    """Print `pstree -p` for each pid; returns the exit status.
+
+    -p means "branches containing pid" on macOS (Fred Hucht's pstree, from Homebrew)
+    and "show pids" on Linux (psmisc); both print the pid's subtree with pids, and
+    the macOS form adds the ancestor chain, which is what shows who adopted it.
+    """
+    pstree = shutil.which("pstree")
+    if not pstree:
+        print("claude-ps: --tree needs pstree (brew install pstree)", file=sys.stderr)
+        return 1
+    for i, pid in enumerate(pids):
+        if i:
+            print(flush=True)
+        subprocess.run([pstree, "-p", pid])
+    return 0
+
+
 def main(argv=None):
     args = parse_args(argv)
+    # Explicit pids need no discovery, and needn't be Claude processes at all.
+    if args.tree:
+        sys.exit(render_trees(args.tree))
     # Resolved once: shorten_cwd runs per row, and used to re-scan argv and the
     # environment for every process in the listing.
     prefixes = project_dir_prefixes(args.project_dir)
@@ -1050,6 +1084,13 @@ def main(argv=None):
         procs.sort(key=lambda p: p.get("mem_kb") or 0, reverse=True)
     elif args.sort == "cpu":
         procs.sort(key=lambda p: float(p["cpu_pct"]), reverse=True)
+
+    if args.tree is not None:
+        orphans = [p["pid"] for p in procs if is_orphan(p)]
+        if not orphans:
+            print("No orphaned Claude processes; pass PIDs to --tree for specific ones.")
+            return
+        sys.exit(render_trees(orphans))
 
     if args.shells:
         render_shells(procs, args.json, args.color)
