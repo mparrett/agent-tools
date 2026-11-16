@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -40,6 +41,14 @@ SESSIONS_DIR = Path(
 # `ps -o lstart=` layout, which the registry's `procStart` also uses — see
 # registry_session_for for the catch.
 LSTART_FMT = "%a %b %d %H:%M:%S %Y"
+
+
+def pid_arg(value):
+    # Validated here because psmisc pstree reads a non-numeric argument as a user
+    # name and prints that user's whole forest, so a typo would look like success.
+    if not value.isdigit() or int(value) < 1:
+        raise argparse.ArgumentTypeError(f"not a PID: {value!r}")
+    return value
 
 
 def parse_args(argv=None):
@@ -89,7 +98,20 @@ def parse_args(argv=None):
             "Overrides the PROJECT_DIRS env var, which overrides the default."
         ),
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--tree",
+        nargs="*",
+        type=pid_arg,
+        metavar="PID",
+        help=(
+            "show `pstree -p` for each PID; with no PIDs, for each orphaned "
+            "session, which is where a stuck tool shell usually hides"
+        ),
+    )
+    args = parser.parse_args(argv)
+    if args.tree is not None and (args.json or args.shells or args.status):
+        parser.error("--tree cannot be combined with --json, --shells or --status")
+    return args
 
 
 def project_dir_prefixes(cli_dirs=()):
@@ -1001,8 +1023,41 @@ def render_shells(claude_procs, as_json, force_color):
         )
 
 
+def render_trees(pids):
+    """Print `pstree -p` for each pid; returns the exit status.
+
+    -p means "branches containing pid" on macOS (Fred Hucht's pstree, from Homebrew)
+    and "show pids" on Linux (psmisc); both print the pid's subtree with pids, and
+    the macOS form adds the ancestor chain, which is what shows who adopted it.
+    """
+    pstree = shutil.which("pstree")
+    if not pstree:
+        print("claude-ps: --tree needs pstree (brew install pstree)", file=sys.stderr)
+        return 1
+    status = 0
+    for i, pid in enumerate(pids):
+        if i:
+            print(flush=True)
+        # Neither pstree reports a missing pid: one prints nothing, the other only
+        # the root of the tree. Check first so a pid that has exited is an error.
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            print(f"claude-ps: no process {pid}", file=sys.stderr)
+            status = 1
+            continue
+        except PermissionError:
+            pass
+        if subprocess.run([pstree, "-p", pid]).returncode:
+            status = 1
+    return status
+
+
 def main(argv=None):
     args = parse_args(argv)
+    # Explicit pids need no discovery, and needn't be Claude processes at all.
+    if args.tree:
+        sys.exit(render_trees(args.tree))
     # Resolved once: shorten_cwd runs per row, and used to re-scan argv and the
     # environment for every process in the listing.
     prefixes = project_dir_prefixes(args.project_dir)
@@ -1033,6 +1088,15 @@ def main(argv=None):
     if not procs:
         print("No Claude processes found.")
         return
+
+    # Orphan selection needs only ppid and args, so skip the tmux, memory and sort
+    # work the listing does.
+    if args.tree is not None:
+        orphans = [p["pid"] for p in sorted(procs, key=lambda p: int(p["pid"])) if is_orphan(p)]
+        if not orphans:
+            print("No orphaned Claude processes; pass PIDs to --tree for specific ones.")
+            return
+        sys.exit(render_trees(orphans))
 
     tmux_map = get_tmux_tty_map()
     for p in procs:

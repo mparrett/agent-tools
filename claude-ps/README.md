@@ -39,6 +39,7 @@ and the listing falls back to the bare `pgrep` match.
 ./claude-ps.py --color    # force ANSI color (e.g. under `watch`)
 ./claude-ps.py --status   # add a Status column flagging sessions waiting on input
 ./claude-ps.py --shells   # shells sessions are holding open (monitors, sleeps, servers)
+./claude-ps.py --tree     # `pstree -p` of each orphaned session; `--tree PID...` for chosen ones
 ./claude-ps.py --help     # the flags, and what each one does
 ```
 
