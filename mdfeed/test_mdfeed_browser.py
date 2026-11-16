@@ -23,6 +23,7 @@ Needs the chromium binary once: `uvx playwright install chromium`.
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 from pathlib import Path
@@ -182,6 +183,160 @@ def test_focus_marker_for_a_file_not_in_the_feed_changes_nothing(browser, viewer
     # Nothing moved, so nothing is acknowledged and `open` falls back to a tab.
     host, port = base.rsplit("/", 1)[1].split(":")
     assert not mdfeed.wait_for_focus_ack(host, int(port), ts, wait=0)
+    page.close()
+
+
+# Matches any present value, so not_to_have_attribute(name, ANY_VALUE) waits
+# for the attribute to be removed.
+ANY_VALUE = re.compile(".*")
+
+
+def _csp_errors(page):
+    errors = []
+    page.on(
+        "console",
+        lambda m: (
+            m.type == "error" and "Content Security Policy" in m.text and errors.append(m.text)
+        ),
+    )
+    return errors
+
+
+def test_stored_prefs_apply_before_the_ui_script(browser, viewer):
+    """The <head> script sets stored prefs before first paint. It runs under
+    its own CSP hash, so a blocked script would show up here as the default
+    face, not as an error anyone sees."""
+    base, _, _ = viewer
+    page = browser.new_page()
+    errors = _csp_errors(page)
+    page.goto(base + "/")
+    page.evaluate(
+        "localStorage.setItem('mdfeed-font', 'atkinson'); localStorage.setItem('mdfeed-size', 'large')"
+    )
+    page.reload()
+    root = page.locator("html")
+    expect(root).to_have_attribute("data-font", "atkinson")
+    expect(root).to_have_attribute("data-size", "large")
+    family = page.evaluate("getComputedStyle(document.getElementById('preview')).fontFamily")
+    assert family.startswith('"Atkinson Hyperlegible Next"')
+    assert page.evaluate("getComputedStyle(document.getElementById('preview')).fontSize") == "18px"
+    assert errors == []
+    page.close()
+
+
+def test_prefs_panel_sets_and_clears_a_pref(browser, viewer):
+    base, _, _ = viewer
+    page = browser.new_page()
+    page.goto(base + "/")
+    expect(page.locator("#status")).to_have_text("live")
+    page.keyboard.press(",")
+    panel = page.locator("#prefs")
+    expect(panel).to_be_visible()
+    page.locator('#prefs button[data-pref="font"][data-value="atkinson"]').click()
+    expect(page.locator("html")).to_have_attribute("data-font", "atkinson")
+    assert page.evaluate("localStorage.getItem('mdfeed-font')") == "atkinson"
+    expect(page.locator('#prefs button[data-value="atkinson"]')).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    # Back to the default: no attribute and no stored key, so the stylesheet's
+    # :root values rule and a later change to the default reaches this reader.
+    page.locator('#prefs button[data-pref="font"][data-value="instrument"]').click()
+    # A face switch waits on the font load; expect() polls. (wait_for_function
+    # can't: its polling evals a string, which the page's CSP refuses.)
+    expect(page.locator("html")).not_to_have_attribute("data-font", ANY_VALUE)
+    assert page.evaluate("localStorage.getItem('mdfeed-font')") is None
+    page.keyboard.press("Escape")
+    expect(panel).to_be_hidden()
+    page.close()
+
+
+def test_panel_swallows_global_shortcuts(browser, viewer):
+    """With a segment focused, 'z' must not flip zen behind the panel."""
+    base, _, _ = viewer
+    page = browser.new_page()
+    page.goto(base + "/")
+    page.keyboard.press(",")
+    expect(page.locator("#prefs")).to_be_visible()
+    page.keyboard.press("z")
+    assert page.evaluate("document.documentElement.hasAttribute('data-reader')") is False
+    page.close()
+
+
+def test_size_key_cycles_and_old_small_choice_carries_over(browser, viewer):
+    """The old size toggle stored 'small' under the same key; it must still
+    read as small, and 'f' now steps through all four sizes."""
+    base, _, _ = viewer
+    page = browser.new_page()
+    page.goto(base + "/")
+    page.evaluate("localStorage.setItem('mdfeed-size', 'small')")
+    page.reload()
+    root = page.locator("html")
+    expect(root).to_have_attribute("data-size", "small")
+    page.keyboard.press("f")
+    expect(root).not_to_have_attribute("data-size", ANY_VALUE)
+    page.keyboard.press("f")
+    expect(root).to_have_attribute("data-size", "large")
+    page.keyboard.press("f")
+    expect(root).to_have_attribute("data-size", "xlarge")
+    page.close()
+
+
+def test_fast_double_size_key_takes_two_steps(browser, viewer):
+    """The swap (and its storage write) runs a frame later inside a view
+    transition; the second press must not re-read the old value."""
+    base, _, _ = viewer
+    page = browser.new_page()
+    page.goto(base + "/")
+    page.keyboard.press("f")
+    page.keyboard.press("f")
+    expect(page.locator("html")).to_have_attribute("data-size", "xlarge")
+    page.close()
+
+
+def test_size_and_theme_keys_work_inside_the_panel(browser, viewer):
+    """The panel footer names f and t; focus sits in the panel once open."""
+    base, _, _ = viewer
+    page = browser.new_page()
+    page.goto(base + "/")
+    page.keyboard.press(",")
+    expect(page.locator("#prefs")).to_be_visible()
+    page.keyboard.press("f")
+    expect(page.locator("html")).to_have_attribute("data-size", "large")
+    expect(page.locator('#prefs button[data-pref="size"][data-value="large"]')).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    page.close()
+
+
+def test_a_slow_font_load_does_not_override_a_later_choice(browser, viewer):
+    """Hold every font file unanswered so the Atkinson load runs to its cap,
+    then pick System meanwhile: System must stand after the cap expires."""
+    base, _, _ = viewer
+    page = browser.new_page()
+    held = []
+    page.route("https://fonts.gstatic.com/**", lambda route: held.append(route))
+    # Held fonts would stall the load event (Instrument Sans loads at startup).
+    page.goto(base + "/", wait_until="domcontentloaded")
+    expect(page.locator("#status")).to_have_text("live")
+    page.keyboard.press(",")
+    page.locator('#prefs button[data-value="atkinson"]').click()
+    page.locator('#prefs button[data-value="system"]').click()
+    expect(page.locator("html")).to_have_attribute("data-font", "system")
+    page.wait_for_timeout(2000)  # past loadFaces' 1.5s cap
+    expect(page.locator("html")).to_have_attribute("data-font", "system")
+    assert page.evaluate("localStorage.getItem('mdfeed-font')") == "system"
+    page.close()
+
+
+def test_theme_button_still_cycles(browser, viewer):
+    base, _, _ = viewer
+    page = browser.new_page()
+    page.goto(base + "/")
+    btn = page.locator("#theme-toggle")
+    expect(btn).to_have_text("auto")
+    btn.click()
+    expect(btn).to_have_text("light")
+    expect(page.locator("html")).to_have_attribute("data-theme", "light")
     page.close()
 
 

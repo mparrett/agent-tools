@@ -677,17 +677,19 @@ def test_host_check_skipped_when_bound_nonlocal(server):
 
 
 def test_script_hash_matches_served_page(server):
-    """The CSP hash must cover the exact bytes of the inline <script> that the
-    browser sees, or the whole UI goes dark."""
+    """The CSP hashes must cover the exact bytes of every inline <script> the
+    browser sees, or the whole UI goes dark (the main script) or stored
+    reading prefs stop applying (the <head> one)."""
     import hashlib
     import re as _re
 
     base, _ = server
     _, headers, body = get(base + "/")
-    script = _re.search(rb"<script>(.*)</script>", body, _re.DOTALL).group(1)
-    digest = hashlib.sha256(script).digest()
-    expected = base64.b64encode(digest).decode()
-    assert f"'sha256-{expected}'" in headers["Content-Security-Policy"]
+    scripts = _re.findall(rb"<script>(.*?)</script>", body, _re.DOTALL)
+    assert len(scripts) == 2
+    for script in scripts:
+        expected = base64.b64encode(hashlib.sha256(script).digest()).decode()
+        assert f"'sha256-{expected}'" in headers["Content-Security-Policy"]
 
 
 def test_served_page_carries_the_diff_engine(server):
