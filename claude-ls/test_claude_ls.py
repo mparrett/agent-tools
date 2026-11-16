@@ -14,7 +14,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -169,15 +171,101 @@ def test_search_errors_clearly_when_rg_missing(tmp_path, monkeypatch):
         cl.search_session_content(str(base), "zshrc")
 
 
-@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
-def test_search_exits_nonzero_on_rg_error(tmp_path):
-    # A failed search (invalid regex -> rg exit 2, no output) must not masquerade
-    # as an empty result; it exits nonzero so callers can tell them apart.
+def test_search_exits_nonzero_on_rg_error(tmp_path, monkeypatch):
+    # A failed search (rg exit 2, no output) must not masquerade as an empty
+    # result; it exits nonzero so callers can tell them apart. The query is
+    # literal now, so a bad pattern no longer produces the failure; fake it.
     base = tmp_path / "projects"
     _make_corpus(base)
+    monkeypatch.setattr(cl.shutil, "which", lambda _name: "/usr/bin/rg")
+    monkeypatch.setattr(
+        cl.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, stdout="", stderr="rg: boom"),
+    )
     with pytest.raises(SystemExit) as exc:
-        cl.search_session_content(str(base), "[")  # unclosed character class
+        cl.search_session_content(str(base), "zshrc")
     assert exc.value.code != 0
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_search_query_is_literal_text(tmp_path):
+    # Regex metacharacters are text: `[` used to kill rg as an unclosed class,
+    # and `.` must not stand in for any character.
+    base = tmp_path / "projects"
+    _make_corpus(base, "motif lead [5 0 0 4 3] then abc")
+    assert [s.name for _, s, _ in cl.search_session_content(str(base), "lead [5 0 0")] == [
+        "sess.jsonl"
+    ]
+    assert cl.search_session_content(str(base), "a.c") == []
+
+
+def _timed_session(path: Path, entries) -> Path:
+    path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "type": role,
+                    "timestamp": ts,
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+            + "\n"
+            for role, ts, text in entries
+        )
+    )
+    return path
+
+
+def test_first_match_time_is_the_earliest_matching_message(tmp_path):
+    sess = _timed_session(
+        tmp_path / "s.jsonl",
+        [
+            ("user", "2026-11-15T03:00:00Z", "nothing here"),
+            ("assistant", "2026-11-15T03:10:00Z", "the widget appears"),
+            ("user", "2026-11-15T22:27:00Z", "widget again, much later"),
+        ],
+    )
+    assert cl.first_match_time(sess, "widget") == datetime(2026, 11, 15, 3, 10, tzinfo=timezone.utc)
+    # Type filters apply as they do to snippets: only the user's later mention counts.
+    assert cl.first_match_time(sess, "widget", include_types={"user"}) == datetime(
+        2026, 11, 15, 22, 27, tzinfo=timezone.utc
+    )
+    assert cl.first_match_time(sess, "absent") is None
+
+
+def test_first_match_time_reads_a_rollout(tmp_path):
+    rollout = _rollout_in_store(tmp_path / "codex", "/w/widget", "the zephyr parser")
+    assert cl.first_match_time(rollout, "zephyr") == datetime(
+        2026, 8, 1, 9, 0, 1, tzinfo=timezone.utc
+    )
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+def test_search_row_labels_match_and_last_times_with_zone(tmp_path, monkeypatch, capsys):
+    # The match was sent in the evening of 11-14 Pacific; the session ran on
+    # into 11-15. The row must date the match, not just the session's end.
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    try:
+        base = tmp_path / "projects"
+        proj = base / "-proj"
+        proj.mkdir(parents=True)
+        sess = _timed_session(
+            proj / "aaaa1111.jsonl",
+            [
+                ("assistant", "2026-11-15T03:10:00Z", "widget here"),
+                ("user", "2026-11-15T22:27:00Z", "bye"),
+            ],
+        )
+        end = datetime(2026, 11, 15, 22, 27, tzinfo=timezone.utc).timestamp()
+        os.utime(sess, (end, end))
+        cl.search_content_mode(_search_args(base), None)
+        out = capsys.readouterr().out
+        assert "match 11-14 19:10 PST  last 11-15 14:27 PST" in out
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
 
 
 @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")

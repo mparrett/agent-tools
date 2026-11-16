@@ -364,7 +364,24 @@ def parse_args():
 
     # Search mode (search conversation content)
     search_parser = subparsers.add_parser(
-        "search", help="Search for sessions containing text in conversation content"
+        "search",
+        help="Search for sessions containing text in conversation content",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Find sessions containing literal text (not a regex; case-insensitive\n"
+            "unless --case-sensitive).\n\n"
+            "Each row shows two times, local with the zone name:\n"
+            "  match  when the earliest matching message was written\n"
+            "  last   the session's last activity (rows sort by this)\n\n"
+            "Covers: user and assistant text, thinking, tool inputs and tool results,\n"
+            "summaries, and subagent transcripts, across the whole file, including\n"
+            "turns from before a compaction. With --codex, Codex rollouts that are\n"
+            "plain .jsonl; compressed .jsonl.zst rollouts are not read.\n\n"
+            "Not covered: other agents (Cursor), other machines, and anything Claude\n"
+            "Code has deleted. It removes transcripts older than cleanupPeriodDays\n"
+            "(settings.json, default 30), so no hit before that horizon is not\n"
+            "evidence of absence."
+        ),
     )
     search_parser.add_argument(
         "query",
@@ -2792,7 +2809,11 @@ def search_session_content(
     targets = [str(p) for p in projects]
     if codex_root is not None:
         targets.append(str(codex_root))
-    cmd = ["rg", "-l", *ignore_flags, *case_flag, "--", query] + targets
+    # -F: the query is literal text, as get_session_matches and the highlighter
+    # treat it. Without it rg read it as a regex, so `[5 0 0` died as an
+    # unclosed character class and `a.c` pre-matched sessions the literal pass
+    # then found nothing in.
+    cmd = ["rg", "-l", "-F", *ignore_flags, *case_flag, "--", query] + targets
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
@@ -2904,8 +2925,14 @@ def iter_content_fragments(content: Any) -> Iterator[Tuple[str, str]]:
 
 def iter_session_prose(file_path: Path) -> Iterator[Tuple[str, str]]:
     """Yield (role_tag, text) for prose fields in the session file."""
+    for role, text, _ts in iter_session_prose_timed(file_path):
+        yield (role, text)
+
+
+def iter_session_prose_timed(file_path: Path) -> Iterator[Tuple[str, str, Optional[str]]]:
+    """iter_session_prose plus each fragment's entry timestamp (ISO, UTC), or None."""
     if _file_is_codex(file_path):
-        yield from _codex_iter_prose_entries(load_raw_entries(str(file_path)))
+        yield from _codex_iter_prose_timed(load_raw_entries(str(file_path)))
         return
     try:
         f = open(file_path, "r", encoding="utf-8", errors="ignore")
@@ -2921,15 +2948,16 @@ def iter_session_prose(file_path: Path) -> Iterator[Tuple[str, str]]:
             except json.JSONDecodeError:
                 continue
             etype = entry.get("type")
+            ts = entry.get("timestamp") if isinstance(entry.get("timestamp"), str) else None
             if etype == "summary" and isinstance(entry.get("summary"), str):
-                yield ("summ", entry["summary"])
+                yield ("summ", entry["summary"], ts)
                 continue
             msg = entry.get("message")
             if not isinstance(msg, dict):
                 continue
             top_role = "asst" if etype == "assistant" else "user"
             for kind, text in iter_content_fragments(msg.get("content")):
-                yield (top_role if kind == "text" else kind, text)
+                yield (top_role if kind == "text" else kind, text, ts)
 
 
 _WORD_BOUNDARY_RE = re.compile(r"[\s\n\r\t.,;:!?()\[\]{}'\"<>/\\|=+*&^%$#@~`-]")
@@ -2950,6 +2978,50 @@ def _boundary_score(text: str, start: int, end: int) -> int:
 
 # Role tags for tool input/output — ranked below prose when choosing snippets.
 _TOOLISH_ROLES = {"tool", "tool_in"}
+
+
+def _role_selected(role: str, exclude: set, include: set) -> bool:
+    if any(ex in role for ex in exclude):
+        return False
+    return not include or any(inc in role for inc in include)
+
+
+def first_match_time(
+    session_path: Path,
+    query: str,
+    case_sensitive: bool = False,
+    exclude_types: Optional[set] = None,
+    include_types: Optional[set] = None,
+) -> Optional[datetime]:
+    """When the earliest message containing `query` was written, under the same
+    literal match and type filters as the snippets. None when that message's entry
+    has no timestamp.
+
+    A session's mtime is its *last* activity, which can be a day after the
+    message a search is really asking about; dating the match by it misdated
+    an event by most of a day.
+    """
+    if not query:
+        return None
+    pattern = re.compile(re.escape(query), 0 if case_sensitive else re.IGNORECASE)
+    exclude = exclude_types or set()
+    include = include_types or set()
+    for role, text, ts in iter_session_prose_timed(session_path):
+        if _role_selected(role, exclude, include) and pattern.search(text):
+            return _parse_ts(ts) if ts else None
+    return None
+
+
+def _local_stamp(dt: datetime, with_year: bool) -> str:
+    """Local time with its zone name, taken for that date: PDT and PST both
+    occur in one search, so a fixed label would be wrong for half the rows."""
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M %Z" if with_year else "%m-%d %H:%M %Z")
+
+
+def _search_times(match_at: Optional[datetime], mtime: float, with_year: bool) -> str:
+    match = _local_stamp(match_at, with_year) if match_at else "?"
+    last = _local_stamp(datetime.fromtimestamp(mtime).astimezone(), with_year)
+    return f"match {match}  last {last}"
 
 
 def get_session_matches(
@@ -2990,9 +3062,7 @@ def get_session_matches(
         return prose_n >= max_matches or len(candidates) >= hard_cap
 
     for role, text in iter_session_prose(session_path):
-        if any(ex in role for ex in exclude):
-            continue
-        if include and not any(inc in role for inc in include):
+        if not _role_selected(role, exclude, include):
             continue
         is_prose = role not in _TOOLISH_ROLES
         for m in pattern.finditer(text):
@@ -3351,7 +3421,7 @@ def search_content_mode(args, console: Optional[Console]):
     per_session = max_matches if force_context else 1
     snippet_width = width if force_context else min(width, 30)
 
-    enriched: List[Tuple[Path, Path, float, List[Tuple[str, str]]]] = []
+    enriched: List[Tuple[Path, Path, float, List[Tuple[str, str]], Optional[datetime]]] = []
     for proj, sess, mtime in matches:
         if len(enriched) >= count:  # checked first, so -n 0 / negative shows none
             break
@@ -3366,7 +3436,14 @@ def search_content_mode(args, console: Optional[Console]):
         )
         if not snippets:
             continue  # query only hit base64/excluded fields — not real prose
-        enriched.append((proj, sess, mtime, snippets))
+        match_at = first_match_time(
+            sess,
+            query,
+            case_sensitive=case_sensitive,
+            exclude_types=exclude_types,
+            include_types=include_types,
+        )
+        enriched.append((proj, sess, mtime, snippets, match_at))
 
     # -r picks a result and hands off to the resume machinery instead of listing.
     # An offset addresses the rows we'd show (enriched, in display order); a
@@ -3394,7 +3471,7 @@ def search_content_mode(args, console: Optional[Console]):
             # Subagent rows show the agent's id; map it to the session that
             # owns it, which is what can be resumed.
             needle = resume_sel.removeprefix("agent-")
-            for _, row_sess, _, _ in enriched:
+            for _, row_sess, _, _, _ in enriched:
                 row_owner = subagent_owner(row_sess)
                 if row_owner and needle in row_sess.stem.removeprefix("agent-"):
                     ident = row_owner.stem
@@ -3437,7 +3514,7 @@ def search_content_mode(args, console: Optional[Console]):
 
     # Number rows so `-r N` is discoverable: the leading index is the offset.
     idx_w = len(str(len(enriched)))
-    for row_i, (proj, sess, mtime, snippets) in enumerate(enriched, start=1):
+    for row_i, (proj, sess, mtime, snippets, match_at) in enumerate(enriched, start=1):
         idx_str = f"{row_i:>{idx_w}}"
         proj_name = format_project_identifier(proj.name)
         owner = subagent_owner(sess)
@@ -3445,7 +3522,7 @@ def search_content_mode(args, console: Optional[Console]):
         if force_context:
             # Expanded: full id, working dir, where edits/PRs landed, all snippets.
             working_dir = project_folder_to_cwd(proj.name)
-            time_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            time_str = _search_times(match_at, mtime, with_year=True)
             path_display = str(sess).replace(str(Path.home()), "~", 1)
             work_line = ""
             if show_work:
@@ -3491,7 +3568,7 @@ def search_content_mode(args, console: Optional[Console]):
             # stem[:8] is the literal "rollout-" for every rollout, so route both
             # stores through the shared helper.
             short_id = sess.stem[len("agent-") :][:8] if owner else short_id_for_path(sess)
-            time_str = datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M")
+            time_str = _search_times(match_at, mtime, with_year=False)
             snippet = snippets[0][1]
             if no_color:
                 line = f"{idx_str}  {short_id}  {time_str}  {proj_name}{sub_note}"
@@ -4555,36 +4632,42 @@ def _file_is_codex(file_path) -> bool:
 
 
 def _codex_iter_prose_entries(entries: List[Dict]) -> Iterator[Tuple[str, str]]:
-    """(role_tag, text) over a Codex rollout, mirroring iter_content_fragments' kinds.
+    for role, text, _ts in _codex_iter_prose_timed(entries):
+        yield (role, text)
+
+
+def _codex_iter_prose_timed(entries: List[Dict]) -> Iterator[Tuple[str, str, Optional[str]]]:
+    """(role_tag, text, timestamp) over a Codex rollout, mirroring iter_content_fragments' kinds.
 
     Uses the UI-facing event_msg turns (user_message/agent_message/agent_reasoning) and
     the exec tool I/O; skips response_item/message, which duplicates the model I/O and
     would double-count every turn.
     """
     for e in entries:
+        ts = e.get("timestamp") if isinstance(e.get("timestamp"), str) else None
         p = _codex_payload(e)
         pt = p.get("type")
         if pt == "user_message":
             msg = p.get("message")
             if isinstance(msg, str) and msg.strip():
-                yield ("user", msg)
+                yield ("user", msg, ts)
         elif pt == "agent_message":
             msg = p.get("message")
             if isinstance(msg, str) and msg.strip():
-                yield ("asst", msg)
+                yield ("asst", msg, ts)
         elif pt == "agent_reasoning":
             msg = p.get("text")
             if isinstance(msg, str) and msg.strip():
-                yield ("think", msg)
+                yield ("think", msg, ts)
         elif pt in ("custom_tool_call", "function_call"):
             for k in ("input", "arguments"):
                 v = p.get(k)
                 if isinstance(v, str) and v:
-                    yield ("tool_in", v)
+                    yield ("tool_in", v, ts)
         elif pt in ("custom_tool_call_output", "function_call_output"):
             v = p.get("output")
             if isinstance(v, str) and v:
-                yield ("tool", v)
+                yield ("tool", v, ts)
 
 
 def _codex_extract_metadata(entries: List[Dict]) -> SessionMetadata:
