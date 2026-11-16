@@ -281,6 +281,53 @@ def test_size_key_cycles_and_old_small_choice_carries_over(browser, viewer):
     page.close()
 
 
+def test_fast_double_size_key_takes_two_steps(browser, viewer):
+    """The swap (and its storage write) runs a frame later inside a view
+    transition; the second press must not re-read the old value."""
+    base, _, _ = viewer
+    page = browser.new_page()
+    page.goto(base + "/")
+    page.keyboard.press("f")
+    page.keyboard.press("f")
+    expect(page.locator("html")).to_have_attribute("data-size", "xlarge")
+    page.close()
+
+
+def test_size_and_theme_keys_work_inside_the_panel(browser, viewer):
+    """The panel footer names f and t; focus sits in the panel once open."""
+    base, _, _ = viewer
+    page = browser.new_page()
+    page.goto(base + "/")
+    page.keyboard.press(",")
+    expect(page.locator("#prefs")).to_be_visible()
+    page.keyboard.press("f")
+    expect(page.locator("html")).to_have_attribute("data-size", "large")
+    expect(page.locator('#prefs button[data-pref="size"][data-value="large"]')).to_have_attribute(
+        "aria-pressed", "true"
+    )
+    page.close()
+
+
+def test_a_slow_font_load_does_not_override_a_later_choice(browser, viewer):
+    """Hold every font file unanswered so the Atkinson load runs to its cap,
+    then pick System meanwhile: System must stand after the cap expires."""
+    base, _, _ = viewer
+    page = browser.new_page()
+    held = []
+    page.route("https://fonts.gstatic.com/**", lambda route: held.append(route))
+    # Held fonts would stall the load event (Instrument Sans loads at startup).
+    page.goto(base + "/", wait_until="domcontentloaded")
+    expect(page.locator("#status")).to_have_text("live")
+    page.keyboard.press(",")
+    page.locator('#prefs button[data-value="atkinson"]').click()
+    page.locator('#prefs button[data-value="system"]').click()
+    expect(page.locator("html")).to_have_attribute("data-font", "system")
+    page.wait_for_timeout(2000)  # past loadFaces' 1.5s cap
+    expect(page.locator("html")).to_have_attribute("data-font", "system")
+    assert page.evaluate("localStorage.getItem('mdfeed-font')") == "system"
+    page.close()
+
+
 def test_theme_button_still_cycles(browser, viewer):
     base, _, _ = viewer
     page = browser.new_page()

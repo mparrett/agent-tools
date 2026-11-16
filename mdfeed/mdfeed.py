@@ -1741,17 +1741,31 @@ INDEX_HTML = """<!DOCTYPE html>
     $preview.scrollTop += (a.el.getBoundingClientRect().top - top) - a.offset;
   }
 
+  // The chosen value lives here, set the moment a choice is made. Storage is
+  // only persistence: a write can fail (blocked site data), and the swap that
+  // writes it runs a frame later inside the view transition, so reading the
+  // current value back from storage lost steps on a fast double 'f'.
+  const prefState = {};
+  for (const [name, p] of Object.entries(PREFS)) prefState[name] = readPref(p);
+  // Bumped per change; a font change that finishes loading after a newer
+  // choice was made is dropped instead of overwriting it.
+  const prefSeq = {};
+
   function renderPrefsChrome() {
-    $themeToggle.textContent = readPref(PREFS.theme);
+    $themeToggle.textContent = prefState.theme;
     if ($prefs.hidden) return;
     for (const btn of $prefs.querySelectorAll('button[data-pref]')) {
-      btn.setAttribute('aria-pressed', String(readPref(PREFS[btn.dataset.pref]) === btn.dataset.value));
+      btn.setAttribute('aria-pressed', String(prefState[btn.dataset.pref] === btn.dataset.value));
     }
   }
 
   async function setPref(name, value) {
     const p = PREFS[name];
+    const seq = prefSeq[name] = (prefSeq[name] || 0) + 1;
+    prefState[name] = value;
+    renderPrefsChrome();
     if (name === 'font') await loadFaces(value);
+    if (seq !== prefSeq[name]) return;
     const swap = () => {
       const anchor = captureAnchor();
       try {
@@ -1770,7 +1784,7 @@ INDEX_HTML = """<!DOCTYPE html>
   function cyclePref(name) {
     const p = PREFS[name];
     const vals = p.opts.map(o => o[0]);
-    const next = vals[(vals.indexOf(readPref(p)) + 1) % vals.length];
+    const next = vals[(vals.indexOf(prefState[name]) + 1) % vals.length];
     setPref(name, next);
     toast(p.label.toLowerCase() + ': ' + p.opts.find(o => o[0] === next)[1].toLowerCase());
   }
@@ -1811,16 +1825,21 @@ INDEX_HTML = """<!DOCTYPE html>
     const btn = e.target.closest('button');
     if (!btn) return;
     if (btn.id === 'prefs-reset') {
-      for (const [name, p] of Object.entries(PREFS)) if (readPref(p) !== p.def) setPref(name, p.def);
+      for (const [name, p] of Object.entries(PREFS)) if (prefState[name] !== p.def) setPref(name, p.def);
       return;
     }
     if (btn.dataset.pref) setPref(btn.dataset.pref, btn.dataset.value);
   });
   // Keys typed inside the panel stay there: Esc or ',' closes it, arrows move
-  // within a row, and the global single-letter shortcuts must not fire while a
-  // segment has focus.
+  // within a row, f/t (named in the panel footer) still cycle size and theme,
+  // and the other global shortcuts must not fire while a segment has focus.
   $prefs.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' || e.key === ',') { e.preventDefault(); closePrefs(true); }
+    else if (e.key === 'f' || e.key === 't') {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      e.preventDefault();
+      (e.key === 'f' ? cycleSize : cycleTheme)();
+    }
     else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       const seg = [...e.target.parentElement.querySelectorAll('button')];
       const i = seg.indexOf(e.target);
@@ -1839,8 +1858,11 @@ INDEX_HTML = """<!DOCTYPE html>
 
   // Another tab changed a pref: follow it without animating or re-storing.
   window.addEventListener('storage', (e) => {
-    for (const p of Object.values(PREFS)) {
-      if (e.key === p.key) { applyPref(p, readPref(p)); renderPrefsChrome(); }
+    for (const [name, p] of Object.entries(PREFS)) {
+      if (e.key !== p.key) continue;
+      prefState[name] = readPref(p);
+      applyPref(p, prefState[name]);
+      renderPrefsChrome();
     }
   });
   renderPrefsChrome();
