@@ -747,13 +747,23 @@ def cmd_timeline(args) -> int:
         return 0
     path = Path(args.output).expanduser() if args.output else timeline.default_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    bak = timeline.backup(path, datetime.now(timezone.utc))
     path.write_text(html)
     if args.open:
         webbrowser.open(path.resolve().as_uri())
     names = [w.name or w.id for w in wss]
     if args.json:
-        return _emit_json({"path": str(path), "bytes": len(html.encode()), "workstreams": names})
+        return _emit_json(
+            {
+                "path": str(path),
+                "bytes": len(html.encode()),
+                "workstreams": names,
+                "backup": str(bak) if bak else None,
+            }
+        )
     print(f"{path}  ({len(names)} workstream{'' if len(names) == 1 else 's'})")
+    if bak:
+        print(f"  previous copy: {bak}")
     return 0
 
 
@@ -1223,7 +1233,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "-o",
         "--output",
-        help="file to write, or - for stdout (default: $XDG_CACHE_HOME/workstream/timeline.html)",
+        help="file to write, or - for stdout (default: $XDG_CACHE_HOME/workstream/timeline.html);"
+        " an existing file is first copied to <file>.<YYYYmmdd-HHMM>Z.bak",
     )
     sp.add_argument("--open", action="store_true", help="open the page in the default browser")
     common(sp)

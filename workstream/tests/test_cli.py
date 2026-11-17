@@ -1205,3 +1205,46 @@ def test_sync_interactive_needs_a_terminal(capsys, monkeypatch):
         cli.main(["sync", "--interactive"])
     with pytest.raises(SystemExit, match="neither --json nor --dry-run"):
         cli.main(["sync", "--interactive", "--dry-run"])
+
+
+def test_timeline_backup_never_lets_an_overwrite_go_unbacked(tmp_path):
+    page = tmp_path / "timeline.html"
+    t0 = datetime(2026, 11, 17, 14, 32, 5, tzinfo=timezone.utc)
+    assert timeline.backup(page, t0) is None  # nothing to protect yet
+
+    page.write_text("A")
+    bak = timeline.backup(page, t0)
+    assert bak == tmp_path / "timeline.html.20261117-1432Z.bak" and bak.read_text() == "A"
+    # Same page again this minute: reuse the backup rather than pile up copies.
+    assert timeline.backup(page, t0 + timedelta(seconds=10)) == bak
+    # A different page this minute still gets its own copy, and A survives.
+    page.write_text("B")
+    b = timeline.backup(page, t0 + timedelta(seconds=40))
+    assert b.name == "timeline.html.20261117-143245Z.bak" and b.read_text() == "B"
+    page.write_text("C")
+    c = timeline.backup(page, t0 + timedelta(seconds=40))
+    assert c.name == "timeline.html.20261117-143245-2Z.bak" and c.read_text() == "C"
+    assert bak.read_text() == "A"
+
+    for m in range(1, 13):
+        timeline.backup(page, t0 + timedelta(minutes=m))
+    assert len(list(tmp_path.glob("timeline.html.*.bak"))) == 15
+
+
+def test_timeline_backup_stamps_in_utc_across_fall_back(tmp_path):
+    page = tmp_path / "timeline.html"
+    pdt, pst = timezone(timedelta(hours=-7)), timezone(timedelta(hours=-8))
+    page.write_text("first 01:30")
+    a = timeline.backup(page, datetime(2026, 11, 1, 1, 30, tzinfo=pdt))
+    page.write_text("second 01:30")
+    b = timeline.backup(page, datetime(2026, 11, 1, 1, 30, tzinfo=pst))
+    assert a != b and b.read_text() == "second 01:30"
+
+
+@needs_weft
+def test_timeline_reports_the_backup_of_an_overwritten_file(env, capsys, tmp_path):
+    out = tmp_path / "t.html"
+    out.write_text("hand-written notes")
+    d = run_json(capsys, "timeline", "default-track", "-o", str(out))
+    assert Path(d["backup"]).read_text() == "hand-written notes"
+    assert timeline.extract(out.read_text())["workstreams"]
