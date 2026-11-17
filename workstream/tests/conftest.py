@@ -10,7 +10,12 @@ from synthetic import SyntheticStore, build_all
 def _isolate_weft_actor(monkeypatch):
     """`workstream hook` sets WEFT_ACTOR in os.environ, and the session lookup
     is cached per process; neither may carry from one test to the next."""
-    from workstream import store
+    from workstream import seam, store
+
+    # Forks are read from the hook log and cached per process; a test sees only
+    # the log its own store writes, never this machine's.
+    monkeypatch.setenv("CLAUDE_HOOK_LOG_DIR", "/nonexistent/claude-hooks")
+    seam._cl._fork_session_ids.cache_clear()
 
     # setenv then delenv: teardown removes the key even if a test set it.
     monkeypatch.setenv("WEFT_ACTOR", "")

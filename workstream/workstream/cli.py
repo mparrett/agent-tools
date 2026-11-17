@@ -613,7 +613,12 @@ def _print_sessions(con: Console, fr: frontier.Frontier, local: bool, full: bool
         f = s.facts
         state = "live" if s.live else (s.lifecycle or "no lifecycle")
         drop = "" if not s.dropped else "  [red]no frontier recorded[/red]"
-        con.print(f"  {f.ref}  {s.role}  {state}  {_span(s, local)}  ctx {f.peak_context:,}{drop}")
+        fork = ""
+        if s.fork:
+            fork = f"  ⑂ fork of {f.origin[:8]}" if f.origin else "  ⑂ fork"
+        con.print(
+            f"  {f.ref}  {s.role}  {state}  {_span(s, local)}  ctx {f.peak_context:,}{fork}{drop}"
+        )
         for iv in s.intervals:
             con.print(f"      canonical {_ts(iv.at, local)} → {_interval_end(iv, fr.as_of, local)}")
         subs = by_parent.get(f.id, [])

@@ -8,6 +8,7 @@ The module filename has a hyphen, so it can't be imported by name — load it fr
 its path with importlib.
 """
 
+import gzip
 import importlib.util
 import io
 import json
@@ -30,7 +31,12 @@ _spec.loader.exec_module(cl)
 
 
 @pytest.fixture(autouse=True)
-def _no_claude_agents(monkeypatch):
+def _no_claude_agents(monkeypatch, tmp_path):
+    # Forks come from this machine's hook log, cached under ~/.cache; a test
+    # sees only the log it writes, and its cache dies with tmp_path.
+    monkeypatch.setenv("CLAUDE_HOOK_LOG_DIR", str(tmp_path / "hook-logs"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    cl._fork_session_ids.cache_clear()
     # The real CLI describes this machine's sessions, not a test's registry.
     monkeypatch.setattr(cl, "_agents_session_ids", lambda: None)
     monkeypatch.setattr(cl, "_AGENTS_ANSWER", {})
@@ -4444,3 +4450,70 @@ def test_compaction_line_keeps_a_zero_count_and_untimed_agents_go_last():
     text = "\n".join(ln.plain for ln in cl._lineage_lines({"s1": node}, [], "s1", 8))
     assert "⟳ manual compaction" in text and "· 12k → 0" in text
     assert text.index("⟳ manual compaction") < text.index("⎇ Blank")
+
+
+def _hook_line(sid: str, event: str = "SessionStart", source: str = "fork") -> str:
+    data = {"session_id": sid, "hook_event_name": event, "source": source}
+    return json.dumps({"timestamp": "2026-11-17T08:39:00", "hook_data": data}) + "\n"
+
+
+def test_fork_ids_come_from_fork_session_starts_in_every_log_file(tmp_path):
+    logs = tmp_path / "hook-logs"
+    logs.mkdir()
+    (logs / "hook_events.log").write_text(
+        _hook_line(_LIN["root"])
+        + _hook_line(_LIN["cleared"], source="clear")
+        + _hook_line(_LIN["reader"], event="UserPromptSubmit")
+    )
+    with gzip.open(logs / "hook_events.log.2.gz", "wt") as fh:
+        fh.write(_hook_line(_LIN["sdk"]))
+    assert cl._fork_session_ids() == {_LIN["root"], _LIN["sdk"]}
+    assert cl.is_fork(_LIN["root"]) and not cl.is_fork(_LIN["cleared"])
+
+
+def test_fork_cache_reads_an_appended_log_on_from_its_last_complete_line(tmp_path):
+    logs = tmp_path / "hook-logs"
+    logs.mkdir()
+    live = logs / "hook_events.log"
+    half = _hook_line(_LIN["reader"])
+    live.write_text(_hook_line(_LIN["root"]) + half[:20])  # a line mid-write
+    assert cl._fork_session_ids() == {_LIN["root"]}
+    with live.open("a") as fh:
+        fh.write(half[20:] + _hook_line(_LIN["sdk"]))
+    cl._fork_session_ids.cache_clear()
+    assert cl._fork_session_ids() == {_LIN["root"], _LIN["reader"], _LIN["sdk"]}
+    # Rotation renames without rewriting; the cached entry follows the inode.
+    live.rename(logs / "hook_events.log.1")
+    live.write_text("")
+    cl._fork_session_ids.cache_clear()
+    assert cl._fork_session_ids() == {_LIN["root"], _LIN["reader"], _LIN["sdk"]}
+    cache = json.loads((tmp_path / "xdg-cache" / "claude-ls" / "forks.json").read_text())
+    assert len(cache["files"]) == 2
+
+
+def test_no_hook_log_means_no_forks(tmp_path):
+    assert cl._fork_session_ids() == frozenset()
+
+
+def test_fork_labels_name_the_pointer_as_the_parent_never_as_a_clear():
+    assert cl._lineage_note(None, fork=True) == "⑂ fork"
+    assert cl._lineage_note("root-1-abcdef", fork=True) == "⑂ fork of root-1-a"
+    assert cl._lineage_note("root-1-abcdef") == "↺ cleared from root-1-a"
+    assert cl._lineage_note(None) == ""
+    assert cl.format_lineage([], "x", None, fork=True) == "⑂ fork"
+    assert cl.format_lineage([], "x", "root-1-abcdef", fork=True).startswith("forked from root-1-a")
+
+
+def test_lineage_tree_marks_forks_on_the_edge_or_the_root(tmp_path, capsys):
+    base = _lineage_store(tmp_path)
+    logs = tmp_path / "hook-logs"
+    logs.mkdir()
+    (logs / "hook_events.log").write_text(_hook_line(_LIN["cleared"]) + _hook_line(_LIN["root"]))
+    cl.lineage_mode(_lin_args(base, "reader", json=False), None)
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith(f"⑂ fork {_LIN['root'][:8]}")
+    assert f"└── ⑂ forked {_LIN['cleared'][:8]}" in out
+    assert "↺ cleared" not in out
+    doc = _lin_json(base, "reader", capsys)
+    forks = {s["sid"] for s in doc["sessions"] if s["fork"]}
+    assert forks == {_LIN["root"], _LIN["cleared"]}
