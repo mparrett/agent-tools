@@ -4536,11 +4536,13 @@ def test_lineage_tree_marks_forks_on_the_edge_or_the_root(tmp_path, capsys):
     logs = tmp_path / "hook-logs"
     logs.mkdir()
     (logs / "hook_events.log").write_text(_hook_line(_LIN["cleared"]) + _hook_line(_LIN["root"]))
-    cl.lineage_mode(_lin_args(base, "reader", json=False), None)
+    # Seeded where only the /clear pointer is needed to reach the root: the
+    # handoff and mention edges need rg, which CI doesn't have.
+    cl.lineage_mode(_lin_args(base, "cleared", json=False), None)
     out = capsys.readouterr().out
     assert out.splitlines()[0].startswith(f"⑂ fork {_LIN['root'][:8]}")
     assert f"└── ⑂ forked {_LIN['cleared'][:8]}" in out
     assert "↺ cleared" not in out
-    doc = _lin_json(base, "reader", capsys)
+    doc = _lin_json(base, "cleared", capsys)
     forks = {s["sid"] for s in doc["sessions"] if s["fork"]}
     assert forks == {_LIN["root"], _LIN["cleared"]}
