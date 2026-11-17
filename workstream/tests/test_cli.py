@@ -1205,3 +1205,29 @@ def test_sync_interactive_needs_a_terminal(capsys, monkeypatch):
         cli.main(["sync", "--interactive"])
     with pytest.raises(SystemExit, match="neither --json nor --dry-run"):
         cli.main(["sync", "--interactive", "--dry-run"])
+
+
+def test_timeline_backup_keeps_the_pre_minute_copy_and_every_minute(tmp_path):
+    page = tmp_path / "timeline.html"
+    t0 = datetime(2026, 11, 17, 14, 32, 5)
+    assert timeline.backup(page, t0) is None  # nothing to protect yet
+
+    page.write_text("A")
+    bak = timeline.backup(page, t0)
+    assert bak == tmp_path / "timeline.html.20261117-1432.bak" and bak.read_text() == "A"
+    # A second run in the same minute must not replace A with the seconds-old page.
+    page.write_text("B")
+    assert timeline.backup(page, t0 + timedelta(seconds=30)) == bak and bak.read_text() == "A"
+
+    for m in range(1, 13):
+        timeline.backup(page, t0 + timedelta(minutes=m))
+    assert len(list(tmp_path.glob("timeline.html.*.bak"))) == 13
+
+
+@needs_weft
+def test_timeline_reports_the_backup_of_an_overwritten_file(env, capsys, tmp_path):
+    out = tmp_path / "t.html"
+    out.write_text("hand-written notes")
+    d = run_json(capsys, "timeline", "default-track", "-o", str(out))
+    assert Path(d["backup"]).read_text() == "hand-written notes"
+    assert timeline.extract(out.read_text())["workstreams"]

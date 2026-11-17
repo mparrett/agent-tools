@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import datetime
 from importlib import resources
 from pathlib import Path
+from typing import Optional
 
 MARKER = "/*__DATA__*/"
 
@@ -22,6 +24,26 @@ def default_path() -> Path:
         return Path(override) / "timeline.html"
     xdg = os.environ.get("XDG_CACHE_HOME")
     return (Path(xdg) if xdg else Path.home() / ".cache") / "workstream" / "timeline.html"
+
+
+def backup(path: Path, now: datetime) -> Optional[Path]:
+    """Copy `path` aside before it is rewritten, as `<name>.<YYYYmmdd-HHMM>.bak`.
+
+    Overwriting is the point of the command, so this never refuses; it only
+    makes the overwrite recoverable. A narrower `--since` or workstream list
+    rewrites the page with a subset of what it held, so the old page is worth
+    keeping as an audit trail, and nothing here prunes the backups.
+
+    One backup per minute, stamped with the time of the copy: a later run in the
+    same minute leaves it alone, so it holds what was there before that minute's
+    first write rather than the previous few seconds' run.
+    """
+    if not path.is_file():
+        return None
+    bak = path.with_name(f"{path.name}.{now.strftime('%Y%m%d-%H%M')}.bak")
+    if not bak.exists():
+        shutil.copy2(path, bak)
+    return bak
 
 
 def render(shows: list[dict], generated_at: datetime) -> str:
