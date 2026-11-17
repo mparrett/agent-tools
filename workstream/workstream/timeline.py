@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 from typing import Optional
@@ -27,23 +27,34 @@ def default_path() -> Path:
 
 
 def backup(path: Path, now: datetime) -> Optional[Path]:
-    """Copy `path` aside before it is rewritten, as `<name>.<YYYYmmdd-HHMM>.bak`.
+    """Copy `path` aside before it is rewritten, as `<name>.<YYYYmmdd-HHMM>Z.bak`.
 
     Overwriting is the point of the command, so this never refuses; it only
     makes the overwrite recoverable. A narrower `--since` or workstream list
     rewrites the page with a subset of what it held, so the old page is worth
     keeping as an audit trail, and nothing here prunes the backups.
 
-    One backup per minute, stamped with the time of the copy: a later run in the
-    same minute leaves it alone, so it holds what was there before that minute's
-    first write rather than the previous few seconds' run.
+    Stamped in UTC with the time of the copy, so the hour repeated when clocks
+    fall back can't reuse an earlier name. Usually one backup per minute: a rerun
+    whose page matches a backup already taken that minute reuses it, and one
+    whose page differs (edited, or written by an earlier run) gets seconds added,
+    so no overwrite goes unbacked.
     """
     if not path.is_file():
         return None
-    bak = path.with_name(f"{path.name}.{now.strftime('%Y%m%d-%H%M')}.bak")
-    if not bak.exists():
-        shutil.copy2(path, bak)
-    return bak
+    now = now.astimezone(timezone.utc)
+    data = path.read_bytes()
+    minute = now.strftime("%Y%m%d-%H%M")
+    stamps = [minute, minute + now.strftime("%S")]
+    stamps += [f"{stamps[1]}-{n}" for n in range(2, 100)]
+    for stamp in stamps:
+        bak = path.with_name(f"{path.name}.{stamp}Z.bak")
+        if not bak.exists():
+            shutil.copy2(path, bak)
+            return bak
+        if bak.read_bytes() == data:
+            return bak
+    raise RuntimeError(f"no free backup name for {path}")
 
 
 def render(shows: list[dict], generated_at: datetime) -> str:

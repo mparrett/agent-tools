@@ -747,7 +747,7 @@ def cmd_timeline(args) -> int:
         return 0
     path = Path(args.output).expanduser() if args.output else timeline.default_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    bak = timeline.backup(path, datetime.now())
+    bak = timeline.backup(path, datetime.now(timezone.utc))
     path.write_text(html)
     if args.open:
         webbrowser.open(path.resolve().as_uri())
@@ -1234,7 +1234,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-o",
         "--output",
         help="file to write, or - for stdout (default: $XDG_CACHE_HOME/workstream/timeline.html);"
-        " an existing file is first copied to <file>.<YYYYmmdd-HHMM>.bak",
+        " an existing file is first copied to <file>.<YYYYmmdd-HHMM>Z.bak",
     )
     sp.add_argument("--open", action="store_true", help="open the page in the default browser")
     common(sp)
