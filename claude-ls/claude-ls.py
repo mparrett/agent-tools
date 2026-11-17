@@ -2087,13 +2087,18 @@ def format_lineage(
     """One line for the card: where this session sits among the sessions its
     pane has been cleared through. '' when it is alone, was never cleared, and
     is not a fork."""
+    if fork:
+        # A fork's root pointer names the family it forked from, not a pane it
+        # was cleared through, so the pane position would place it among
+        # sessions it left.
+        return f"⑂ fork of {origin[:8]}" if origin else "⑂ fork"
     if not origin and len(chain) <= 1:
-        return "⑂ fork" if fork else ""
+        return ""
     ids = [m.session_id for m in chain]
-    parts: List[str] = ["⑂ fork"] if fork and not origin else []
+    parts: List[str] = []
     if origin:
         gone = "" if origin in ids else " (root transcript gone)"
-        parts.append(f"{'forked' if fork else 'cleared'} from {origin[:8]}{gone}")
+        parts.append(f"cleared from {origin[:8]}{gone}")
     if len(chain) > 1:
         pos = ids.index(session_id) + 1 if session_id in ids else 0
         if pos:
@@ -2118,7 +2123,11 @@ def _live_descendant(
     ids = [m.session_id for m in chain]
     if session_id not in ids:
         return None
-    later = {m.session_id: m for m in chain[ids.index(session_id) + 1 :]}
+    # A fork has its own transcript; running it beside the session it forked
+    # from is not the same history in two processes.
+    later = {
+        m.session_id: m for m in chain[ids.index(session_id) + 1 :] if not is_fork(m.session_id)
+    }
     if not later:
         return None
     for rec in _live_registry():
@@ -2150,6 +2159,7 @@ def _live_descendant(
 _HOOK_LOG_NAME = "hook_events.log"
 _FORK_SID_RE = re.compile(rb'"session_id":\s*"([0-9a-f-]{36})"')
 _FORK_SOURCE_RE = re.compile(rb'"source":\s*"fork"')
+_SESSION_START_RE = re.compile(rb'"hook_event_name":\s*"SessionStart"')
 
 
 def _hook_log_dir() -> Path:
@@ -2166,7 +2176,9 @@ def _forks_cache_path() -> Path:
 def _fork_ids_in(data: bytes) -> Set[str]:
     found: Set[str] = set()
     for line in data.split(b"\n"):
-        if b"SessionStart" in line and _FORK_SOURCE_RE.search(line):
+        # The cheap test first; the exact key keeps a tool call that merely
+        # mentions both strings in its input from counting.
+        if b'"fork"' in line and _SESSION_START_RE.search(line) and _FORK_SOURCE_RE.search(line):
             m = _FORK_SID_RE.search(line)
             if m:
                 found.add(m.group(1).decode())
@@ -2183,10 +2195,17 @@ def _fork_session_ids() -> frozenset:
     except OSError:
         return frozenset()
     cache_path = _forks_cache_path()
+    # One cache serves every log dir a run may point at (CLAUDE_HOOK_LOG_DIR,
+    # tests); each dir keeps its own entry so a scan of one never drops another's.
     try:
-        cached = json.loads(cache_path.read_text()).get("files", {})
-    except (OSError, ValueError, AttributeError):
-        cached = {}
+        doc = json.loads(cache_path.read_text())
+        dirs = doc.get("dirs", {}) if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        dirs = {}
+    if not isinstance(dirs, dict):
+        dirs = {}
+    dir_key = str(log_dir.resolve() if log_dir.exists() else log_dir)
+    cached = dirs.get(dir_key) if isinstance(dirs.get(dir_key), dict) else {}
     fresh: Dict[str, Dict] = {}
     forks: Set[str] = set()
     for f in files:
@@ -2220,11 +2239,12 @@ def _fork_session_ids() -> frozenset:
             continue
         fresh[key] = entry
         forks.update(entry["forks"])
-    if fresh != cached:
+    if fresh != cached and (fresh or dir_key in dirs):
+        dirs[dir_key] = fresh
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps({"files": fresh}))
+            tmp.write_text(json.dumps({"dirs": dirs}))
             os.replace(tmp, cache_path)
         except OSError:
             pass

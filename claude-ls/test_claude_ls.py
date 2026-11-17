@@ -4464,6 +4464,19 @@ def test_fork_ids_come_from_fork_session_starts_in_every_log_file(tmp_path):
         _hook_line(_LIN["root"])
         + _hook_line(_LIN["cleared"], source="clear")
         + _hook_line(_LIN["reader"], event="UserPromptSubmit")
+        # A tool call whose input mentions both strings is not a fork.
+        + json.dumps(
+            {
+                "timestamp": "2026-11-17T08:40:00",
+                "hook_data": {
+                    "session_id": _LIN["mentioner"],
+                    "hook_event_name": "PreToolUse",
+                    "tool_input": {"note": "SessionStart", "opts": {"source": "fork"}},
+                },
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
     )
     with gzip.open(logs / "hook_events.log.2.gz", "wt") as fh:
         fh.write(_hook_line(_LIN["sdk"]))
@@ -4471,7 +4484,7 @@ def test_fork_ids_come_from_fork_session_starts_in_every_log_file(tmp_path):
     assert cl.is_fork(_LIN["root"]) and not cl.is_fork(_LIN["cleared"])
 
 
-def test_fork_cache_reads_an_appended_log_on_from_its_last_complete_line(tmp_path):
+def test_fork_cache_reads_an_appended_log_on_from_its_last_complete_line(tmp_path, monkeypatch):
     logs = tmp_path / "hook-logs"
     logs.mkdir()
     live = logs / "hook_events.log"
@@ -4487,8 +4500,20 @@ def test_fork_cache_reads_an_appended_log_on_from_its_last_complete_line(tmp_pat
     live.write_text("")
     cl._fork_session_ids.cache_clear()
     assert cl._fork_session_ids() == {_LIN["root"], _LIN["reader"], _LIN["sdk"]}
-    cache = json.loads((tmp_path / "xdg-cache" / "claude-ls" / "forks.json").read_text())
-    assert len(cache["files"]) == 2
+    cache_file = tmp_path / "xdg-cache" / "claude-ls" / "forks.json"
+    [entry] = json.loads(cache_file.read_text())["dirs"].values()
+    assert len(entry) == 2
+    # Scanning another log dir, or none, keeps this dir's entry.
+    monkeypatch.setenv("CLAUDE_HOOK_LOG_DIR", str(tmp_path / "missing"))
+    cl._fork_session_ids.cache_clear()
+    assert cl._fork_session_ids() == frozenset()
+    other = tmp_path / "other-logs"
+    other.mkdir()
+    (other / "hook_events.log").write_text(_hook_line(_LIN["both"]))
+    monkeypatch.setenv("CLAUDE_HOOK_LOG_DIR", str(other))
+    cl._fork_session_ids.cache_clear()
+    assert cl._fork_session_ids() == {_LIN["both"]}
+    assert len(json.loads(cache_file.read_text())["dirs"]) == 2
 
 
 def test_no_hook_log_means_no_forks(tmp_path):
@@ -4501,7 +4526,9 @@ def test_fork_labels_name_the_pointer_as_the_parent_never_as_a_clear():
     assert cl._lineage_note("root-1-abcdef") == "↺ cleared from root-1-a"
     assert cl._lineage_note(None) == ""
     assert cl.format_lineage([], "x", None, fork=True) == "⑂ fork"
-    assert cl.format_lineage([], "x", "root-1-abcdef", fork=True).startswith("forked from root-1-a")
+    # A fork never claims a place in the pane its pointer names.
+    chain = [cl.ChainMember(Path(f"{i}.jsonl"), i, n, i == "f") for n, i in enumerate("rcf")]
+    assert cl.format_lineage(chain, "f", "root-1-abcdef", fork=True) == "⑂ fork of root-1-a"
 
 
 def test_lineage_tree_marks_forks_on_the_edge_or_the_root(tmp_path, capsys):
