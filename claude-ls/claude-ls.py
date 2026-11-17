@@ -21,6 +21,7 @@ Run with --help or <command> --help for full options.
 import argparse
 import concurrent.futures
 import functools
+import gzip
 import hashlib
 import json
 import os
@@ -2080,9 +2081,17 @@ def _ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
-def format_lineage(chain: List[ChainMember], session_id: str, origin: Optional[str]) -> str:
+def format_lineage(
+    chain: List[ChainMember], session_id: str, origin: Optional[str], fork: bool = False
+) -> str:
     """One line for the card: where this session sits among the sessions its
-    pane has been cleared through. '' when it is alone and was never cleared."""
+    pane has been cleared through. '' when it is alone, was never cleared, and
+    is not a fork."""
+    if fork:
+        # A fork's root pointer names the family it forked from, not a pane it
+        # was cleared through, so the pane position would place it among
+        # sessions it left.
+        return f"⑂ fork of {origin[:8]}" if origin else "⑂ fork"
     if not origin and len(chain) <= 1:
         return ""
     ids = [m.session_id for m in chain]
@@ -2114,7 +2123,11 @@ def _live_descendant(
     ids = [m.session_id for m in chain]
     if session_id not in ids:
         return None
-    later = {m.session_id: m for m in chain[ids.index(session_id) + 1 :]}
+    # A fork has its own transcript; running it beside the session it forked
+    # from is not the same history in two processes.
+    later = {
+        m.session_id: m for m in chain[ids.index(session_id) + 1 :] if not is_fork(m.session_id)
+    }
     if not later:
         return None
     for rec in _live_registry():
@@ -2123,7 +2136,128 @@ def _live_descendant(
     return None
 
 
-def _lineage_note(origin: Optional[str]) -> str:
+# ====================================================================
+# Forks, from the hook log
+#
+# A forked transcript can't be told from a /clear, or from a fresh session:
+# most carry no root `session_id` pointer, and the history copied into them is
+# re-stamped with the fork's own id. The one record that a session is a fork is
+# the hook logger's SessionStart with `"source":"fork"`. It names no parent, and
+# it recurs on a forked session's later starts, so it marks the session rather
+# than an edge. (Store census 2026-11-17: 96 forked ids, 35 of them logged more
+# than once; 23 of the 131 transcripts on disk had a root pointer.)
+#
+# When a fork does carry the root pointer, the pointer is the fork's parent
+# family, not a /clear: a /clear mints a new id whose first SessionStart says
+# "clear", and these say "fork". So a fork is never labelled "cleared".
+#
+# Scanning every rotated log costs over a second, too much for a listing, so
+# each file's result is cached by inode: rotation renames without rewriting,
+# and an appended file is read on from where the last scan stopped.
+# ====================================================================
+
+_HOOK_LOG_NAME = "hook_events.log"
+_FORK_SID_RE = re.compile(rb'"session_id":\s*"([0-9a-f-]{36})"')
+_FORK_SOURCE_RE = re.compile(rb'"source":\s*"fork"')
+_SESSION_START_RE = re.compile(rb'"hook_event_name":\s*"SessionStart"')
+
+
+def _hook_log_dir() -> Path:
+    # The variable the hook logger itself, and workstream, read.
+    override = os.environ.get("CLAUDE_HOOK_LOG_DIR")
+    return Path(override) if override else Path.home() / "logs" / "claude-hooks"
+
+
+def _forks_cache_path() -> Path:
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".cache") / "claude-ls" / "forks.json"
+
+
+def _fork_ids_in(data: bytes) -> Set[str]:
+    found: Set[str] = set()
+    for line in data.split(b"\n"):
+        # The cheap test first; the exact key keeps a tool call that merely
+        # mentions both strings in its input from counting.
+        if b'"fork"' in line and _SESSION_START_RE.search(line) and _FORK_SOURCE_RE.search(line):
+            m = _FORK_SID_RE.search(line)
+            if m:
+                found.add(m.group(1).decode())
+    return found
+
+
+@functools.lru_cache(maxsize=1)
+def _fork_session_ids() -> frozenset:
+    """Every session id the hook log saw start as a fork. Empty when there is
+    no hook log, which is every machine without the hook logger."""
+    log_dir = _hook_log_dir()
+    try:
+        files = [p for p in log_dir.glob(_HOOK_LOG_NAME + "*") if p.is_file()]
+    except OSError:
+        return frozenset()
+    cache_path = _forks_cache_path()
+    # One cache serves every log dir a run may point at (CLAUDE_HOOK_LOG_DIR,
+    # tests); each dir keeps its own entry so a scan of one never drops another's.
+    try:
+        doc = json.loads(cache_path.read_text())
+        dirs = doc.get("dirs", {}) if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        dirs = {}
+    if not isinstance(dirs, dict):
+        dirs = {}
+    dir_key = str(log_dir.resolve() if log_dir.exists() else log_dir)
+    cached = dirs.get(dir_key) if isinstance(dirs.get(dir_key), dict) else {}
+    fresh: Dict[str, Dict] = {}
+    forks: Set[str] = set()
+    for f in files:
+        try:
+            st = f.stat()
+            with open(f, "rb") as fh:
+                head = fh.read(64).hex()
+            key = str(st.st_ino)
+            prev = cached.get(key) if isinstance(cached.get(key), dict) else None
+            if prev and prev.get("head") != head:
+                prev = None  # an inode reused by another file
+            if f.suffix == ".gz":
+                if prev and prev.get("size") == st.st_size:
+                    entry = prev
+                else:
+                    with gzip.open(f, "rb") as fh:
+                        ids = _fork_ids_in(fh.read())
+                    entry = {"head": head, "size": st.st_size, "forks": sorted(ids)}
+            else:
+                start = prev["offset"] if prev and prev.get("offset", 0) <= st.st_size else 0
+                with open(f, "rb") as fh:
+                    fh.seek(start)
+                    data = fh.read()
+                # Stop at the last complete line; a line mid-write is read next time.
+                cut = data.rfind(b"\n") + 1
+                ids = _fork_ids_in(data[:cut])
+                if start:
+                    ids |= set(prev.get("forks", []))
+                entry = {"head": head, "offset": start + cut, "forks": sorted(ids)}
+        except (OSError, EOFError, gzip.BadGzipFile):
+            continue
+        fresh[key] = entry
+        forks.update(entry["forks"])
+    if fresh != cached and (fresh or dir_key in dirs):
+        dirs[dir_key] = fresh
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps({"dirs": dirs}))
+            os.replace(tmp, cache_path)
+        except OSError:
+            pass
+    return frozenset(forks)
+
+
+def is_fork(session_id: str) -> bool:
+    return session_id in _fork_session_ids()
+
+
+def _lineage_note(origin: Optional[str], fork: bool = False) -> str:
+    if fork:
+        return f"⑂ fork of {origin[:8]}" if origin else "⑂ fork"
     return f"↺ cleared from {origin[:8]}" if origin else ""
 
 
@@ -5377,6 +5511,7 @@ class LineageNode:
     # (timestamp, trigger, tokens before, tokens after); the counts can be None
     compactions: List[Tuple[str, str, Optional[int], Optional[int]]] = field(default_factory=list)
     subagents: List[Dict] = field(default_factory=list)  # roots of the subagent tree
+    fork: bool = False  # started as a fork, per the hook log; its parent is unknown
 
 
 def _is_handoff_doc(path: str) -> bool:
@@ -5647,6 +5782,8 @@ def build_lineage(
         else LineageNode(sid, None)
         for sid in order
     }
+    for sid, node in nodes.items():
+        node.fork = is_fork(sid)
     return nodes, [e for e in edges.values() if e.src in kept and e.dst in kept], truncated
 
 
@@ -5707,15 +5844,18 @@ def _lineage_lines(
     # session's line says so instead, so the seed is never unmarked.
     seed_state: Dict[str, Any] = {"agent_drawn": False, "session_line": None}
 
-    def edge_label(e: Optional[LineageEdge]) -> Text:
+    def edge_label(e: Optional[LineageEdge], fork: bool) -> Text:
         if e is None:
-            return Text("")
+            return Text("⑂ fork ", style="magenta") if fork else Text("")
         parts = {
-            "clear": Text("↺ cleared", style="magenta"),
+            "clear": Text("⑂ forked" if fork else "↺ cleared", style="magenta"),
             "handoff": Text("✉ handoff" + (f" via {e.via}" if e.via else ""), style="green"),
             "mention": Text("↪ mentioned", style="blue"),
         }
-        return Text(" + ").join(parts[k] for k in e.kind.split("+")) + Text(" ")
+        label = Text(" + ").join(parts[k] for k in e.kind.split("+")) + Text(" ")
+        if fork and "clear" not in e.kind.split("+"):
+            label = Text("⑂ fork ", style="magenta") + label
+        return label
 
     def holds_seed(a: Dict) -> bool:
         return a["id"] == seed_agent or any(holds_seed(c) for c in a["children"])
@@ -5799,7 +5939,7 @@ def _lineage_lines(
 
     def session(sid: str, prefix: str, connector: str, via: Optional[LineageEdge]) -> None:
         n = nodes[sid]
-        line = Text(prefix + connector, style="yellow") + edge_label(via)
+        line = Text(prefix + connector, style="yellow") + edge_label(via, n.fork)
         line.append(sid[:8], style="bold")
         if sid in drawn:
             line.append("  (shown above)", style="dim")
@@ -6189,7 +6329,11 @@ def here_mode(args, console: Optional[Console]):
             ).strftime("%m-%d %H:%M")
             topic = first_user or slug or "(empty)"
             cell = Text(topic)
-            note = "" if _file_is_codex(sess) else _lineage_note(session_origin(sess))
+            note = (
+                ""
+                if _file_is_codex(sess)
+                else _lineage_note(session_origin(sess), is_fork(sess.stem))
+            )
             if note:
                 cell.append("\n" + note, style="dim")
             row = [str(i + 1), "~" if match.touched else "", short_id_for_path(sess)]
@@ -6223,7 +6367,11 @@ def here_mode(args, console: Optional[Console]):
                 f"{i + 1:3} {marker} {short_id_for_path(sess)}{src}  {time_str}  "
                 f"[{turn_count}t]  {topic}"
             )
-            note = "" if _file_is_codex(sess) else _lineage_note(session_origin(sess))
+            note = (
+                ""
+                if _file_is_codex(sess)
+                else _lineage_note(session_origin(sess), is_fork(sess.stem))
+            )
             if note:
                 print(f"      {note}")
         if anchored_paths:
@@ -6335,7 +6483,11 @@ def sessions_mode(args, console: Optional[Console]):
             turns_str = str(turn_count) if turn_count else "-"
 
             cell = Text(topic)
-            note = _lineage_note(session_origin(ref.path)) if ref.source == "claude" else ""
+            note = (
+                _lineage_note(session_origin(ref.path), is_fork(ref.path.stem))
+                if ref.source == "claude"
+                else ""
+            )
             if note:
                 cell.append("\n" + note, style="dim")
             row = [str(i + 1), short_id]
@@ -6365,7 +6517,11 @@ def sessions_mode(args, console: Optional[Console]):
                 f"{i + 1:3}  {short_id}{src}  {time_str}  "
                 f"{proj_label:20s}  [{turn_count}t]  {topic}"
             )
-            note = _lineage_note(session_origin(ref.path)) if ref.source == "claude" else ""
+            note = (
+                _lineage_note(session_origin(ref.path), is_fork(ref.path.stem))
+                if ref.source == "claude"
+                else ""
+            )
             if note:
                 print(f"     {note}")
             if verbose:
@@ -7857,7 +8013,9 @@ def summary_mode(args, console: Optional[Console]):
     lineage = ""
     if not is_codex:
         origin = metadata.origin_session_id or session_origin(session_file)
-        lineage = format_lineage(session_chain(session_file), session_file.stem, origin)
+        lineage = format_lineage(
+            session_chain(session_file), session_file.stem, origin, is_fork(session_file.stem)
+        )
 
     # Start → last-active in local time; the human's day, not the store's UTC.
     when = ""

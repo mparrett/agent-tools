@@ -57,6 +57,7 @@ derive_work_signals = _cl.derive_work_signals
 WorkSignals = _cl.WorkSignals
 session_chain = _cl.session_chain
 session_origin = _cl.session_origin
+is_fork = _cl.is_fork
 is_wrapper_text = _cl.is_wrapper_text
 user_prompt_text = _cl.user_prompt_text
 extract_text = _cl._extract_text

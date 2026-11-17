@@ -40,6 +40,9 @@ class SessionFrontier:
     role: str  # canonical | ancillary | subagent | codex
     lifecycle: Optional[str] = None  # "SessionEnd(other)", "SessionStart(compact)", ...
     lifecycle_at: Optional[Instant] = None
+    # Started as a fork, per the hook log's SessionStart. The record names no
+    # parent; `fork_siblings` is still the start-time guess at one.
+    fork: bool = False
     live: bool = False
     dropped: bool = True  # no capture names it (D10)
     warnings: list[str] = field(default_factory=list)
@@ -397,6 +400,7 @@ def build(
         sf = SessionFrontier(facts=scoped(facts, wins, starts), role=_role(ws, facts), scope=wins)
         sf.intervals = [i for i in ivs if i.holder == f"agent:{facts.ref}"]
         sf.live = facts.id in live
+        sf.fork = facts.kind == "claude" and seam.is_fork(facts.id)
         if sf.live:
             rec = live[facts.id]
             sf.address = {k: rec[k] for k in ("name", "tmux") if rec.get(k)}
@@ -1246,6 +1250,7 @@ def to_dict(fr: Frontier) -> dict:
                 "dropped": s.dropped,
                 "lifecycle": s.lifecycle,
                 "lifecycle_at": inst(s.lifecycle_at),
+                "fork": s.fork,
                 "started": inst(s.facts.started),
                 "last_seen": inst(s.facts.last_seen),
                 "peak_context": s.facts.peak_context,

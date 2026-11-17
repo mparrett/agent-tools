@@ -1248,3 +1248,21 @@ def test_timeline_reports_the_backup_of_an_overwritten_file(env, capsys, tmp_pat
     d = run_json(capsys, "timeline", "default-track", "-o", str(out))
     assert Path(d["backup"]).read_text() == "hand-written notes"
     assert timeline.extract(out.read_text())["workstreams"]
+
+
+@needs_weft
+def test_frontier_marks_a_session_the_hook_log_saw_start_as_a_fork(env, capsys):
+    sessions = run_json(capsys, "show", "default-track")["frontier"]["sessions"]
+    assert not any(s["fork"] for s in sessions)
+    target = next(s for s in sessions if s["kind"] == "claude")
+    log = Path(os.environ["CLAUDE_HOOK_LOG_DIR"]) / "hook_events.log"
+    data = {"session_id": target["id"], "hook_event_name": "SessionStart", "source": "fork"}
+    with log.open("a") as fh:
+        fh.write(json.dumps({"timestamp": "2026-11-17T08:39:00", "hook_data": data}) + "\n")
+    seam._cl._fork_session_ids.cache_clear()
+    sessions = run_json(capsys, "show", "default-track")["frontier"]["sessions"]
+    assert [s["id"] for s in sessions if s["fork"]] == [target["id"]]
+    code, out, err = run(capsys, "frontier", "default-track")
+    assert code == 0, err
+    [row] = [ln for ln in out.splitlines() if ln.strip().startswith(target["ref"])]
+    assert "⑂ fork" in row
