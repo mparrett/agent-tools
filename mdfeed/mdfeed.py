@@ -2538,7 +2538,9 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
         except OSError:
             self._send_json(404, {"error": "file missing on disk"})
             return
-        n = append_dwell(self.feed_path, target, version, clean_dwell_blocks(body.get("blocks")), kind)
+        n = append_dwell(
+            self.feed_path, target, version, clean_dwell_blocks(body.get("blocks")), kind
+        )
         pct = body.get("pct")
         if isinstance(pct, (int, float)) and not isinstance(pct, bool) and 0 <= pct <= 100:
             record_read_share(self.feed_path, target, float(pct), version)

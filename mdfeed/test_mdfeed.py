@@ -1410,7 +1410,9 @@ def test_api_dwell_refuses_paths_outside_the_feed(server, tmp_path):
 
 def test_api_dwell_refuses_unknown_kinds(server):
     base, doc = server
-    status, _ = post_json(base + "/api/dwell", {"path": doc, "kind": "confused", "blocks": {"a#1": 1}})
+    status, _ = post_json(
+        base + "/api/dwell", {"path": doc, "kind": "confused", "blocks": {"a#1": 1}}
+    )
     assert status == 400
 
 
