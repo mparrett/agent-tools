@@ -182,7 +182,31 @@ macOS only, and it needs rebuilding if the clone moves.
 projects) · `a` show all · `g#` jump to heading · `e/c` expand/collapse all · `b`
 copy file path · `s` rendered ⇄ raw source (textarea, select-all friendly) · `y`
 copy the raw markdown · `d` diff · `z` zen · `t` theme · `f` size · `,` reading
-preferences. Refresh is the `↻` button in the header.
+preferences · `r` refresh (also the `↻` button) · `m` painter · `h` heat.
+
+### Dwell heatmap
+
+A record of which parts of a doc you have read, for coming back to a doc after a
+context switch. `m` (or the **paint** button) turns on painter mode: the block
+under the cursor counts as being read, a quarter second at a time, while the
+window has focus and the cursor moved in the last 45 seconds. Scrolling under a
+still cursor counts too. `h` shows or hides the heat, a bar in the left gutter
+per block that darkens with time read; painting turns it on.
+
+- **Blocks**: headings, paragraphs, list items, code blocks and tables, each
+  keyed by a hash of its text. Heat follows the text rather than the layout, so
+  it survives font, width and fold changes.
+- **Edits**: a block an edit changed gets a new key and reads as cold; the rest
+  keep their heat. That is the point: after a rewrite, the cold bars are what
+  you have not seen.
+- **Folds**: a folded heading's bar (dashed) stands for its whole section.
+- **List**: a file you have painted shows the share of its blocks read for at
+  least two seconds, dimmed if the file changed since.
+
+Nothing is recorded unless painter mode is on. Events go to
+`dwell/<hash>.jsonl` next to the feed, one line per block per flush, carrying
+the doc version and a `kind` (only `dwell` so far; it leaves room for other
+paint modes). Delete the `dwell/` directory to forget everything.
 
 ### Reading preferences
 
