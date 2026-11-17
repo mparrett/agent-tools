@@ -1502,6 +1502,9 @@ INDEX_HTML = """<!DOCTYPE html>
     }
     const bar = '<div id="diff-bar">' + note + '</div>';
     const pathHtml = previewBarHtml(path);
+    // The diff has no blocks to paint; settle the document's dwell before it goes.
+    flushDwell();
+    clearDwell();
     if (mode) {
       $preview.innerHTML = '<div class="preview-inner">' + pathHtml + bar +
         '<pre id="preview-source-diff">' + diffHtml + '</pre></div>';
@@ -1714,6 +1717,9 @@ INDEX_HTML = """<!DOCTYPE html>
   let dwellBars = {};        // block key -> gutter bar element
   let dwellAgg = {};         // folded heading key -> keys of its whole section
   let dwellObserver = null;
+  let dwellLoaded = false;   // server totals for dwellPath have arrived
+  let dwellInflight = Promise.resolve();  // the last flush's POST
+  let dwellFailNoted = false;
 
   function fnv1a(s) {
     let h = 0x811c9dc5;
@@ -1817,6 +1823,7 @@ INDEX_HTML = """<!DOCTYPE html>
     if (!root) return;
     dwellPath = path;
     dwellHeat = {};
+    dwellLoaded = false;
     setHover(null);
     keyBlocks(root);
     if (dwellObserver) dwellObserver.disconnect();
@@ -1830,16 +1837,25 @@ INDEX_HTML = """<!DOCTYPE html>
     dwellObserver.observe(root);
     layoutHeat();
     try {
+      // The server is threaded: without waiting, a refresh's own flush can land
+      // after this read, and the totals would miss it.
+      await dwellInflight;
       const r = await fetchWithTimeout('/api/dwell?path=' + encodeURIComponent(path));
-      if (gen !== previewGen || !r.ok) return;
+      if (gen !== previewGen) return;
+      if (!r.ok) throw new Error(r.status);
       const j = await r.json();
       if (gen !== previewGen) return;
-      const server = (j.totals && j.totals.dwell) || {};
-      for (const [k, s] of Object.entries(server)) dwellHeat[k] = (dwellHeat[k] || 0) + s;
+      dwellHeat = Object.assign({}, (j.totals && j.totals.dwell) || {});
+      // Nothing counts or reports a share until the totals are in: a share
+      // measured from local ticks alone would overwrite the real one.
+      dwellLoaded = true;
       paintAll();
-    } catch (e) { /* heat is best-effort; the document still reads */ }
+    } catch (e) {
+      if (gen === previewGen) toast('heat unavailable: painting is off for this file');
+    }
   }
   function clearDwell() {
+    dwellLoaded = false;
     dwellPath = null;
     dwellBars = {};
     setHover(null);
@@ -1868,14 +1884,20 @@ INDEX_HTML = """<!DOCTYPE html>
     if (!path || !Object.keys(blocks).length) return;
     const body = { path, kind: 'dwell', blocks };
     // Only while this file's blocks are on screen can the share be measured.
-    if (path === dwellPath) {
+    if (path === dwellPath && dwellLoaded) {
       const pct = readPct();
       if (pct !== null) { body.pct = pct; noteRead(path, pct); }
     }
-    fetch('/api/dwell', {
+    dwellInflight = fetch('/api/dwell', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body), keepalive: true,
-    }).then(r => { if (!r.ok) throw new Error(r.status); }).catch(() => {
+    }).then(r => {
+      if (!r.ok) throw new Error(r.status);
+      dwellFailNoted = false;
+    }).catch((err) => {
+      // Say so once per failure streak: otherwise painting looks like it works
+      // while nothing reaches disk.
+      if (!dwellFailNoted) { dwellFailNoted = true; toast('heat not saved (' + err.message + ')'); }
       // Put it back for the next flush rather than drop what was read.
       if (dwellPendingPath !== path) return;
       for (const [k, s] of Object.entries(blocks)) dwellPending[k] = (dwellPending[k] || 0) + s;
@@ -1908,7 +1930,7 @@ INDEX_HTML = """<!DOCTYPE html>
   setInterval(() => {
     if (!painting || document.hidden || !document.hasFocus()) return;
     const el = dwellHover;
-    if (!el || !el.isConnected || !el.dataset.dwell || dwellPath !== selectedPath) return;
+    if (!el || !el.isConnected || !el.dataset.dwell || dwellPath !== selectedPath || !dwellLoaded) return;
     if (Date.now() - dwellLastMove > DWELL_IDLE_MS) return;
     const k = el.dataset.dwell, dt = DWELL_TICK_MS / 1000;
     dwellHeat[k] = (dwellHeat[k] || 0) + dt;
@@ -2500,8 +2522,12 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
         # answers, and a form cannot send one; the Origin check covers the rest.
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         origin = self.headers.get("Origin")
-        host = self.headers.get("Host") or ""
-        if ctype != "application/json" or (origin is not None and origin != f"http://{host}"):
+        host = (self.headers.get("Host") or "").lower()
+        # Compared by host:port, not scheme, so an https front end (tailscale
+        # serve and the like) still matches the Host it forwards.
+        if ctype != "application/json" or (
+            origin is not None and urlparse(origin).netloc.lower() != host
+        ):
             self._send(403, b"forbidden", "text/plain")
             return
         if urlparse(self.path).path != "/api/dwell":

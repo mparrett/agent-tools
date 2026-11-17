@@ -427,6 +427,23 @@ def test_a_folded_heading_stands_for_its_section(dwell_page):
     assert 0 < _opacity(bar) < 0.6
 
 
+def test_diff_view_settles_dwell_and_refresh_restores_it(dwell_page):
+    page, base, feed, doc = dwell_page
+    page.keyboard.press("m")
+    _paint(page, "Intro paragraph", 1000)
+    doc.write_text(DWELL_DOC.replace("the edit will change", "the edit changed"))
+    mdfeed.append_entries(feed, [doc], cwd=str(doc.parent))  # what the write hook does
+    expect(page.locator("#fresh-pill")).to_be_visible()
+    page.keyboard.press("d")
+    expect(page.locator("#diff-bar")).to_be_visible()
+    # Leaving the document flushed what was painted, and the diff has no gutter.
+    expect(page.locator(".dwell-gutter")).to_have_count(0)
+    page.wait_for_timeout(300)
+    assert mdfeed.dwell_totals(feed, str(doc))
+    page.keyboard.press("r")
+    expect(_bar(page, "Intro paragraph")).to_have_css("opacity", re.compile(r"^0\.[1-9]|^1$"))
+
+
 def test_heat_key_hides_the_gutter_and_is_remembered(dwell_page):
     page, *_ = dwell_page
     page.keyboard.press("h")

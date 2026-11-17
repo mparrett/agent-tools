@@ -1431,10 +1431,13 @@ def test_api_dwell_refuses_cross_origin_shaped_posts(server, headers):
     assert mdfeed.dwell_totals(mdfeed.FeedHandler.feed_path, doc) == {}
 
 
-def test_api_dwell_accepts_its_own_origin(server):
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_api_dwell_accepts_its_own_origin(server, scheme):
+    # https: a TLS front end forwards the same Host, and the page's origin is https.
     base, doc = server
+    origin = base.replace("http", scheme, 1)
     status, _ = post_json(
-        base + "/api/dwell", {"path": doc, "blocks": {"a#1": 1}}, {"Origin": base}
+        base + "/api/dwell", {"path": doc, "blocks": {"a#1": 1}}, {"Origin": origin}
     )
     assert status == 200
 
