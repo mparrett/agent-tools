@@ -1315,5 +1315,132 @@ def test_cmd_open_reports_a_server_that_never_comes_up(tmp_path, monkeypatch, ca
     assert "timed out" in capsys.readouterr().err
 
 
+# ── dwell ─────────────────────────────────────────────────────────────────────
+
+
+def test_clean_dwell_blocks_keeps_only_valid_keys_and_clamps():
+    cleaned = mdfeed.clean_dwell_blocks(
+        {
+            "abc#1": 1.25,
+            "abc#2": 999,  # clamped: one flush cannot be a minute-plus
+            "ABC#1": 1,  # keys are lowercase base36
+            "abc": 1,  # no ordinal
+            "zz#1": -1,
+            "yy#1": True,
+            "xx#1": float("nan"),
+            "ww#1": "3",
+        }
+    )
+    assert cleaned == {"abc#1": 1.25, "abc#2": 60.0}
+    assert mdfeed.clean_dwell_blocks(["abc#1"]) == {}
+
+
+def test_dwell_totals_sum_events_per_kind_and_doc(tmp_path):
+    feed = tmp_path / "index.jsonl"
+    mdfeed.append_dwell(feed, "/a.md", "v1", {"k#1": 1.0, "k#2": 0.5})
+    mdfeed.append_dwell(feed, "/a.md", "v2", {"k#1": 2.0})
+    mdfeed.append_dwell(feed, "/b.md", "v1", {"k#1": 9.0})
+    assert mdfeed.dwell_totals(feed, "/a.md") == {"dwell": {"k#1": 3.0, "k#2": 0.5}}
+    assert mdfeed.dwell_totals(feed, "/missing.md") == {}
+    # Each event keeps its own version: the log is the history, totals are derived.
+    lines = mdfeed.dwell_log_for(feed, "/a.md").read_text().splitlines()
+    assert [json.loads(x)["version"] for x in lines] == ["v1", "v1", "v2"]
+
+
+def test_dwell_totals_skip_lines_for_another_doc_and_garbage(tmp_path):
+    feed = tmp_path / "index.jsonl"
+    mdfeed.append_dwell(feed, "/a.md", "v1", {"k#1": 1.0})
+    log = mdfeed.dwell_log_for(feed, "/a.md")
+    with open(log, "a") as f:
+        f.write("not json\n")
+        f.write(json.dumps({"doc": "/other.md", "block": "k#1", "kind": "dwell", "secs": 5}) + "\n")
+        f.write("[1, 2]\n")
+    assert mdfeed.dwell_totals(feed, "/a.md") == {"dwell": {"k#1": 1.0}}
+
+
+def test_read_share_goes_stale_when_the_file_is_written_after_it(tmp_path):
+    feed = tmp_path / "index.jsonl"
+    mdfeed.record_read_share(feed, "/a.md", 42.04, "v1")
+    measured = mdfeed.read_dwell_index(feed)["/a.md"]["ts"]
+    entries = [
+        {"path": "/a.md", "ts": measured - 1},
+        {"path": "/b.md", "ts": measured - 1},
+    ]
+    fresh = mdfeed.with_read_shares(entries, feed)
+    assert fresh[0]["read"] == {"pct": 42.0, "stale": False}
+    assert "read" not in fresh[1]
+    later = mdfeed.with_read_shares([{"path": "/a.md", "ts": measured + 1}], feed)
+    assert later[0]["read"]["stale"] is True
+
+
+def post_json(url, obj, headers=None):
+    data = json.dumps(obj).encode()
+    hdrs = {"Content-Type": "application/json"}
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def test_api_dwell_post_records_and_get_returns_totals(server):
+    base, doc = server
+    status, body = post_json(base + "/api/dwell", {"path": doc, "blocks": {"a1#1": 1.5}, "pct": 50})
+    assert status == 200
+    assert body["recorded"] == 1
+    assert body["version"] == mdfeed.doc_version(Path(doc))
+    post_json(base + "/api/dwell", {"path": doc, "blocks": {"a1#1": 0.5}})
+    status, _, raw = get(base + "/api/dwell?path=" + urllib.parse.quote(doc))
+    assert status == 200
+    assert json.loads(raw) == {"totals": {"dwell": {"a1#1": 2.0}}}
+    _, _, feed = get(base + "/api/feed")
+    assert json.loads(feed)[0]["read"] == {"pct": 50.0, "stale": False}
+
+
+def test_api_dwell_refuses_paths_outside_the_feed(server, tmp_path):
+    base, _ = server
+    other = str(tmp_path / "other.md")
+    status, _ = post_json(base + "/api/dwell", {"path": other, "blocks": {"a#1": 1}})
+    assert status == 403
+    status, _, _ = get(base + "/api/dwell?path=" + urllib.parse.quote(other))
+    assert status == 403
+
+
+def test_api_dwell_refuses_unknown_kinds(server):
+    base, doc = server
+    status, _ = post_json(
+        base + "/api/dwell", {"path": doc, "kind": "confused", "blocks": {"a#1": 1}}
+    )
+    assert status == 400
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        # A form or no-cors fetch can only send a simple content type.
+        {"Content-Type": "text/plain"},
+        {"Origin": "http://evil.example"},
+    ],
+)
+def test_api_dwell_refuses_cross_origin_shaped_posts(server, headers):
+    base, doc = server
+    status, _ = post_json(base + "/api/dwell", {"path": doc, "blocks": {"a#1": 1}}, headers)
+    assert status == 403
+    assert mdfeed.dwell_totals(mdfeed.FeedHandler.feed_path, doc) == {}
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_api_dwell_accepts_its_own_origin(server, scheme):
+    # https: a TLS front end forwards the same Host, and the page's origin is https.
+    base, doc = server
+    origin = base.replace("http", scheme, 1)
+    status, _ = post_json(
+        base + "/api/dwell", {"path": doc, "blocks": {"a#1": 1}}, {"Origin": origin}
+    )
+    assert status == 200
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

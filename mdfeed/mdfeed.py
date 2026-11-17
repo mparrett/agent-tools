@@ -341,6 +341,149 @@ def compact_feed(
     return len(lines), len(entries), bak_path
 
 
+# ── Dwell: which parts of a doc the reader has looked at ─────────────────────
+# The page anchors each rendered block by a hash of its text plus an ordinal for
+# duplicates, so heat is independent of layout (font, width, folds) and carries
+# over to the blocks an edit leaves alone. The server never sees the blocks
+# themselves; it keeps an append-only event log per doc, one line per block per
+# flush, and derives totals on read. Events rather than a running sum because
+# the paint modes still to come (follow-up, confused, edit; see `kind`) will
+# want the events, not just the sum.
+DWELL_KINDS = frozenset({"dwell"})
+_DWELL_BLOCK_RE = re.compile(r"^[0-9a-z]{1,8}#[0-9]{1,5}$")
+# One flush covers a few seconds of painting; anything larger is a bug or a
+# forged request, and clamping keeps one bad post from saturating a doc.
+_DWELL_MAX_SECS = 60.0
+_DWELL_MAX_BLOCKS = 5000
+
+
+def dwell_dir(feed_path: Path) -> Path:
+    return feed_path.parent / "dwell"
+
+
+def dwell_log_for(feed_path: Path, doc: str) -> Path:
+    digest = hashlib.sha256(doc.encode("utf-8")).hexdigest()[:16]
+    return dwell_dir(feed_path) / f"{digest}.jsonl"
+
+
+def doc_version(doc: Path) -> str:
+    """Content hash of the doc as it is now, recorded on every dwell event so a
+    later reader can tell which version a block was read in."""
+    return hashlib.sha256(doc.read_bytes()).hexdigest()[:12]
+
+
+def clean_dwell_blocks(blocks: Any) -> Dict[str, float]:
+    """The valid part of a posted {block: seconds} map; drops the rest."""
+    if not isinstance(blocks, dict):
+        return {}
+    out: Dict[str, float] = {}
+    for key, secs in list(blocks.items())[:_DWELL_MAX_BLOCKS]:
+        if not isinstance(key, str) or not _DWELL_BLOCK_RE.match(key):
+            continue
+        if isinstance(secs, bool) or not isinstance(secs, (int, float)):
+            continue
+        if not math.isfinite(secs) or secs <= 0:
+            continue
+        out[key] = round(min(float(secs), _DWELL_MAX_SECS), 3)
+    return out
+
+
+def append_dwell(
+    feed_path: Path,
+    doc: str,
+    version: str,
+    blocks: Dict[str, float],
+    kind: str = "dwell",
+    ts: Optional[float] = None,
+) -> int:
+    if not blocks:
+        return 0
+    log = dwell_log_for(feed_path, doc)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    ts = time.time() if ts is None else ts
+    lines = "".join(
+        json.dumps({"ts": ts, "doc": doc, "block": b, "kind": kind, "secs": s, "version": version})
+        + "\n"
+        for b, s in blocks.items()
+    )
+    with open(log, "a", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(lines)
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    return len(blocks)
+
+
+def dwell_totals(feed_path: Path, doc: str) -> Dict[str, Dict[str, float]]:
+    """{kind: {block: seconds}} summed over every event for `doc`."""
+    totals: Dict[str, Dict[str, float]] = {}
+    try:
+        text = dwell_log_for(feed_path, doc).read_text(encoding="utf-8")
+    except OSError:
+        return totals
+    for line in text.splitlines():
+        try:
+            ev = json.loads(line)
+            # The log name is a truncated hash; the stored path is the check.
+            if ev.get("doc") != doc:
+                continue
+            per = totals.setdefault(str(ev["kind"]), {})
+            per[ev["block"]] = round(per.get(ev["block"], 0.0) + float(ev["secs"]), 3)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return totals
+
+
+def _dwell_index_path(feed_path: Path) -> Path:
+    return dwell_dir(feed_path) / "index.json"
+
+
+def read_dwell_index(feed_path: Path) -> Dict[str, Dict[str, Any]]:
+    """{doc: {"pct", "version", "ts"}}: how much of each doc was read, as the
+    page last measured it. The page knows the blocks, so it computes the share;
+    the server only files it for the list view."""
+    try:
+        data = json.loads(_dwell_index_path(feed_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def record_read_share(feed_path: Path, doc: str, pct: float, version: str) -> None:
+    idx_path = _dwell_index_path(feed_path)
+    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = idx_path.with_name("index.lock")
+    with open(lock, "a") as lk:
+        fcntl.flock(lk.fileno(), fcntl.LOCK_EX)
+        try:
+            idx = read_dwell_index(feed_path)
+            idx[doc] = {"pct": round(pct, 1), "version": version, "ts": time.time()}
+            fd, tmp = tempfile.mkstemp(dir=str(idx_path.parent), prefix=".index-")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(idx, f, ensure_ascii=False)
+            os.replace(tmp, idx_path)
+        finally:
+            fcntl.flock(lk.fileno(), fcntl.LOCK_UN)
+
+
+def with_read_shares(entries: List[Dict[str, Any]], feed_path: Path) -> List[Dict[str, Any]]:
+    """Attach {"pct", "stale"} to entries the reader has painted. Stale means
+    the file was written after the share was measured, judged by feed time so
+    /api/feed does not hash every file on each poll."""
+    idx = read_dwell_index(feed_path)
+    if not idx:
+        return entries
+    out = []
+    for e in entries:
+        rec = idx.get(e.get("path", ""))
+        if isinstance(rec, dict) and isinstance(rec.get("pct"), (int, float)):
+            stale = float(e.get("ts") or 0) > float(rec.get("ts") or 0)
+            e = dict(e, read={"pct": rec["pct"], "stale": stale})
+        out.append(e)
+    return out
+
+
 INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -634,6 +777,18 @@ INDEX_HTML = """<!DOCTYPE html>
   :root[data-reader] #preview-path, :root[data-reader] #preview-raw-link { visibility: hidden; }
   :root[data-reader] .preview-inner { padding: 0 55px; }
   /* Collapsible headings: click to fold a section to the next same/higher level. */
+  /* Dwell gutter: one bar per block, opacity = how long it was read. A layer of
+     its own, measured from the blocks, because headings already spend ::before
+     on the fold caret and list items indent; one fixed column reads cleaner. */
+  .preview-inner { position: relative; }
+  .dwell-gutter { position: absolute; top: 0; left: 0; width: 0; height: 0; pointer-events: none; }
+  :root:not([data-heat]) .dwell-gutter { display: none; }
+  .dwell-bar { position: absolute; width: 4px; border-radius: 2px; background: var(--accent); }
+  .dwell-bar.agg { background: repeating-linear-gradient(var(--accent) 0 4px, transparent 4px 7px); }
+  :root[data-painting] #preview .preview-inner { cursor: cell; }
+  :root[data-painting] #preview [data-dwell].dwell-hover { outline: 1px dashed var(--faint); outline-offset: 3px; border-radius: 2px; }
+  .row .meta .read { font-variant-numeric: tabular-nums; color: var(--accent); }
+  .row .meta .read.stale { opacity: 0.5; }
   #preview .collapsible { cursor: pointer; }
   #preview .collapsible::before { content: '\\25be'; display: inline-block; width: 0.9em; margin-left: -0.9em; color: var(--faint); font-size: 0.8em; transition: transform 0.15s; }
   #preview .collapsible.collapsed::before { transform: rotate(-90deg); }
@@ -752,8 +907,9 @@ INDEX_HTML = """<!DOCTYPE html>
   <button id="theme-toggle" class="hbtn zen-hide" title="Theme (t)">auto</button>
   <button id="prefs-btn" class="hbtn zen-hide" title="Reading preferences: typeface, size, spacing, width (,)" aria-haspopup="dialog" aria-expanded="false" aria-controls="prefs">Aa</button>
   <button id="diff-btn" class="hbtn zen-hide" title="Diff against what you last saw (d)">diff</button>
+  <button id="paint-btn" class="hbtn zen-hide" title="Painter: the block under the cursor counts as read (m) · show heat (h)">paint</button>
   <button id="refresh-btn" class="hbtn zen-hide" title="Refresh (r)" style="font-size:14px;padding:1px 6px;line-height:1">↻</button>
-  <span class="status kbd-hints zen-hide">/ search<span class="sep">·</span>⇥ recent/plans<span class="sep">·</span>j/k section<span class="sep">·</span>e/c expand<span class="sep">·</span>g# jump<span class="sep">·</span>b copy path<span class="sep">·</span>s source<span class="sep">·</span>y copy md<span class="sep">·</span>d diff<span class="sep">·</span>z zen<span class="sep">·</span>t theme<span class="sep">·</span>f size<span class="sep">·</span>, prefs</span>
+  <span class="status kbd-hints zen-hide">/ search<span class="sep">·</span>⇥ recent/plans<span class="sep">·</span>j/k section<span class="sep">·</span>e/c expand<span class="sep">·</span>g# jump<span class="sep">·</span>b copy path<span class="sep">·</span>s source<span class="sep">·</span>y copy md<span class="sep">·</span>d diff<span class="sep">·</span>z zen<span class="sep">·</span>t theme<span class="sep">·</span>f size<span class="sep">·</span>, prefs<span class="sep">·</span>m paint<span class="sep">·</span>h heat</span>
 </header>
 <main>
   <aside id="list">
@@ -1051,7 +1207,14 @@ INDEX_HTML = """<!DOCTYPE html>
         '<span class="' + chipCls + '">' + escapeHtml(proj) + '</span>' +
         '<span class="tool">' + toolLetter(e.tool) + '</span>' +
         '<span>' + fmtAgo(e.ts) + '</span>' +
+        readHtml(e.read) +
       '</div></div>';
+  }
+  function readHtml(read) {
+    if (!read) return '';
+    const pct = Math.round(read.pct);
+    return '<span class="read' + (read.stale ? ' stale' : '') + '" title="' +
+      (read.stale ? pct + '% read before the file last changed' : pct + '% read') + '">' + pct + '%</span>';
   }
 
   // ── Lanes rendering ───────────────────────────────────────────────────────
@@ -1339,6 +1502,9 @@ INDEX_HTML = """<!DOCTYPE html>
     }
     const bar = '<div id="diff-bar">' + note + '</div>';
     const pathHtml = previewBarHtml(path);
+    // The diff has no blocks to paint; settle the document's dwell before it goes.
+    flushDwell();
+    clearDwell();
     if (mode) {
       $preview.innerHTML = '<div class="preview-inner">' + pathHtml + bar +
         '<pre id="preview-source-diff">' + diffHtml + '</pre></div>';
@@ -1373,6 +1539,7 @@ INDEX_HTML = """<!DOCTYPE html>
     // in-place refresh of the same file restores both (fresh selections don't).
     const keepY = opts.keepScroll ? $preview.scrollTop : 0;
     const keepFolds = opts.keepScroll && !sourceMode ? collapsedKeys() : null;
+    flushDwell();  // the share read is measured against the blocks about to go
     const gen = ++previewGen;
     try {
       const r = await fetchWithTimeout(
@@ -1404,6 +1571,9 @@ INDEX_HTML = """<!DOCTYPE html>
       if (!sourceMode) {
         makeCollapsible();
         applyCollapsed(keepFolds);  // re-fold sections that were folded (refresh only)
+        initDwell(path, gen);
+      } else {
+        clearDwell();
       }
       // Fresh selection jumps to top; a refresh restores scroll (clamped to the
       // new, possibly-shorter doc) so an in-place update doesn't move you.
@@ -1521,6 +1691,285 @@ INDEX_HTML = """<!DOCTYPE html>
     }
   });
 
+  // ── Dwell heatmap ─────────────────────────────────────────────────────────
+  // Painter mode (m) counts the block under the cursor as being read, sampled
+  // on a timer rather than per mousemove. Blocks are keyed by a hash of their
+  // text plus an ordinal among identical blocks, so heat survives reflow
+  // (font, width, folds) and carries over to whatever an edit left unchanged:
+  // an edited block gets a new key and reads as cold. Heat (h) is a gutter bar
+  // per block; a folded heading's bar stands for its whole section. Totals
+  // live server-side (/api/dwell) so they outlast the tab and the browser.
+  const DWELL_TICK_MS = 250;
+  const DWELL_IDLE_MS = 45000;      // a cursor parked this long stops counting
+  const DWELL_READ_SECS = 2;        // a block counts toward "% read" from here
+  const DWELL_SATURATE_SECS = 60;
+  let DWELL_FLUSH_MS = 3000;
+  { const v = new URLSearchParams(location.search).get('dwellflush'); if (v !== null) DWELL_FLUSH_MS = +v; }
+  const $paintBtn = document.getElementById('paint-btn');
+  let painting = false;
+  let dwellPath = null;      // the file whose blocks are keyed right now
+  let dwellHeat = {};        // block key -> seconds: server totals plus local ticks
+  let dwellPending = {};     // block key -> seconds not yet posted
+  let dwellPendingPath = null;
+  let dwellHover = null;
+  let dwellLastMove = 0;
+  let dwellPointer = null;   // last {x, y}, to re-hit-test on scroll
+  let dwellBars = {};        // block key -> gutter bar element
+  let dwellAgg = {};         // folded heading key -> keys of its whole section
+  let dwellObserver = null;
+  let dwellLoaded = false;   // server totals for dwellPath have arrived
+  let dwellInflight = Promise.resolve();  // the last flush's POST
+  let dwellFailNoted = false;
+
+  function fnv1a(s) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+    return (h >>> 0).toString(36);
+  }
+  function blockText(el) {
+    let node = el;
+    // A list item's own text, not its sublist's: the sublist items are blocks too.
+    if (el.tagName === 'LI' && el.querySelector('ul,ol')) {
+      node = el.cloneNode(true);
+      node.querySelectorAll('ul,ol').forEach(n => n.remove());
+    }
+    const t = (node.textContent || '').replace(/\\s+/g, ' ').trim();
+    if (t) return el.tagName + ':' + t;
+    const img = el.querySelector('img');
+    return img ? el.tagName + ':img:' + (img.getAttribute('src') || '') : '';
+  }
+  function dwellBlocks(root) {
+    return [...root.querySelectorAll('h1,h2,h3,h4,h5,h6,p,pre,table,li')].filter(el => {
+      if (el.closest('#preview-bar, #diff-bar, details.frontmatter')) return false;
+      // A paragraph, code block or table inside a list item reads as part of it.
+      return el.tagName === 'LI' || !el.parentElement.closest('li');
+    });
+  }
+  function keyBlocks(root) {
+    const seen = {};
+    for (const el of dwellBlocks(root)) {
+      const t = blockText(el);
+      if (!t) continue;
+      const h = fnv1a(t);
+      seen[h] = (seen[h] || 0) + 1;
+      el.dataset.dwell = h + '#' + seen[h];
+    }
+  }
+  function heatLevel(s) {
+    return s > 0 ? Math.min(1, 0.15 + 0.85 * Math.log1p(s) / Math.log1p(DWELL_SATURATE_SECS)) : 0;
+  }
+  function paintBar(k) {
+    const bar = dwellBars[k];
+    if (!bar) return;
+    const keys = dwellAgg[k];
+    const lvl = keys
+      ? keys.reduce((a, x) => a + heatLevel(dwellHeat[x] || 0), 0) / keys.length
+      : heatLevel(dwellHeat[k] || 0);
+    bar.style.opacity = lvl.toFixed(3);
+  }
+  function paintAll() { for (const k in dwellBars) paintBar(k); }
+
+  function layoutHeat() {
+    const root = previewRoot();
+    if (!root || dwellPath !== selectedPath) return;
+    let gutter = root.querySelector(':scope > .dwell-gutter');
+    if (!root.querySelector('[data-dwell]')) { if (gutter) gutter.remove(); dwellBars = {}; return; }
+    if (!gutter) {
+      // First child, not last: refreshCollapse hides every child after a folded
+      // heading, and the gutter must never be one of them.
+      gutter = document.createElement('div');
+      gutter.className = 'dwell-gutter';
+      gutter.setAttribute('aria-hidden', 'true');
+      root.prepend(gutter);
+    }
+    dwellAgg = {};
+    let open = null;  // the folded heading whose section is being collected
+    for (const el of root.children) {
+      const lvl = headLevel(el);
+      if (lvl && open && lvl <= open.lvl) open = null;
+      if (open) {
+        if (el.dataset.dwell) open.keys.push(el.dataset.dwell);
+        el.querySelectorAll('[data-dwell]').forEach(b => open.keys.push(b.dataset.dwell));
+      } else if (lvl && el.classList.contains('collapsed') && el.dataset.dwell) {
+        open = { lvl, keys: [el.dataset.dwell] };
+        dwellAgg[el.dataset.dwell] = open.keys;
+      }
+    }
+    const rr = root.getBoundingClientRect();
+    const x = parseFloat(getComputedStyle(root).paddingLeft) - 14;
+    const frag = document.createDocumentFragment();
+    dwellBars = {};
+    for (const el of root.querySelectorAll('[data-dwell]')) {
+      const r = el.getBoundingClientRect();
+      if (!r.height) continue;  // folded away
+      let h = r.height;
+      const sub = el.tagName === 'LI' && el.querySelector(':scope > ul, :scope > ol');
+      if (sub) h = Math.max(4, sub.getBoundingClientRect().top - r.top);
+      const bar = document.createElement('div');
+      bar.className = 'dwell-bar' + (dwellAgg[el.dataset.dwell] ? ' agg' : '');
+      bar.dataset.for = el.dataset.dwell;
+      bar.style.left = x + 'px';
+      bar.style.top = (r.top - rr.top) + 'px';
+      bar.style.height = h + 'px';
+      dwellBars[el.dataset.dwell] = bar;
+      frag.appendChild(bar);
+    }
+    gutter.replaceChildren(frag);
+    paintAll();
+  }
+
+  async function initDwell(path, gen) {
+    const root = previewRoot();
+    if (!root) return;
+    dwellPath = path;
+    dwellHeat = {};
+    dwellLoaded = false;
+    setHover(null);
+    keyBlocks(root);
+    if (dwellObserver) dwellObserver.disconnect();
+    // Folds, font and width changes all resize the column; one observer covers them.
+    let queued = false;
+    dwellObserver = new ResizeObserver(() => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; layoutHeat(); });
+    });
+    dwellObserver.observe(root);
+    layoutHeat();
+    try {
+      // The server is threaded: without waiting, a refresh's own flush can land
+      // after this read, and the totals would miss it.
+      await dwellInflight;
+      const r = await fetchWithTimeout('/api/dwell?path=' + encodeURIComponent(path));
+      if (gen !== previewGen) return;
+      if (!r.ok) throw new Error(r.status);
+      const j = await r.json();
+      if (gen !== previewGen) return;
+      dwellHeat = Object.assign({}, (j.totals && j.totals.dwell) || {});
+      // Nothing counts or reports a share until the totals are in: a share
+      // measured from local ticks alone would overwrite the real one.
+      dwellLoaded = true;
+      paintAll();
+    } catch (e) {
+      if (gen === previewGen) toast('heat unavailable: painting is off for this file');
+    }
+  }
+  function clearDwell() {
+    dwellLoaded = false;
+    dwellPath = null;
+    dwellBars = {};
+    setHover(null);
+    if (dwellObserver) { dwellObserver.disconnect(); dwellObserver = null; }
+  }
+
+  function readPct() {
+    const root = previewRoot();
+    if (!root) return null;
+    const keys = [...root.querySelectorAll('[data-dwell]')].map(el => el.dataset.dwell);
+    if (!keys.length) return null;
+    return 100 * keys.filter(k => (dwellHeat[k] || 0) >= DWELL_READ_SECS).length / keys.length;
+  }
+  function noteRead(path, pct) {
+    const e = entries.find(x => x.path === path);
+    if (e) e.read = { pct, stale: false };
+    const row = $rows.querySelector('.row[data-path="' + CSS.escape(path) + '"] .meta');
+    if (!row) return;
+    const old = row.querySelector('.read');
+    if (old) old.remove();
+    row.insertAdjacentHTML('beforeend', readHtml({ pct, stale: false }));
+  }
+  function flushDwell() {
+    const blocks = dwellPending, path = dwellPendingPath;
+    dwellPending = {};
+    if (!path || !Object.keys(blocks).length) return;
+    const body = { path, kind: 'dwell', blocks };
+    // Only while this file's blocks are on screen can the share be measured.
+    if (path === dwellPath && dwellLoaded) {
+      const pct = readPct();
+      if (pct !== null) { body.pct = pct; noteRead(path, pct); }
+    }
+    dwellInflight = fetch('/api/dwell', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), keepalive: true,
+    }).then(r => {
+      if (!r.ok) throw new Error(r.status);
+      dwellFailNoted = false;
+    }).catch((err) => {
+      // Say so once per failure streak: otherwise painting looks like it works
+      // while nothing reaches disk.
+      if (!dwellFailNoted) { dwellFailNoted = true; toast('heat not saved (' + err.message + ')'); }
+      // Put it back for the next flush rather than drop what was read.
+      if (dwellPendingPath !== path) return;
+      for (const [k, s] of Object.entries(blocks)) dwellPending[k] = (dwellPending[k] || 0) + s;
+    });
+  }
+
+  function setHover(el) {
+    if (dwellHover === el) return;
+    if (dwellHover) dwellHover.classList.remove('dwell-hover');
+    dwellHover = el;
+    if (el && painting) el.classList.add('dwell-hover');
+  }
+  function hoverAt(x, y) {
+    const t = document.elementFromPoint(x, y);
+    setHover(t && $preview.contains(t) ? t.closest('[data-dwell]') : null);
+  }
+  $preview.addEventListener('mousemove', (e) => {
+    dwellPointer = { x: e.clientX, y: e.clientY };
+    dwellLastMove = Date.now();
+    if (painting) hoverAt(e.clientX, e.clientY);
+  });
+  $preview.addEventListener('mouseleave', () => { dwellPointer = null; setHover(null); });
+  // Scrolling moves the text under a still cursor, and counts as activity.
+  $preview.addEventListener('scroll', () => {
+    if (!painting || !dwellPointer) return;
+    dwellLastMove = Date.now();
+    hoverAt(dwellPointer.x, dwellPointer.y);
+  }, { passive: true });
+
+  setInterval(() => {
+    if (!painting || document.hidden || !document.hasFocus()) return;
+    const el = dwellHover;
+    if (!el || !el.isConnected || !el.dataset.dwell || dwellPath !== selectedPath || !dwellLoaded) return;
+    if (Date.now() - dwellLastMove > DWELL_IDLE_MS) return;
+    const k = el.dataset.dwell, dt = DWELL_TICK_MS / 1000;
+    dwellHeat[k] = (dwellHeat[k] || 0) + dt;
+    if (dwellPendingPath !== dwellPath) { flushDwell(); dwellPendingPath = dwellPath; }
+    dwellPending[k] = (dwellPending[k] || 0) + dt;
+    paintBar(k);
+  }, DWELL_TICK_MS);
+  setInterval(flushDwell, DWELL_FLUSH_MS);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushDwell(); });
+  window.addEventListener('pagehide', flushDwell);
+
+  function setHeat(on) {
+    document.documentElement.toggleAttribute('data-heat', on);
+    try { localStorage.setItem('mdfeed-heat', on ? '1' : '0'); } catch (e) {}
+    if (on) layoutHeat();
+  }
+  function toggleHeat() {
+    const on = !document.documentElement.hasAttribute('data-heat');
+    setHeat(on);
+    toast(on ? 'heat: shown' : 'heat: hidden');
+  }
+  function togglePainting() {
+    painting = !painting;
+    document.documentElement.toggleAttribute('data-painting', painting);
+    $paintBtn.classList.toggle('active', painting);
+    if (painting) {
+      // Painting with the heat hidden would give no feedback at all.
+      if (!document.documentElement.hasAttribute('data-heat')) setHeat(true);
+      if (dwellPointer) hoverAt(dwellPointer.x, dwellPointer.y);
+      dwellLastMove = Date.now();
+    } else {
+      setHover(null);
+      flushDwell();
+    }
+    toast(painting ? 'painting: hover to read' : 'painting: off');
+  }
+  $paintBtn.addEventListener('click', togglePainting);
+  try { if (localStorage.getItem('mdfeed-heat') === '1') document.documentElement.setAttribute('data-heat', ''); } catch (e) {}
+
   // Collapsible headings. Clicking a heading folds everything beneath it up to
   // the next heading of equal or higher level, so nested subsections fold too.
   function headLevel(el) { return /^H[1-6]$/.test(el.tagName) ? +el.tagName[1] : 0; }
@@ -1536,6 +1985,7 @@ INDEX_HTML = """<!DOCTYPE html>
       el.style.display = stack.length ? 'none' : '';
       if (lvl && el.classList.contains('collapsed')) stack.push(lvl);
     }
+    layoutHeat();  // a fold changes which heading stands for a section
   }
   // Pick the level to collapse-all at: skip leading levels that occur only once
   // (e.g. a lone title H1) and fold from the first level that repeats — so a
@@ -1696,6 +2146,8 @@ INDEX_HTML = """<!DOCTYPE html>
     else if (e.key === 'd') { e.preventDefault(); showDiff(); }
     else if (e.key === 's') { e.preventDefault(); toggleSource(); }
     else if (e.key === 'y') { e.preventDefault(); copySource(); }
+    else if (e.key === 'm') { e.preventDefault(); togglePainting(); }
+    else if (e.key === 'h') { e.preventDefault(); toggleHeat(); }
   });
 
   // Reading preferences. The table and the attribute writer live in the
@@ -2012,7 +2464,14 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         if path == "/api/feed":
-            self._send_json(200, load_feed(self.feed_path))
+            self._send_json(200, with_read_shares(load_feed(self.feed_path), self.feed_path))
+            return
+        if path == "/api/dwell":
+            target = (parse_qs(url.query).get("path") or [""])[0]
+            if target not in allowed_paths(self.feed_path):
+                self._send_json(403, {"error": "path not in feed"})
+                return
+            self._send_json(200, {"totals": dwell_totals(self.feed_path, target)})
             return
         if path == "/api/status":
             self._send_json(
@@ -2053,6 +2512,65 @@ class FeedHandler(http.server.BaseHTTPRequestHandler):
             self._handle_sse()
             return
         self._send(404, b"not found", "text/plain")
+
+    def do_POST(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            self._send(403, b"forbidden host", "text/plain")
+            return
+        # Any page in the browser can POST to loopback. Requiring a JSON content
+        # type makes a cross-origin fetch preflight, which this server never
+        # answers, and a form cannot send one; the Origin check covers the rest.
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        origin = self.headers.get("Origin")
+        host = (self.headers.get("Host") or "").lower()
+        # Compared by host:port, not scheme, so an https front end (tailscale
+        # serve and the like) still matches the Host it forwards.
+        if ctype != "application/json" or (
+            origin is not None and urlparse(origin).netloc.lower() != host
+        ):
+            self._send(403, b"forbidden", "text/plain")
+            return
+        if urlparse(self.path).path != "/api/dwell":
+            self._send(404, b"not found", "text/plain")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not 0 < length <= 512 * 1024:
+            self._send_json(400, {"error": "bad length"})
+            return
+        try:
+            body = json.loads(self.rfile.read(length))
+        except ValueError:
+            self._send_json(400, {"error": "bad json"})
+            return
+        if not isinstance(body, dict):
+            self._send_json(400, {"error": "bad body"})
+            return
+        self._handle_dwell_post(body)
+
+    def _handle_dwell_post(self, body: Dict[str, Any]) -> None:
+        target = body.get("path")
+        kind = body.get("kind", "dwell")
+        if not isinstance(target, str) or target not in allowed_paths(self.feed_path):
+            self._send_json(403, {"error": "path not in feed"})
+            return
+        if kind not in DWELL_KINDS:
+            self._send_json(400, {"error": "unknown kind"})
+            return
+        try:
+            version = doc_version(Path(target))
+        except OSError:
+            self._send_json(404, {"error": "file missing on disk"})
+            return
+        n = append_dwell(
+            self.feed_path, target, version, clean_dwell_blocks(body.get("blocks")), kind
+        )
+        pct = body.get("pct")
+        if isinstance(pct, (int, float)) and not isinstance(pct, bool) and 0 <= pct <= 100:
+            record_read_share(self.feed_path, target, float(pct), version)
+        self._send_json(200, {"recorded": n, "version": version})
 
     def _handle_raw(self, target: str) -> None:
         """Serve a feed file's raw markdown as text/plain. Same allowlist as

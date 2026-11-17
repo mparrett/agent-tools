@@ -340,5 +340,118 @@ def test_theme_button_still_cycles(browser, viewer):
     page.close()
 
 
+# ── dwell heatmap ───────────────────────────────────────────────────────────
+# Painting, keying and the gutter all live in the page; the server only files
+# events. So whether heat lands on the right block, survives a reload, and
+# carries over an edit can only be seen here.
+
+DWELL_DOC = """# Plan
+
+Intro paragraph that the reader paints.
+
+## Details
+
+Untouched detail paragraph.
+
+Detail paragraph that the edit will change.
+"""
+
+
+def _bar(page, text):
+    """The gutter bar for the block containing `text`."""
+    key = page.locator("[data-dwell]", has_text=text).last.get_attribute("data-dwell")
+    return page.locator(f'.dwell-bar[data-for="{key}"]')
+
+
+def _opacity(bar):
+    return float(bar.evaluate("b => b.style.opacity || '0'"))
+
+
+def _paint(page, text, ms=1500):
+    page.locator("p", has_text=text).hover()
+    page.wait_for_timeout(ms)
+
+
+@pytest.fixture
+def dwell_page(browser, viewer):
+    base, feed, docs = viewer
+    docs["beta"].write_text(DWELL_DOC)
+    page = browser.new_page()
+    page.goto(base + "/?dwellflush=200")
+    expect(page.locator("#preview p", has_text="Intro paragraph")).to_be_visible()
+    yield page, base, feed, docs["beta"]
+    page.close()
+
+
+def test_painting_heats_the_hovered_block_and_survives_a_reload(dwell_page):
+    page, base, feed, doc = dwell_page
+    page.keyboard.press("m")
+    expect(page.locator("html")).to_have_attribute("data-heat", "")
+    _paint(page, "Intro paragraph")
+    assert _opacity(_bar(page, "Intro paragraph")) > 0
+    assert _opacity(_bar(page, "Untouched detail")) == 0
+    page.keyboard.press("m")  # turning painting off flushes
+    page.wait_for_timeout(400)
+    totals = mdfeed.dwell_totals(feed, str(doc))["dwell"]
+    assert len(totals) == 1 and next(iter(totals.values())) >= 1.0
+    page.reload()
+    expect(page.locator("#preview p", has_text="Intro paragraph")).to_be_visible()
+    expect(_bar(page, "Intro paragraph")).to_have_css("opacity", re.compile(r"^0\.[1-9]|^1$"))
+    # The list shows how much of the file has been read.
+    expect(page.locator(".row.active .read")).to_have_text(re.compile(r"^\d+%$"))
+
+
+def test_an_edit_cools_only_the_changed_block(dwell_page):
+    page, base, feed, doc = dwell_page
+    page.keyboard.press("m")
+    _paint(page, "Untouched detail", 1000)
+    _paint(page, "the edit will change", 1000)
+    page.keyboard.press("m")
+    page.wait_for_timeout(400)
+    doc.write_text(DWELL_DOC.replace("the edit will change", "the edit changed"))
+    page.keyboard.press("r")
+    expect(page.locator("#preview p", has_text="the edit changed")).to_be_visible()
+    expect(_bar(page, "Untouched detail")).to_have_css("opacity", re.compile(r"^0\.[1-9]|^1$"))
+    assert _opacity(_bar(page, "the edit changed")) == 0
+
+
+def test_a_folded_heading_stands_for_its_section(dwell_page):
+    page, *_ = dwell_page
+    page.keyboard.press("m")
+    _paint(page, "Untouched detail")
+    page.keyboard.press("m")
+    page.locator("#preview h2", has_text="Details").click()
+    bar = _bar(page, "Details")
+    expect(bar).to_have_class(re.compile(r"\bagg\b"))
+    # Averaged over three blocks, one of them read: warm, but cooler than that block.
+    assert 0 < _opacity(bar) < 0.6
+
+
+def test_diff_view_settles_dwell_and_refresh_restores_it(dwell_page):
+    page, base, feed, doc = dwell_page
+    page.keyboard.press("m")
+    _paint(page, "Intro paragraph", 1000)
+    doc.write_text(DWELL_DOC.replace("the edit will change", "the edit changed"))
+    mdfeed.append_entries(feed, [doc], cwd=str(doc.parent))  # what the write hook does
+    expect(page.locator("#fresh-pill")).to_be_visible()
+    page.keyboard.press("d")
+    expect(page.locator("#diff-bar")).to_be_visible()
+    # Leaving the document flushed what was painted, and the diff has no gutter.
+    expect(page.locator(".dwell-gutter")).to_have_count(0)
+    page.wait_for_timeout(300)
+    assert mdfeed.dwell_totals(feed, str(doc))
+    page.keyboard.press("r")
+    expect(_bar(page, "Intro paragraph")).to_have_css("opacity", re.compile(r"^0\.[1-9]|^1$"))
+
+
+def test_heat_key_hides_the_gutter_and_is_remembered(dwell_page):
+    page, *_ = dwell_page
+    page.keyboard.press("h")
+    expect(page.locator("html")).to_have_attribute("data-heat", "")
+    page.keyboard.press("h")
+    expect(page.locator(".dwell-gutter")).to_be_hidden()
+    assert page.evaluate("localStorage.getItem('mdfeed-heat')") == "0"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
