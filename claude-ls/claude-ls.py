@@ -163,6 +163,7 @@ KNOWN_MODES = frozenset(
         "activity",
         "resolve",
         "who",
+        "agents",
         "lineage",
     }
 )
@@ -172,7 +173,7 @@ common:  info <id> · search <text> · last · resume <id>
 
 modes by intent:
   one session     info (aka show, summary) · get · export · resume · lineage
-  find sessions   search · sessions · here (aka find) · pending · who
+  find sessions   search · sessions · here (aka find) · pending · who · agents
   browse          browse · select · list · last
   reports         activity · resolve"""
 
@@ -710,6 +711,20 @@ def parse_args():
     )
     who_parser.add_argument(
         "--json", action="store_true", help="Output as JSON, one object per session"
+    )
+
+    agents_parser = subparsers.add_parser(
+        "agents",
+        help="Claude Code's agent list (`claude agents`), with each session's start, "
+        "idle time, checkout, topic, last prompt and gist",
+    )
+    agents_parser.add_argument(
+        "--active",
+        action="store_true",
+        help="Leave out finished background agents (`claude agents` without --all)",
+    )
+    agents_parser.add_argument(
+        "--json", action="store_true", help="Output as JSON, one object per agent"
     )
 
     # Resume mode (cd to the session's dir and hand off to `claude -r`)
@@ -7556,6 +7571,190 @@ def who_mode(args, console: Optional[Console]):
             print("   ".join(notes))
 
 
+_AGENT_GIST_MAX = 200
+
+
+@dataclass
+class AgentRow:
+    session_id: str
+    name: str
+    kind: str  # "interactive" or "background"
+    state: str  # what `claude agents` says: working, blocked, done, stopped; interactive has none
+    status: str  # busy / idle / shell, for a live process
+    started_at: str  # ISO, local time
+    last_active: str  # ISO, local time, from the transcript's last write
+    idle_min: Optional[int]
+    cwd: str  # where the session last worked, per its transcript
+    branch: str
+    worktree: str
+    topic: str
+    last_prompt: str
+    gist: str  # a background job's own status line and result, when it has a job dir
+
+
+def _claude_agents(include_done: bool) -> List[Dict]:
+    """`claude agents --json`, the CLI's own list, rather than the session registry:
+    it is the only source that still knows finished background agents."""
+    argv = ["claude", "agents", "--json"] + (["--all"] if include_done else [])
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise SystemExit(f"Couldn't run `{' '.join(argv)}`: {exc}")
+    if out.returncode != 0:
+        raise SystemExit(f"`{' '.join(argv)}` failed: {out.stderr.strip() or out.stdout.strip()}")
+    rows = json.loads(out.stdout or "[]")
+    return [r for r in rows if isinstance(r, dict) and isinstance(r.get("sessionId"), str)]
+
+
+def _agent_gist(job_id: str) -> str:
+    """A background job's `state.json`: `detail` is its latest one-line status,
+    `output.result` what it reported when it finished. Interactive sessions have
+    no job dir, so no gist."""
+    path = Path.home() / ".claude" / "jobs" / job_id / "state.json"
+    try:
+        st = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return ""
+    detail = (st.get("detail") or "").strip()
+    out = st.get("output")
+    result = (out.get("result") or "").strip() if isinstance(out, dict) else ""
+    if result and result != detail:
+        return f"{detail} — {result}" if detail else result
+    return detail
+
+
+def _local_iso(ms_or_secs: Optional[float], is_ms: bool = True) -> str:
+    if not isinstance(ms_or_secs, (int, float)):
+        return ""
+    secs = ms_or_secs / 1000 if is_ms else ms_or_secs
+    return datetime.fromtimestamp(secs).astimezone().isoformat(timespec="seconds")
+
+
+def _agent_row(rec: Dict, base_dir: str) -> AgentRow:
+    sid = rec["sessionId"]
+    cwd = rec.get("cwd") or ""
+    topic, last_prompt, branch, last_active, idle = "", "", "", "", None
+    transcript = _who_transcript(base_dir, cwd, sid) if cwd else None
+    if transcript:
+        slug, first_user, _turns = get_session_preview(transcript, topic_only=True)
+        topic = first_user or slug
+        # A resumed session's first message is the harness's continuation preamble.
+        if topic.startswith("This session is being continued from a previous conversation"):
+            topic = ""
+        last_prompt = _tail_facts(transcript).last_prompt
+        # The transcript's own cwd and branch, not the launch dir's: a session that
+        # moved into a worktree records it there, and a finished agent's worktree
+        # may be gone from disk by now.
+        for e in reversed(_tail_entries(transcript)):
+            if e.get("cwd"):
+                cwd = e["cwd"]
+                branch = e.get("gitBranch") or ""
+                break
+        secs = _seconds_since_write(transcript)
+        if secs is not None:
+            idle = int(secs / 60)
+            last_active = _local_iso(time.time() - secs, is_ms=False)
+    repo = _canonical_repo_root(cwd) if cwd and os.path.isdir(cwd) else None
+    top = _repo_root_for(cwd) if cwd and os.path.isdir(cwd) else None
+    if top and repo and os.path.realpath(top) != os.path.realpath(repo):
+        worktree = os.path.basename(top.rstrip(os.sep))
+    elif "/.claude/worktrees/" in cwd or "/worktrees/" in cwd:
+        worktree = os.path.basename(cwd.rstrip(os.sep)) + ("" if os.path.isdir(cwd) else " (gone)")
+    else:
+        worktree = "main" if top else ""
+    gist = _agent_gist(rec.get("id") or sid[:8]) if rec.get("kind") == "background" else ""
+    # While a job works, its `detail` is often just the prompt it is working on,
+    # which the last-prompt line already shows.
+    if gist and last_prompt and gist.replace("\n", " ").startswith(last_prompt[:60]):
+        gist = ""
+    if len(gist) > _AGENT_GIST_MAX:
+        gist = gist[: _AGENT_GIST_MAX - 1] + "…"
+    return AgentRow(
+        session_id=sid,
+        name=rec.get("name") or "",
+        kind=rec.get("kind") or "",
+        state=rec.get("state") or "",
+        status=rec.get("status") or "",
+        started_at=_local_iso(rec.get("startedAt")),
+        last_active=last_active,
+        idle_min=idle,
+        cwd=cwd,
+        branch=branch,
+        worktree=worktree,
+        topic=topic,
+        last_prompt=last_prompt,
+        gist=gist,
+    )
+
+
+def agents_mode(args, console: Optional[Console]):
+    """`claude agents`, with the facts it leaves out: when each agent started, how
+    long it has been idle, where it works, and what it is about."""
+    recs = _claude_agents(include_done=not args.active)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        rows = list(pool.map(lambda r: _agent_row(r, args.base_dir), recs))
+    rows.sort(key=lambda r: (r.state == "done", r.idle_min if r.idle_min is not None else 10**9))
+
+    if args.json:
+        print(json.dumps([asdict(r) for r in rows], indent=2))
+        return
+    now = datetime.now().astimezone()
+    print(f"as of {now:%Y-%m-%d %H:%M %Z}; {len(rows)} agents")
+
+    def started(r: AgentRow) -> str:
+        if not r.started_at:
+            return "-"
+        t = datetime.fromisoformat(r.started_at)
+        return f"{t:%H:%M}" if t.date() == now.date() else f"{t:%m-%d %H:%M}"
+
+    def state(r: AgentRow) -> str:
+        return " ".join(x for x in (r.state, r.status) if x) or "-"
+
+    def where(r: AgentRow) -> str:
+        repo = os.path.basename(
+            (_canonical_repo_root(r.cwd) if os.path.isdir(r.cwd) else None) or r.cwd
+        )
+        wt = f" [{r.worktree}]" if r.worktree and r.worktree != "main" else ""
+        return f"{repo}{wt} @ {r.branch or '?'}"
+
+    def idle(r: AgentRow) -> str:
+        return format_staleness(r.idle_min) if r.idle_min is not None else "-"
+
+    if console and not args.no_color:
+        table = Table(show_header=True, header_style="bold blue", box=box.SIMPLE, expand=True)
+        table.add_column("id", width=8, style="cyan", no_wrap=True)
+        table.add_column("kind", style="dim", no_wrap=True)
+        table.add_column("state", no_wrap=True)
+        table.add_column("started", style="dim", no_wrap=True)
+        table.add_column("idle", no_wrap=True, justify="right")
+        table.add_column("where @ branch", no_wrap=True, max_width=40, overflow="ellipsis")
+        table.add_column("name / topic / last prompt / gist", ratio=1)
+        for r in rows:
+            detail = Text(r.name or "(unnamed)", style="bold")
+            if r.topic and r.topic != r.name:
+                detail.append(f"\n{r.topic}")
+            if r.last_prompt:
+                detail.append(f"\n↳ {r.last_prompt}", style="dim")
+            if r.gist:
+                detail.append(f"\n≡ {r.gist}", style="green")
+            table.add_row(
+                r.session_id[:8], r.kind[:2], state(r), started(r), idle(r), Text(where(r)), detail
+            )
+        console.print(table)
+        return
+    for r in rows:
+        print(
+            f"{r.session_id[:8]}  {r.kind[:2]}  {state(r):14s} {started(r):>11s}  {idle(r):>6s}  {where(r)}"
+        )
+        print(f"    {r.name or '(unnamed)'}")
+        if r.topic and r.topic != r.name:
+            print(f"    {r.topic}")
+        if r.last_prompt:
+            print(f"    ↳ {r.last_prompt}")
+        if r.gist:
+            print(f"    ≡ {r.gist}")
+
+
 # 256-color, not the 16 theme slots: themes remap those freely (one in use
 # here draws "red" as teal), and a refusal has to read as red.
 _ANSI = {"red": "38;5;196", "yellow": "38;5;214", "white": "1;38;5;231"}
@@ -8612,6 +8811,8 @@ def main():
         activity_mode(args, console)
     elif args.mode == "who":
         who_mode(args, console)
+    elif args.mode == "agents":
+        agents_mode(args, console)
     elif args.mode == "lineage":
         lineage_mode(args, console)
 
