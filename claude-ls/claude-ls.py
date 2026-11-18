@@ -7705,10 +7705,11 @@ def agents_mode(args, console: Optional[Console]):
         return
     now = datetime.now().astimezone()
     print(f"as of {now:%Y-%m-%d %H:%M %Z}; {len(rows)} agents")
-    # Fit one screen so nothing scrolls off: the header line above, the "more"
-    # line and the next prompt below. Off a terminal (an agent's Bash tool, a
-    # pipe) the size falls back to a modest default rather than everything.
-    budget = None if args.all else max(10, shutil.get_terminal_size((100, 40)).lines - 3)
+    # Fit one screen so the "as of" line doesn't scroll off. Besides the table:
+    # that line, the "more" line, and the prompt and command line before and the
+    # prompt after, any of which may take two lines. Off a terminal (an agent's
+    # Bash tool, a pipe) the size falls back to a modest default.
+    budget = None if args.all else max(10, shutil.get_terminal_size((100, 40)).lines - 7)
 
     def more(hidden: int) -> None:
         if hidden:
