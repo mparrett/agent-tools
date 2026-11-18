@@ -726,7 +726,7 @@ def parse_args():
     agents_parser.add_argument(
         "--all",
         action="store_true",
-        help="Print every agent; by default the list stops at one screenful",
+        help=f"Print every agent; by default the list stops at {_AGENTS_SHOWN}",
     )
     agents_parser.add_argument(
         "--json", action="store_true", help="Output as JSON, one object per agent"
@@ -7577,6 +7577,8 @@ def who_mode(args, console: Optional[Console]):
 
 
 _AGENT_GIST_MAX = 200
+# Live agents sort first, so the ones past the cap are mostly finished background jobs.
+_AGENTS_SHOWN = 25
 
 
 @dataclass
@@ -7705,14 +7707,8 @@ def agents_mode(args, console: Optional[Console]):
         return
     now = datetime.now().astimezone()
     print(f"as of {now:%Y-%m-%d %H:%M %Z}; {len(rows)} agents")
-    # Fit one screen so nothing scrolls off: the header line above, the "more"
-    # line and the next prompt below. Off a terminal (an agent's Bash tool, a
-    # pipe) the size falls back to a modest default rather than everything.
-    budget = None if args.all else max(10, shutil.get_terminal_size((100, 40)).lines - 3)
-
-    def more(hidden: int) -> None:
-        if hidden:
-            print(f"… {hidden} more; --all shows them")
+    shown = rows if args.all else rows[:_AGENTS_SHOWN]
+    hidden = len(rows) - len(shown)
 
     def started(r: AgentRow) -> str:
         if not r.started_at:
@@ -7756,37 +7752,22 @@ def agents_mode(args, console: Optional[Console]):
         return table
 
     if console and not args.no_color:
-        shown = rows
-        if budget is not None:
-            # Rows wrap to the terminal's width, so a row's height is only known
-            # once rendered: grow the table until the next row would overflow.
-            n = 0
-            while n < len(rows):
-                lines = len(console.render_lines(make_table(rows[: n + 1]), pad=False))
-                if lines > budget:
-                    break
-                n += 1
-            shown = rows[: max(1, n)]
         console.print(make_table(shown))
-        more(len(rows) - len(shown))
-        return
-    used = 0
-    for i, r in enumerate(rows):
-        block = [
-            f"{r.session_id[:8]}  {r.kind[:2]}  {state(r):14s} {started(r):>11s}  {idle(r):>6s}  {where(r)}",
-            f"    {r.name or '(unnamed)'}",
-        ]
-        if r.topic and r.topic != r.name:
-            block.append(f"    {r.topic}")
-        if r.last_prompt:
-            block.append(f"    ↳ {r.last_prompt}")
-        if r.gist:
-            block.append(f"    ≡ {r.gist}")
-        if budget is not None and i and used + len(block) > budget:
-            more(len(rows) - i)
-            return
-        used += len(block)
-        print("\n".join(block))
+    else:
+        for r in shown:
+            print(
+                f"{r.session_id[:8]}  {r.kind[:2]}  {state(r):14s} {started(r):>11s}  "
+                f"{idle(r):>6s}  {where(r)}"
+            )
+            print(f"    {r.name or '(unnamed)'}")
+            if r.topic and r.topic != r.name:
+                print(f"    {r.topic}")
+            if r.last_prompt:
+                print(f"    ↳ {r.last_prompt}")
+            if r.gist:
+                print(f"    ≡ {r.gist}")
+    if hidden:
+        print(f"… {hidden} more; --all shows them")
 
 
 # 256-color, not the 16 theme slots: themes remap those freely (one in use
