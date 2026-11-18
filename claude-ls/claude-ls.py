@@ -724,6 +724,11 @@ def parse_args():
         help="Leave out finished background agents (`claude agents` without --all)",
     )
     agents_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Print every agent; by default the list stops at one screenful",
+    )
+    agents_parser.add_argument(
         "--json", action="store_true", help="Output as JSON, one object per agent"
     )
 
@@ -7700,6 +7705,14 @@ def agents_mode(args, console: Optional[Console]):
         return
     now = datetime.now().astimezone()
     print(f"as of {now:%Y-%m-%d %H:%M %Z}; {len(rows)} agents")
+    # Fit one screen so nothing scrolls off: the header line above, the "more"
+    # line and the next prompt below. Off a terminal (an agent's Bash tool, a
+    # pipe) the size falls back to a modest default rather than everything.
+    budget = None if args.all else max(10, shutil.get_terminal_size((100, 40)).lines - 3)
+
+    def more(hidden: int) -> None:
+        if hidden:
+            print(f"… {hidden} more; --all shows them")
 
     def started(r: AgentRow) -> str:
         if not r.started_at:
@@ -7720,7 +7733,7 @@ def agents_mode(args, console: Optional[Console]):
     def idle(r: AgentRow) -> str:
         return format_staleness(r.idle_min) if r.idle_min is not None else "-"
 
-    if console and not args.no_color:
+    def make_table(shown: List[AgentRow]) -> Table:
         table = Table(show_header=True, header_style="bold blue", box=box.SIMPLE, expand=True)
         table.add_column("id", width=8, style="cyan", no_wrap=True)
         table.add_column("kind", style="dim", no_wrap=True)
@@ -7729,7 +7742,7 @@ def agents_mode(args, console: Optional[Console]):
         table.add_column("idle", no_wrap=True, justify="right")
         table.add_column("where @ branch", no_wrap=True, max_width=40, overflow="ellipsis")
         table.add_column("name / topic / last prompt / gist", ratio=1)
-        for r in rows:
+        for r in shown:
             detail = Text(r.name or "(unnamed)", style="bold")
             if r.topic and r.topic != r.name:
                 detail.append(f"\n{r.topic}")
@@ -7740,19 +7753,40 @@ def agents_mode(args, console: Optional[Console]):
             table.add_row(
                 r.session_id[:8], r.kind[:2], state(r), started(r), idle(r), Text(where(r)), detail
             )
-        console.print(table)
+        return table
+
+    if console and not args.no_color:
+        shown = rows
+        if budget is not None:
+            # Rows wrap to the terminal's width, so a row's height is only known
+            # once rendered: grow the table until the next row would overflow.
+            n = 0
+            while n < len(rows):
+                lines = len(console.render_lines(make_table(rows[: n + 1]), pad=False))
+                if lines > budget:
+                    break
+                n += 1
+            shown = rows[: max(1, n)]
+        console.print(make_table(shown))
+        more(len(rows) - len(shown))
         return
-    for r in rows:
-        print(
-            f"{r.session_id[:8]}  {r.kind[:2]}  {state(r):14s} {started(r):>11s}  {idle(r):>6s}  {where(r)}"
-        )
-        print(f"    {r.name or '(unnamed)'}")
+    used = 0
+    for i, r in enumerate(rows):
+        block = [
+            f"{r.session_id[:8]}  {r.kind[:2]}  {state(r):14s} {started(r):>11s}  {idle(r):>6s}  {where(r)}",
+            f"    {r.name or '(unnamed)'}",
+        ]
         if r.topic and r.topic != r.name:
-            print(f"    {r.topic}")
+            block.append(f"    {r.topic}")
         if r.last_prompt:
-            print(f"    ↳ {r.last_prompt}")
+            block.append(f"    ↳ {r.last_prompt}")
         if r.gist:
-            print(f"    ≡ {r.gist}")
+            block.append(f"    ≡ {r.gist}")
+        if budget is not None and i and used + len(block) > budget:
+            more(len(rows) - i)
+            return
+        used += len(block)
+        print("\n".join(block))
 
 
 # 256-color, not the 16 theme slots: themes remap those freely (one in use
