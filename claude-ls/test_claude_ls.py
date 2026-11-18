@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -795,6 +796,32 @@ def test_resume_pick_out_of_range_exits(tmp_path, capsys):
         cl.resume_mode(_resume_args(base, session=uuid, pick=9), None)
     assert exc.value.code == 1
     assert "out of range" in capsys.readouterr().err
+
+
+def test_resume_prints_commands_by_default(tmp_path, capsys, monkeypatch):
+    base, uuid, dirs = _same_id_across_dirs(tmp_path)
+    monkeypatch.setattr(cl, "_exec", lambda cmd: pytest.fail("printing must not exec"))
+    args = _resume_args(base, session=uuid, pick=2)
+    del args.dry_run  # what the CLI passes now: no --exec means print
+    cl.resume_mode(args, None)
+    out = capsys.readouterr().out.strip()
+    assert out == f"cd {shlex.quote(str(dirs['work'][1]))} && claude -r {uuid}"
+
+
+def test_resume_exec_cds_and_execs(tmp_path, monkeypatch):
+    base, uuid, dirs = _same_id_across_dirs(tmp_path)
+    ran = {}
+    monkeypatch.setattr(cl.os, "chdir", lambda d: ran.update(cwd=d))
+    monkeypatch.setattr(cl, "_exec", lambda cmd: ran.update(cmd=cmd))
+    args = _resume_args(base, session=uuid, pick=2, exec_=True)
+    cl.resume_mode(args, None)
+    assert ran == {"cwd": str(dirs["work"][1]), "cmd": ["claude", "-r", uuid]}
+
+
+@pytest.mark.parametrize("argv,want", [([], False), (["--exec"], True), (["-x"], True)])
+def test_resume_exec_flag_parses(monkeypatch, argv, want):
+    monkeypatch.setattr(sys, "argv", ["claude-ls", "resume", "abc123", *argv])
+    assert cl.parse_args().exec_ is want
 
 
 # --- discovery refs (phase 1) ----------------------------------------

@@ -58,14 +58,15 @@ cautions and proceeds — a transcript is equally warm right after you quit.
 - `pending` — sessions waiting on user input or a permission prompt; `pending --json` includes each session's real `cwd` and `git_branch` (read from the transcript), so callers can join a waiting session to a process by path, and the full `session_id` (the listing abbreviates it for display, the JSON does not — it is a join key)
 - `activity` — recent session activity
 - `who` — the live fleet, grouped by repo: tmux pane, checkout @ branch, taken from where the session's edits land rather than where it launched (a session started in the main checkout and working in a worktree shows the worktree; two live sessions editing one checkout are marked `!`), busy/idle status, model, topic, last prompt, files touched. From inside a session, `who --me` shows that session and its repo-mates, resolved from `CLAUDE_CODE_SESSION_ID` (or the process ancestry). `who --json` is the form a hook consumes. Reads Claude Code's own `~/.claude/sessions/<pid>.json` registry, so nothing has to be posted and nothing goes stale. A pane that has been `/clear`ed shows `cleared from <id> · N sessions in this pane`
-- `resume` — `cd` into a session's anchoring dir and hand off to `claude -r`. When the id you pass matches several sessions (e.g. a short partial id that's a substring of more than one), it lists the candidates by directory and mtime; choose one with `resume <id> --pick <n>`. When the id names a session that was `/clear`ed and its pane now runs a later session, `resume` refuses and points at the pane and the later id (`--attach` jumps there, `--force` resumes the old transcript anyway)
+- `resume` — print the `cd` into a session's anchoring dir and the `claude -r` that resumes it, for your shell to run (`--exec` runs them itself, but under `uv` the `cd` can't move your shell). When the id you pass matches several sessions (e.g. a short partial id that's a substring of more than one), it lists the candidates by directory and mtime; choose one with `resume <id> --pick <n>`. When the id names a session that was `/clear`ed and its pane now runs a later session, `resume` refuses and points at the pane and the later id (`--attach` jumps there, `--force` resumes the old transcript anyway)
 
 ### `-n` means rows
 
 `-n` is the count of *rows this command lists* — sessions, results, matches — on
 `list`, `sessions`, `search`, `browse`, `here` and `pending`. Commands that count
-something else spell it out: `last --turns`, `get --tail`. `resume` takes
-`--dry-run` (it was `-n`, which read as a count and silently consumed nothing).
+something else spell it out: `last --turns`, `get --tail`. `resume` prints by
+default and takes `--exec` to run; `--dry-run`, once its print flag (and before
+that `-n`, which read as a count and silently consumed nothing), is still accepted.
 
 ### `--sort` picks which timestamp
 

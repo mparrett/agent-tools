@@ -735,7 +735,7 @@ def parse_args():
     # Resume mode (cd to the session's dir and hand off to `claude -r`)
     resume_parser = subparsers.add_parser(
         "resume",
-        help="cd into a session's anchoring dir and resume it with `claude -r`",
+        help="Print the cd + `claude -r` commands that resume a session (--exec runs them)",
     )
     resume_parser.add_argument(
         "session",
@@ -768,10 +768,15 @@ def parse_args():
         "instead of resuming",
     )
     resume_parser.add_argument(
-        "--dry-run",
+        "--exec",
+        "-x",
+        dest="exec_",
         action="store_true",
-        help="Print the cd + claude command instead of running it",
+        help="Run the commands instead of printing them: cd, then replace this "
+        "process with claude (or tmux, under --attach)",
     )
+    # Printing is the default now; the flag stays so scripts that pass it still work.
+    resume_parser.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
 
     # Activity mode (week-in-review across sessions + repos)
     activity_parser = subparsers.add_parser(
@@ -3686,13 +3691,14 @@ def search_content_mode(args, console: Optional[Console]):
                     ident = row_owner.stem
                     break
         # resume_mode resolves the id, locates the anchoring dir, and runs the
-        # tmux safety check. -f passes through to skip that check; attach/dry-run
-        # aren't exposed here — use the dedicated `resume` command for those.
+        # tmux safety check, and prints the commands rather than running them.
+        # -f passes through to skip that check; attach and --exec aren't exposed
+        # here — use the dedicated `resume` command for those.
         args.session = ident
         args.session_id = None
         args.force = getattr(args, "force", False)
         args.attach = False
-        args.dry_run = False
+        args.exec_ = False
         resume_mode(args, console)
         return
 
@@ -7812,6 +7818,11 @@ def resume_mode(args, console: Optional[Console]):
     to `claude -r`. Guards against double-driving a session already live in a
     matching tmux session. Falls back to the main repo when an anchoring
     worktree has been removed."""
+    # Print by default rather than exec. claude-ls runs under `uv run --script`, so
+    # an exec'd claude is left as a child of uv rather than of your shell, and the
+    # cd only moves that child: your shell stays where it was. Printed, the
+    # commands run in your own shell, which ends up in the session's directory.
+    args.dry_run = not getattr(args, "exec_", False)
     ident = getattr(args, "session_id", None) or getattr(args, "session", None)
     if not ident:
         print("Provide a session id (positional or -s/--session-id).", file=sys.stderr)
@@ -8087,7 +8098,7 @@ def resume_mode(args, console: Optional[Console]):
     if fallback_note:
         _alert("yellow", fallback_note, console)
     if args.dry_run:
-        print(f"cd {target_dir} && {' '.join(claude_cmd)}")
+        print(f"cd {shlex.quote(target_dir)} && {shlex.join(claude_cmd)}")
         return
     print(f"Resuming {full_id[:8]} in {_tilde(target_dir)}", file=sys.stderr)
     try:
