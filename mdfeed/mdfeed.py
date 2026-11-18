@@ -789,8 +789,7 @@ INDEX_HTML = """<!DOCTYPE html>
      The column becomes a stacking context so the gutter can sit behind the text. */
   :root[data-heat-style="tint"] .preview-inner { z-index: 0; }
   :root[data-heat-style="tint"] .dwell-gutter { z-index: -1; }
-  :root[data-heat-style="tint"] .dwell-bar { border-radius: 10px; filter: blur(var(--heat-blur, 6px)); }
-  :root[data-heat-style="tint"] .dwell-bar.agg { background: var(--accent); }
+  .dwell-tint { position: absolute; border-radius: 10px; background: var(--accent); filter: blur(var(--heat-blur, 6px)); }
   :root[data-painting] #preview .preview-inner { cursor: cell; }
   :root[data-painting] #preview [data-dwell].dwell-hover { outline: 1px dashed var(--faint); outline-offset: 3px; border-radius: 2px; }
   .row .meta .read { font-variant-numeric: tabular-nums; color: var(--accent); }
@@ -1712,7 +1711,9 @@ INDEX_HTML = """<!DOCTYPE html>
   let DWELL_FLUSH_MS = 3000;
   // Experiment knobs: ?heat=tint&blur=6&tintmax=0.35&pad=6
   const HEAT_Q = new URLSearchParams(location.search);
-  const HEAT_TINT = HEAT_Q.get('heat') === 'tint';
+  const HEAT_MODE = HEAT_Q.get('heat') || 'bar';  // bar | tint | both
+  const HEAT_TINT = HEAT_MODE === 'tint' || HEAT_MODE === 'both';
+  const HEAT_BAR = HEAT_MODE !== 'tint';
   const TINT_MAX = +(HEAT_Q.get('tintmax') || 0.35);  // full heat stays a wash, never a block of colour
   const TINT_PAD = +(HEAT_Q.get('pad') || 6);
   if (HEAT_TINT) {
@@ -1774,13 +1775,15 @@ INDEX_HTML = """<!DOCTYPE html>
     return s > 0 ? Math.min(1, 0.15 + 0.85 * Math.log1p(s) / Math.log1p(DWELL_SATURATE_SECS)) : 0;
   }
   function paintBar(k) {
-    const bar = dwellBars[k];
-    if (!bar) return;
+    const marks = dwellBars[k];
+    if (!marks) return;
     const keys = dwellAgg[k];
     const lvl = keys
       ? keys.reduce((a, x) => a + heatLevel(dwellHeat[x] || 0), 0) / keys.length
       : heatLevel(dwellHeat[k] || 0);
-    bar.style.opacity = (HEAT_TINT ? lvl * TINT_MAX : lvl).toFixed(3);
+    for (const m of marks) {
+      m.style.opacity = (m.classList.contains('dwell-tint') ? lvl * TINT_MAX : lvl).toFixed(3);
+    }
   }
   function paintAll() { for (const k in dwellBars) paintBar(k); }
 
@@ -1820,21 +1823,27 @@ INDEX_HTML = """<!DOCTYPE html>
       let h = r.height;
       const sub = el.tagName === 'LI' && el.querySelector(':scope > ul, :scope > ol');
       if (sub) h = Math.max(4, sub.getBoundingClientRect().top - r.top);
-      const bar = document.createElement('div');
-      bar.className = 'dwell-bar' + (dwellAgg[el.dataset.dwell] ? ' agg' : '');
-      bar.dataset.for = el.dataset.dwell;
+      const marks = [];
       if (HEAT_TINT) {
-        bar.style.left = (r.left - rr.left - TINT_PAD) + 'px';
-        bar.style.width = (r.width + 2 * TINT_PAD) + 'px';
-        bar.style.top = (r.top - rr.top - TINT_PAD) + 'px';
-        bar.style.height = (h + 2 * TINT_PAD) + 'px';
-      } else {
+        const tint = document.createElement('div');
+        tint.className = 'dwell-tint';
+        tint.style.left = (r.left - rr.left - TINT_PAD) + 'px';
+        tint.style.width = (r.width + 2 * TINT_PAD) + 'px';
+        tint.style.top = (r.top - rr.top - TINT_PAD) + 'px';
+        tint.style.height = (h + 2 * TINT_PAD) + 'px';
+        marks.push(tint);
+      }
+      if (HEAT_BAR) {
+        const bar = document.createElement('div');
+        bar.className = 'dwell-bar' + (dwellAgg[el.dataset.dwell] ? ' agg' : '');
+        bar.dataset.for = el.dataset.dwell;
         bar.style.left = x + 'px';
         bar.style.top = (r.top - rr.top) + 'px';
         bar.style.height = h + 'px';
+        marks.push(bar);
       }
-      dwellBars[el.dataset.dwell] = bar;
-      frag.appendChild(bar);
+      dwellBars[el.dataset.dwell] = marks;
+      marks.forEach(m => frag.appendChild(m));
     }
     gutter.replaceChildren(frag);
     paintAll();
