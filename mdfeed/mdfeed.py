@@ -785,6 +785,12 @@ INDEX_HTML = """<!DOCTYPE html>
   :root:not([data-heat]) .dwell-gutter { display: none; }
   .dwell-bar { position: absolute; width: 4px; border-radius: 2px; background: var(--accent); }
   .dwell-bar.agg { background: repeating-linear-gradient(var(--accent) 0 4px, transparent 4px 7px); }
+  /* Experiment (?heat=tint): tint the block's whole box, softened at the edges.
+     The column becomes a stacking context so the gutter can sit behind the text. */
+  :root[data-heat-style="tint"] .preview-inner { z-index: 0; }
+  :root[data-heat-style="tint"] .dwell-gutter { z-index: -1; }
+  :root[data-heat-style="tint"] .dwell-bar { border-radius: 10px; filter: blur(var(--heat-blur, 6px)); }
+  :root[data-heat-style="tint"] .dwell-bar.agg { background: var(--accent); }
   :root[data-painting] #preview .preview-inner { cursor: cell; }
   :root[data-painting] #preview [data-dwell].dwell-hover { outline: 1px dashed var(--faint); outline-offset: 3px; border-radius: 2px; }
   .row .meta .read { font-variant-numeric: tabular-nums; color: var(--accent); }
@@ -1704,6 +1710,15 @@ INDEX_HTML = """<!DOCTYPE html>
   const DWELL_READ_SECS = 2;        // a block counts toward "% read" from here
   const DWELL_SATURATE_SECS = 60;
   let DWELL_FLUSH_MS = 3000;
+  // Experiment knobs: ?heat=tint&blur=6&tintmax=0.35&pad=6
+  const HEAT_Q = new URLSearchParams(location.search);
+  const HEAT_TINT = HEAT_Q.get('heat') === 'tint';
+  const TINT_MAX = +(HEAT_Q.get('tintmax') || 0.35);  // full heat stays a wash, never a block of colour
+  const TINT_PAD = +(HEAT_Q.get('pad') || 6);
+  if (HEAT_TINT) {
+    document.documentElement.setAttribute('data-heat-style', 'tint');
+    if (HEAT_Q.get('blur') !== null) document.documentElement.style.setProperty('--heat-blur', +HEAT_Q.get('blur') + 'px');
+  }
   { const v = new URLSearchParams(location.search).get('dwellflush'); if (v !== null) DWELL_FLUSH_MS = +v; }
   const $paintBtn = document.getElementById('paint-btn');
   let painting = false;
@@ -1765,7 +1780,7 @@ INDEX_HTML = """<!DOCTYPE html>
     const lvl = keys
       ? keys.reduce((a, x) => a + heatLevel(dwellHeat[x] || 0), 0) / keys.length
       : heatLevel(dwellHeat[k] || 0);
-    bar.style.opacity = lvl.toFixed(3);
+    bar.style.opacity = (HEAT_TINT ? lvl * TINT_MAX : lvl).toFixed(3);
   }
   function paintAll() { for (const k in dwellBars) paintBar(k); }
 
@@ -1808,9 +1823,16 @@ INDEX_HTML = """<!DOCTYPE html>
       const bar = document.createElement('div');
       bar.className = 'dwell-bar' + (dwellAgg[el.dataset.dwell] ? ' agg' : '');
       bar.dataset.for = el.dataset.dwell;
-      bar.style.left = x + 'px';
-      bar.style.top = (r.top - rr.top) + 'px';
-      bar.style.height = h + 'px';
+      if (HEAT_TINT) {
+        bar.style.left = (r.left - rr.left - TINT_PAD) + 'px';
+        bar.style.width = (r.width + 2 * TINT_PAD) + 'px';
+        bar.style.top = (r.top - rr.top - TINT_PAD) + 'px';
+        bar.style.height = (h + 2 * TINT_PAD) + 'px';
+      } else {
+        bar.style.left = x + 'px';
+        bar.style.top = (r.top - rr.top) + 'px';
+        bar.style.height = h + 'px';
+      }
       dwellBars[el.dataset.dwell] = bar;
       frag.appendChild(bar);
     }
