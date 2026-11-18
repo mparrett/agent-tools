@@ -7705,89 +7705,91 @@ def agents_mode(args, console: Optional[Console]):
         return
     now = datetime.now().astimezone()
     print(f"as of {now:%Y-%m-%d %H:%M %Z}; {len(rows)} agents")
-    # Fit one screen so the "as of" line doesn't scroll off. Besides the table:
+    # Fit one screen so the "as of" line doesn't scroll off. Besides the list:
     # that line, the "more" line, and the prompt and command line before and the
     # prompt after, any of which may take two lines. Off a terminal (an agent's
     # Bash tool, a pipe) the size falls back to a modest default.
-    budget = None if args.all else max(10, shutil.get_terminal_size((100, 40)).lines - 7)
+    budget = None if args.all else max(10, shutil.get_terminal_size((100, 40)).lines - 8)
 
     def more(hidden: int) -> None:
         if hidden:
             print(f"… {hidden} more; --all shows them")
 
+    width = console.width if console else shutil.get_terminal_size((200, 40)).columns
+
     def started(r: AgentRow) -> str:
         if not r.started_at:
             return "-"
         t = datetime.fromisoformat(r.started_at)
-        return f"{t:%H:%M}" if t.date() == now.date() else f"{t:%m-%d %H:%M}"
+        return f"{t:%H:%M}" if t.date() == now.date() else f"{t:%m-%d}"
 
     def state(r: AgentRow) -> str:
-        return " ".join(x for x in (r.state, r.status) if x) or "-"
+        # A background agent's process status repeats its state ("done idle");
+        # an interactive session has no state, so its status is all there is.
+        return (r.state if r.kind == "background" else r.status) or "-"
 
     def where(r: AgentRow) -> str:
-        repo = os.path.basename(
-            (_canonical_repo_root(r.cwd) if os.path.isdir(r.cwd) else None) or r.cwd
-        )
-        wt = f" [{r.worktree}]" if r.worktree and r.worktree != "main" else ""
-        return f"{repo}{wt} @ {r.branch or '?'}"
+        top = (_canonical_repo_root(r.cwd) if os.path.isdir(r.cwd) else None) or r.cwd
+        out = os.path.basename(top.rstrip(os.sep))
+        wt = r.worktree if r.worktree and r.worktree != "main" else ""
+        if wt:
+            out += f" [{wt}]"
+        # The branch only when it says something the worktree name doesn't.
+        if (
+            r.branch
+            and r.branch not in (wt, f"worktree-{wt}")
+            and not (not wt and r.branch in ("main", "master"))
+        ):
+            out += f" @ {r.branch}"
+        return out
 
     def idle(r: AgentRow) -> str:
         return format_staleness(r.idle_min) if r.idle_min is not None else "-"
 
-    def make_table(shown: List[AgentRow]) -> Table:
-        table = Table(show_header=True, header_style="bold blue", box=box.SIMPLE, expand=True)
-        table.add_column("id", width=8, style="cyan", no_wrap=True)
-        table.add_column("kind", style="dim", no_wrap=True)
-        table.add_column("state", no_wrap=True)
-        table.add_column("started", style="dim", no_wrap=True)
-        table.add_column("idle", no_wrap=True, justify="right")
-        table.add_column("where @ branch", no_wrap=True, max_width=40, overflow="ellipsis")
-        table.add_column("name / topic / last prompt / gist", ratio=1)
-        for r in shown:
-            detail = Text(r.name or "(unnamed)", style="bold")
-            if r.topic and r.topic != r.name:
-                detail.append(f"\n{r.topic}")
-            if r.last_prompt:
-                detail.append(f"\n↳ {r.last_prompt}", style="dim")
-            if r.gist:
-                detail.append(f"\n≡ {r.gist}", style="green")
-            table.add_row(
-                r.session_id[:8], r.kind[:2], state(r), started(r), idle(r), Text(where(r)), detail
-            )
-        return table
+    def clip(text: str, room: int) -> str:
+        return text if len(text) <= room else text[: max(0, room - 1)] + "…"
 
-    if console and not args.no_color:
-        shown = rows
-        if budget is not None:
-            # Rows wrap to the terminal's width, so a row's height is only known
-            # once rendered: grow the table until the next row would overflow.
-            n = 0
-            while n < len(rows):
-                lines = len(console.render_lines(make_table(rows[: n + 1]), pad=False))
-                if lines > budget:
-                    break
-                n += 1
-            shown = rows[: max(1, n)]
-        console.print(make_table(shown))
-        more(len(rows) - len(shown))
-        return
+    state_style = {"working": "green", "blocked": "yellow", "busy": "green", "stopped": "red"}
+    indent = " " * 10  # under the state, so the ids stay a clean column
+
+    def block(r: AgentRow) -> List[Text]:
+        # One line each, clipped rather than wrapped: an agent's height is then
+        # known before printing, and the ids down the left stay scannable.
+        mark = "◆" if r.kind == "interactive" else " "
+        head = Text(f"{mark}", style="magenta")
+        head.append(r.session_id[:8], style="cyan")
+        st = state(r)
+        head.append(f" {st:<8}", style=state_style.get(st, "dim"))
+        head.append(f" {started(r):>5} {idle(r):>6}  ", style="dim")
+        head.append(clip(where(r), width - len(head.plain)))
+        lines = [head]
+        room = width - len(indent) - 2
+        lines.append(Text(indent) + Text(clip(r.name or "(unnamed)", room + 2), style="bold"))
+        if r.topic and r.topic != r.name:
+            lines.append(Text(indent + clip(r.topic, room + 2)))
+        if r.last_prompt:
+            lines.append(Text(indent + "↳ " + clip(r.last_prompt, room), style="dim"))
+        if r.gist:
+            lines.append(Text(indent) + Text("≡ " + clip(r.gist, room), style="green"))
+        return lines
+
+    def emit(line: Text) -> None:
+        if console and not args.no_color:
+            console.print(line, soft_wrap=True, highlight=False)
+        else:
+            print(line.plain)
+
     used = 0
     for i, r in enumerate(rows):
-        block = [
-            f"{r.session_id[:8]}  {r.kind[:2]}  {state(r):14s} {started(r):>11s}  {idle(r):>6s}  {where(r)}",
-            f"    {r.name or '(unnamed)'}",
-        ]
-        if r.topic and r.topic != r.name:
-            block.append(f"    {r.topic}")
-        if r.last_prompt:
-            block.append(f"    ↳ {r.last_prompt}")
-        if r.gist:
-            block.append(f"    ≡ {r.gist}")
-        if budget is not None and i and used + len(block) > budget:
+        lines = block(r)
+        if budget is not None and i and used + len(lines) > budget:
             more(len(rows) - i)
-            return
-        used += len(block)
-        print("\n".join(block))
+            break
+        used += len(lines)
+        for line in lines:
+            emit(line)
+    if any(r.kind == "interactive" for r in rows):
+        emit(Text("◆ interactive session", style="dim"))
 
 
 # 256-color, not the 16 theme slots: themes remap those freely (one in use
