@@ -326,6 +326,7 @@ class _Scan:
     last_assistant: Optional[tuple[Instant, str]] = None
     tools: list[_Tool] = field(default_factory=list)
     results: dict[str, tuple[str, dict]] = field(default_factory=dict)  # call id -> (text, extra)
+    errors: set[str] = field(default_factory=set)  # call ids whose result Claude marked is_error
     peak_context: int = 0
     compaction_count: int = 0
     context_after_compaction: Optional[int] = 0
@@ -430,6 +431,8 @@ def _scan_claude(entries: list[dict], is_subagent: bool, hint=None) -> _Scan:
                         and b.get("tool_use_id")
                     ):
                         scan.results[b["tool_use_id"]] = (_result_text(b.get("content")), extra)
+                        if b.get("is_error"):
+                            scan.errors.add(b["tool_use_id"])
             # Every record in a subagent transcript is a sidechain; its prompts
             # are the delegation it was given, which is what it was asked to do.
             if (
@@ -1113,13 +1116,12 @@ _API_MERGED_RE = re.compile(r'"merged"\s*:\s*true')
 
 
 def pr_outcome(
-    how: str, pr: str, result: str, *, held: bool, last: bool, auto: bool = False
+    how: str, pr: str, result: str, *, exit_state: Optional[str], held: bool, last: bool
 ) -> Optional[bool]:
     """Whether the merge or close named by `how` happened, from its tool
-    result. `held`: every separator from this segment to the end of the
-    command is `&&`, so a clean exit means it succeeded. `last`: it is the
-    final segment, so a failed exit is its own. None when the result shows
-    neither, including `--auto`, which only queues a merge."""
+    result. `exit_state` is the command's (`_exit_state`). `held`: only `&&`
+    follows this segment, so a clean exit means it succeeded. `last`: it is
+    the final segment, so a failed exit is its own."""
     verb = closing_verb(how)
     if verb is None:
         return None
@@ -1136,12 +1138,38 @@ def pr_outcome(
         # "already merged" is someone else's merge, not this command's.
         if any(m.group(1) == num for m in _PR_ALREADY_RE.finditer(text)):
             return False
-    if auto:
-        return None
-    # The Bash tool opens a failed command's result with its exit code.
-    if text.startswith("Exit code"):
+    if exit_state == "denied":
+        return False
+    if exit_state == "failed":
         return False if last else None
-    return True if held else None
+    return True if exit_state == "clean" and held else None
+
+
+# A call refused before it ran: by the person, or by a permission rule.
+_DENIED_RE = re.compile(
+    r"^(?:The user doesn't want to proceed|Permission for this action was denied)"
+)
+_CODEX_EXIT_RE = re.compile(r'"exit_code"\s*:\s*(-?\d+)|^Process exited with code (-?\d+)', re.M)
+
+
+def _exit_state(scan: _Scan, call_id: str, codex: bool = False) -> Optional[str]:
+    """ "clean", "failed" or "denied" for a shell call, or None with no result
+    (cut off, or still running when the transcript was read)."""
+    if call_id not in scan.results:
+        return None
+    text, _ = scan.results[call_id]
+    text = text or ""
+    if _DENIED_RE.match(text):
+        return "denied"
+    # Codex records the exit status in its output; a Claude result can print
+    # the same text, so it is read only for Codex.
+    m = _CODEX_EXIT_RE.search(text) if codex else None
+    if m:
+        return "clean" if (m.group(1) or m.group(2)) == "0" else "failed"
+    # Claude's Bash opens a failed command's result with its exit code and marks it is_error.
+    if call_id in scan.errors or text.startswith("Exit code"):
+        return "failed"
+    return "clean"
 
 
 def _acted(scan: _Scan) -> list[Acted]:
@@ -1184,29 +1212,40 @@ def closing_verb(how: str) -> Optional[str]:
     return None
 
 
-def _closing_acts(scan: _Scan) -> list[Acted]:
+def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
     """The PR merges and closes among the scanned tool calls, each with its
-    outcome (`pr_outcome`)."""
+    outcome (`pr_outcome`). `--disable-auto` cancels a queued merge rather
+    than merging, and `--auto` only queues one, so it stays unconfirmed."""
     out: list[Acted] = []
     for t in scan.tools:
         if not t.command or not _CLOSING_HINT_RE.search(t.command):
             continue
         result, _ = scan.results.get(t.call_id, ("", {}))
+        state = _exit_state(scan, t.call_id, codex)
         cur = t.cwd
         parts = _split_segments(strip_heredocs(t.command))
+        # A trailing `&` backgrounds the last segment: the exit says nothing of it.
+        background = bool(parts) and parts[-1][1] == "&"
         for i, (seg, sep) in enumerate(parts):
             for words, filtered in _segments(seg):
                 if words[0] == "cd":
                     cur = (_abs_path(words[1], cur) if len(words) > 1 else None) or cur
                     continue
+                if "--disable-auto" in words:
+                    continue
                 # The final segment's separator joins it to nothing.
-                held = all(s == "&&" for _, s in parts[i:-1])
+                held = all(s == "&&" for _, s in parts[i:-1]) and not background
                 last = i == len(parts) - 1
                 for a in _segment_acts(words, cur, result, t.at, filtered):
                     if a.kind != "pr" or not closing_verb(a.how) or not _plausible(a):
                         continue
                     ok = pr_outcome(
-                        a.how, a.value, result, held=held, last=last, auto="--auto" in words
+                        a.how,
+                        a.value,
+                        result,
+                        exit_state=None if "--auto" in words else state,
+                        held=held,
+                        last=last,
                     )
                     out.append(replace(a, ok=ok))
     return out
@@ -1313,7 +1352,7 @@ def _build(ref: _Ref, entries: list[dict], full: bool, log=None) -> SessionFacts
         sf.chain = [ref.id]
     if ref.kind == "subagent":
         sf.agent_meta = _agent_meta(ref.path)
-    sf.pr_closing = _closing_acts(scan)
+    sf.pr_closing = _closing_acts(scan, is_codex)
     if full:
         sf.work = seam.derive_work_signals(entries)
         sf.repos, sf.gh_repos, wt_hits, sf.worktree_branches = _locations(

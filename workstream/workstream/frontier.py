@@ -288,7 +288,11 @@ def foreign_actions(ws: Workstream, recent, member_ids: set[str], slug_of=None) 
             repo, _, num = a.value.partition("#")
             # A bare number is the PR of the repo the command ran in.
             repo = repo or (slug_of(a.dir) if a.dir else None) or ""
-            value = anchored.get(f"{repo.lower()}#{num}") if repo else _guess(anchored, num, a, f)
+            value = anchored.get(f"{repo.lower()}#{num}")
+            if value is None and a.value.startswith("#"):
+                # A bare number whose directory gave no answer, or the wrong
+                # one: a fork's origin, where gh merges on the upstream.
+                value = _guess(anchored, num, a, f)
             if not value:
                 continue
             when = a.at.iso() if a.at else "unknown time"

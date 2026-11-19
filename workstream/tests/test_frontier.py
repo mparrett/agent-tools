@@ -283,12 +283,27 @@ SLUGS = {"/src/meadow": "acme/meadow", "/src/bramble": "acme/bramble"}
 
 
 def _merger(
-    sid: str, command: str, result: str = "", kind: str = "claude", cwd: str = "/src/meadow"
+    sid: str,
+    command: str,
+    result: str | None = "",
+    kind: str = "claude",
+    cwd: str = "/src/meadow",
+    error: bool = False,
 ) -> SessionFacts:
-    """A session whose one Bash call was `command`, parsed the way sync parses it."""
+    """A session whose one Bash call was `command`, parsed the way sync parses
+    it. `result` None: the call has no result; `error`: Claude marked it is_error."""
     tool = sessions._Tool(at(30), "Bash", {}, command, cwd, "t1")
-    scan = sessions._Scan(tools=[tool], results={"t1": (result, {})})
-    return facts(sid, kind=kind, pr_closing=sessions._closing_acts(scan))
+    scan = sessions._Scan(tools=[tool], results={} if result is None else {"t1": (result, {})})
+    if error:
+        scan.errors.add("t1")
+    return facts(sid, kind=kind, pr_closing=sessions._closing_acts(scan, kind == "codex"))
+
+
+def _unconfirmed(sid: str = S2) -> list[str]:
+    return [
+        f"gh:acme/meadow#319: {sid[:8]} ran `gh pr merge` at {at(30).iso()} and its output"
+        " does not confirm it, a session not attached here"
+    ]
 
 
 def foreign(w, recent, members=frozenset()):
@@ -381,6 +396,46 @@ def test_a_merge_confirmed_before_a_later_segment_failed_still_counts():
     result = "Exit code 1\n" + MERGED.format(n=319) + "\nerror: pathspec"
     m = _merger(S2, "gh pr merge 319 --repo acme/meadow && git checkout nope", result)
     assert len(foreign(w, [m])) == 1
+
+
+def test_a_merge_that_never_ran_is_left_out():
+    w = ws("origin", "gh:acme/meadow#319")
+    cmd = "gh pr merge 319 --repo acme/meadow --squash"
+    for result in (
+        "Permission for this action was denied by a rule.",
+        "The user doesn't want to proceed with this tool use.",
+    ):
+        assert foreign(w, [_merger(S2, cmd, result, error=True)]) == [], result
+
+
+def test_a_merge_with_no_result_or_backgrounded_is_unconfirmed():
+    w = ws("origin", "gh:acme/meadow#319")
+    assert foreign(w, [_merger(S2, "gh pr merge 319 --repo acme/meadow", None)]) == _unconfirmed()
+    m = _merger(S2, "gh pr merge 319 --repo acme/meadow &", "[1] 4242")
+    assert foreign(w, [m]) == _unconfirmed()
+
+
+def test_a_codex_merge_reads_its_exit_code():
+    w = ws("origin", "gh:acme/meadow#319")
+    cmd = "gh pr merge 319 --repo acme/meadow"
+    failed = '{"output":"GraphQL: not mergeable","metadata":{"exit_code":1}}'
+    assert foreign(w, [_merger(S2, cmd, failed, kind="codex")]) == []
+    clean = '{"output":"","metadata":{"exit_code":0}}'
+    assert len(foreign(w, [_merger(S2, cmd, clean, kind="codex")])) == 1
+
+
+def test_disabling_auto_merge_is_not_a_merge():
+    w = ws("origin", "gh:acme/meadow#319")
+    m = _merger(S2, "gh pr merge 319 --repo acme/meadow --disable-auto", "")
+    assert foreign(w, [m]) == []
+
+
+def test_a_bare_merge_in_a_fork_finds_the_upstream_anchor():
+    # gh merges a bare number on the upstream; the fork's origin names the fork.
+    w = ws("origin", "gh:upstream-org/tool#42")
+    m = _merger(S2, "gh pr merge --squash 42", "", cwd="/src/3p/tool")
+    out = F.foreign_actions(w, [m], set(), slug_of={"/src/3p/tool": "mparrett/tool"}.get)
+    assert len(out) == 1 and out[0].startswith("gh:upstream-org/tool#42 was merged")
 
 
 def test_gh_global_repo_flag_before_the_subcommand():
