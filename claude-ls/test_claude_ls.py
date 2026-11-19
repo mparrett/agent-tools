@@ -4646,3 +4646,77 @@ def test_last_sent_stops_looking_after_max_prompts(tmp_path):
     recs += [_sent_user("ok", f"2026-11-18T10:{m:02d}:00Z") for m in range(5)]
     f = _sent_jsonl(tmp_path / "s.jsonl", recs)
     assert cl._last_sent(f, max_prompts=3) == ("ok", "2026-11-18T10:04:00Z")
+
+
+# --- agents: search and filters ----------------------------------------
+
+
+def _agent(**over):
+    base = dict(
+        session_id="aaaa1111-0000",
+        name="",
+        kind="background",
+        state="done",
+        status="idle",
+        started_at="2026-11-18T10:00:00-08:00",
+        last_active="",
+        idle_min=5,
+        sent_at="",
+        sent_min=5,
+        cwd="/Users/x/projects/slab",
+        branch="main",
+        worktree="main",
+        topic="",
+        last_prompt="",
+        gist="",
+        repo="/Users/x/projects/slab",
+    )
+    base.update(over)
+    return cl.AgentRow(**base)
+
+
+def test_agent_match_prefers_plain_fields_and_names_them():
+    r = _agent(name="midi bridge", gist="MIDI port ready", worktree="midi-bridge")
+    assert cl._agent_match(r, "MIDI") == "worktree"  # before name and gist
+    assert cl._agent_match(_agent(gist="port ready"), "PORT") == "gist"
+    assert cl._agent_match(_agent(), "aaaa") == "id"
+    assert cl._agent_match(_agent(), "projects/sl").startswith("dir: ")
+    assert cl._agent_match(_agent(), "nothing-here") == ""
+
+
+def test_transcript_hits_returns_a_snippet_per_matching_file(tmp_path):
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    a.write_text(json.dumps({"text": "line one\nthe Sideband listener is up"}) + "\n")
+    b.write_text(json.dumps({"text": "nothing to see"}) + "\n")
+    hits = cl._transcript_hits([str(a), str(b)], "sideband")
+    assert list(hits) == [str(a)]
+    assert "Sideband listener" in hits[str(a)] and "\\n" not in hits[str(a)]
+
+
+def _run_agents(monkeypatch, capsys, rows, *argv):
+    monkeypatch.setattr(cl, "_claude_agents", lambda include_done: rows)
+    monkeypatch.setattr(cl, "_agent_row", lambda rec, base: rec)
+    monkeypatch.setattr(sys, "argv", ["claude-ls", "--no-color", "agents", "--all", *argv])
+    args = cl.parse_args()
+    cl.agents_mode(args, None)
+    return capsys.readouterr().out
+
+
+def test_agents_filters_by_state_project_and_query(monkeypatch, capsys):
+    rows = [
+        _agent(session_id="aaaa1111", state="blocked", name="midi bridge"),
+        _agent(session_id="bbbb2222", state="working", repo="/Users/x/projects/maru"),
+        _agent(session_id="cccc3333", state="done", name="midi notes"),
+    ]
+    out = _run_agents(monkeypatch, capsys, rows, "--state", "blocked,working")
+    assert "2 of 3 agents match" in out and "cccc3333" not in out
+    out = _run_agents(monkeypatch, capsys, rows, "-p", "maru")
+    assert "bbbb2222" in out and "aaaa1111" not in out
+    out = _run_agents(monkeypatch, capsys, rows, "midi", "--state", "done")
+    assert "1 of 3 agents match" in out and "cccc3333" in out and "⌕ name" in out
+
+
+def test_agents_no_match_suggests_deep(monkeypatch, capsys):
+    out = _run_agents(monkeypatch, capsys, [_agent()], "zzz")
+    assert "0 of 1 agents match" in out and "--deep" in out

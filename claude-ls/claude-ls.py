@@ -724,6 +724,29 @@ def parse_args():
         help="Leave out finished background agents (`claude agents` without --all)",
     )
     agents_parser.add_argument(
+        "query",
+        nargs="*",
+        help="Only agents whose id, repo, worktree, branch, name, topic, last ask, gist or "
+        "directory contains this text (case-insensitive); each says where it matched",
+    )
+    agents_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Also search each agent's whole transcript: every prompt, reply and tool output",
+    )
+    agents_parser.add_argument(
+        "--state",
+        action="append",
+        metavar="STATE[,STATE]",
+        help="Only agents in these states: working, blocked, done, stopped, or an "
+        "interactive session's busy, idle, shell (repeatable, or comma-separated)",
+    )
+    agents_parser.add_argument(
+        "--project",
+        "-p",
+        help="Only agents whose repo name or directory contains this text",
+    )
+    agents_parser.add_argument(
         "--sort",
         choices=("active", "sent", "start"),
         default="active",
@@ -7705,6 +7728,9 @@ class AgentRow:
     topic: str
     last_prompt: str
     gist: str  # a background job's own status line and result, when it has a job dir
+    repo: str = ""  # canonical repo root, shared by its worktrees; cwd when not in git
+    transcript: str = ""
+    matched: str = ""  # with a search: which field matched, and the matching text
 
 
 def _claude_agents(include_done: bool) -> List[Dict]:
@@ -7793,6 +7819,8 @@ def _agent_row(rec: Dict, base_dir: str) -> AgentRow:
     if len(gist) > _AGENT_GIST_MAX:
         gist = gist[: _AGENT_GIST_MAX - 1] + "…"
     return AgentRow(
+        repo=repo or top or cwd,
+        transcript=str(transcript) if transcript else "",
         session_id=sid,
         name=rec.get("name") or "",
         kind=rec.get("kind") or "",
@@ -7812,12 +7840,101 @@ def _agent_row(rec: Dict, base_dir: str) -> AgentRow:
     )
 
 
+def _agent_state(r: AgentRow) -> str:
+    # A background agent's process status repeats its state ("done idle");
+    # an interactive session has no state, so its status is all there is.
+    return (r.state if r.kind == "background" else r.status) or "-"
+
+
+def _agent_match(r: AgentRow, query: str) -> str:
+    """Which field `query` appears in, or ''. Checked plainest first, so an id or
+    repo hit wins over prose. Fields the list already shows are named only; the
+    directory isn't on screen, so its hit carries the text."""
+    q = query.lower()
+    if r.session_id.lower().startswith(q):
+        return "id"
+    for label, text in (
+        ("repo", os.path.basename(r.repo.rstrip(os.sep))),
+        ("worktree", r.worktree),
+        ("branch", r.branch),
+        ("name", r.name),
+        ("topic", r.topic),
+        ("asked", r.last_prompt),
+        ("gist", r.gist),
+        ("dir", _tilde(r.cwd)),
+    ):
+        if text and q in text.lower():
+            return f"dir: {text}" if label == "dir" else label
+    return ""
+
+
+def _transcript_hits(paths: List[str], query: str) -> Dict[str, str]:
+    """{transcript: a snippet around the first hit} for each transcript containing
+    `query`, case-insensitively. One rg over every file; its config is skipped,
+    since ~/.ripgreprc truncates long lines and a JSONL record is one line."""
+    if not paths:
+        return {}
+    pat = f".{{0,40}}{re.escape(query)}.{{0,40}}"
+    argv = ["rg", "--no-config", "-i", "-o", "-m1", "--with-filename", "--", pat, *paths]
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        hits = {}
+        for p in paths:
+            try:
+                text = Path(p).read_text(errors="replace")
+            except OSError:
+                continue
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                hits[p] = m.group(0)
+        return {p: _snippet(t) for p, t in hits.items()}
+    except subprocess.TimeoutExpired:
+        raise SystemExit("--deep: searching the transcripts took over a minute; stopped.")
+    hits: Dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        for p in paths:
+            if line.startswith(p + ":"):
+                hits.setdefault(p, _snippet(line[len(p) + 1 :]))
+                break
+    return hits
+
+
+def _snippet(raw: str) -> str:
+    # A JSONL hit is JSON-escaped text: unescape the common cases for reading.
+    return " ".join(raw.replace("\\n", " ").replace('\\"', '"').split())
+
+
 def agents_mode(args, console: Optional[Console]):
     """`claude agents`, with the facts it leaves out: when each agent started, how
     long it has been idle, where it works, and what it is about."""
     recs = _claude_agents(include_done=not args.active)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         rows = list(pool.map(lambda r: _agent_row(r, args.base_dir), recs))
+    total = len(rows)
+
+    states = {x.strip().lower() for v in (args.state or []) for x in v.split(",") if x.strip()}
+    if states:
+        rows = [r for r in rows if _agent_state(r) in states]
+    if args.project:
+        p = args.project.lower()
+        rows = [
+            r
+            for r in rows
+            if p in os.path.basename(r.repo.rstrip(os.sep)).lower() or p in r.cwd.lower()
+        ]
+    query = " ".join(args.query or []).strip()
+    if query:
+        for r in rows:
+            r.matched = _agent_match(r, query)
+        if args.deep:
+            hits = _transcript_hits(
+                [r.transcript for r in rows if r.transcript and not r.matched], query
+            )
+            for r in rows:
+                if not r.matched and r.transcript in hits:
+                    r.matched = f"transcript: …{hits[r.transcript]}…"
+        rows = [r for r in rows if r.matched]
     never = 10**9
 
     def mins(m: Optional[int]) -> int:
@@ -7837,7 +7954,15 @@ def agents_mode(args, console: Optional[Console]):
         print(json.dumps([asdict(r) for r in rows], indent=2))
         return
     now = datetime.now().astimezone()
-    print(f"as of {now:%Y-%m-%d %H:%M %Z}; {len(rows)} agents")
+    narrowed = len(rows) != total
+    print(
+        f"as of {now:%Y-%m-%d %H:%M %Z}; "
+        + (f"{len(rows)} of {total} agents match" if narrowed else f"{total} agents")
+    )
+    if not rows:
+        if query and not args.deep:
+            print("Nothing matches in what the list shows; --deep also searches each transcript.")
+        return
     # Fit one screen so the "as of" line doesn't scroll off. Besides the list:
     # that line, the "more" line, and the prompt and command line before and the
     # prompt after, any of which may take two lines. Off a terminal (an agent's
@@ -7856,10 +7981,7 @@ def agents_mode(args, console: Optional[Console]):
         t = datetime.fromisoformat(r.started_at)
         return f"{t:%H:%M}" if t.date() == now.date() else f"{t:%m-%d}"
 
-    def state(r: AgentRow) -> str:
-        # A background agent's process status repeats its state ("done idle");
-        # an interactive session has no state, so its status is all there is.
-        return (r.state if r.kind == "background" else r.status) or "-"
+    state = _agent_state
 
     def where(r: AgentRow) -> str:
         top = (_canonical_repo_root(r.cwd) if os.path.isdir(r.cwd) else None) or r.cwd
@@ -7876,11 +7998,17 @@ def agents_mode(args, console: Optional[Console]):
             out += f" @ {r.branch}"
         return out
 
+    def age(m: Optional[int]) -> str:
+        # One unit, so the column stays a fixed width: "1h 54m" would overflow it.
+        if m is None:
+            return "-"
+        return f"{m}m" if m < 60 else f"{m // 60}h" if m < 24 * 60 else f"{m // (24 * 60)}d"
+
     def idle(r: AgentRow) -> str:
-        return format_staleness(r.idle_min) if r.idle_min is not None else "-"
+        return age(r.idle_min)
 
     def sent(r: AgentRow) -> str:
-        return format_staleness(r.sent_min) if r.sent_min is not None else "-"
+        return age(r.sent_min)
 
     def clip(text: str, room: int) -> str:
         return text if len(text) <= room else text[: max(0, room - 1)] + "…"
@@ -7908,6 +8036,8 @@ def agents_mode(args, console: Optional[Console]):
             lines.append(Text(indent + "↳ " + clip(r.last_prompt, room), style="dim"))
         if r.gist:
             lines.append(Text(indent) + Text("≡ " + clip(r.gist, room), style="green"))
+        if r.matched:
+            lines.append(Text(indent) + Text("⌕ " + clip(r.matched, room), style="yellow"))
         return lines
 
     def emit(line: Text) -> None:
