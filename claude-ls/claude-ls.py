@@ -7682,18 +7682,20 @@ _HARNESS_PROSE = re.compile(
     re.IGNORECASE,
 )
 # A reply that steers rather than asks ("yes", "ok go", "3", "thanks"): it says
-# when you last spoke to an agent, but not what the agent is doing for you.
-_SMALL_TALK = re.compile(
-    r"^(wait|stop|retry|go|yes|no|ok|okay|nvm|never ?mind|continue|resume|option\b"
-    r"|[0-9]+\b|thanks?|thx|cancel|abort|pause|hold on|proceed|done|next|again"
-    r"|do it|sure|yep|nope|k)\b",
-    re.IGNORECASE,
+# when you last spoke to an agent, but not what the agent is doing for you. The
+# whole reply must be made of these words: "no, switch to the v2 API" and "run
+# the tests" start like small talk, or are short, and are still the real ask.
+_SMALL_TALK_WORDS = frozenset(
+    "wait stop retry go yes yeah yup yep no nope ok okay k kk nvm nevermind never mind "
+    "continue resume option cancel abort pause hold on proceed done next again do it "
+    "that this sure thanks thank you thx ty please pls plz ahead great good nice cool "
+    "perfect lgtm sounds right correct agreed fine".split()
 )
 
 
 def _is_small_talk(text: str) -> bool:
-    t = text.strip()
-    return len(t) < 15 or bool(_SMALL_TALK.match(t))
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return all(w in _SMALL_TALK_WORDS or w.isdigit() for w in words)
 
 
 def _human_prompt(rec: Dict) -> str:
@@ -7871,6 +7873,9 @@ def _agent_row(rec: Dict, base_dir: str) -> AgentRow:
             idle = int(secs / 60)
             last_active = _local_iso(time.time() - secs, is_ms=False)
     repo = _canonical_repo_root(cwd) if cwd and os.path.isdir(cwd) else None
+    if not repo and "/.claude/worktrees/" in cwd:
+        # A removed worktree can't be asked for its repo, but its path names it.
+        repo = cwd.split("/.claude/worktrees/", 1)[0]
     top = _repo_root_for(cwd) if cwd and os.path.isdir(cwd) else None
     if top and repo and os.path.realpath(top) != os.path.realpath(repo):
         worktree = os.path.basename(top.rstrip(os.sep))
@@ -8017,7 +8022,7 @@ def agents_mode(args, console: Optional[Console]):
         rows.sort(key=lambda r: r.started_at, reverse=True)
     else:
         # Live first, then by the transcript's last write, whoever made it.
-        rows.sort(key=lambda r: (r.state == "done", mins(r.idle_min)))
+        rows.sort(key=lambda r: (r.state in ("done", "stopped"), mins(r.idle_min)))
     if args.reverse:
         rows.reverse()
 
@@ -8055,8 +8060,7 @@ def agents_mode(args, console: Optional[Console]):
     state = _agent_state
 
     def where(r: AgentRow) -> str:
-        top = (_canonical_repo_root(r.cwd) if os.path.isdir(r.cwd) else None) or r.cwd
-        out = os.path.basename(top.rstrip(os.sep))
+        out = os.path.basename((r.repo or r.cwd).rstrip(os.sep))
         wt = r.worktree if r.worktree and r.worktree != "main" else ""
         if wt:
             out += f" [{wt}]"

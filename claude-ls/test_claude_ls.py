@@ -4743,3 +4743,39 @@ def test_agents_search_leaves_out_the_session_running_it(monkeypatch, capsys):
     # The plain list still shows it.
     out = _run_agents(monkeypatch, capsys, rows)
     assert "aaaa1111" in out
+
+
+@pytest.mark.parametrize(
+    "text,small",
+    [
+        ("yes please do that", True),
+        ("ok go", True),
+        ("3", True),
+        ("Thanks!", True),
+        ("run the tests", False),
+        ("no, switch the billing sync to the v2 API instead", False),
+        ("go through the review comments on #48 and fix them", False),
+        ("stop using the mock and hit the real staging db", False),
+    ],
+)
+def test_small_talk_needs_the_whole_reply(text, small):
+    assert cl._is_small_talk(text) is small
+
+
+def test_agents_active_sort_puts_stopped_with_finished(monkeypatch, capsys):
+    rows = [
+        _agent(session_id="aaaa1111", state="stopped", idle_min=5),
+        _agent(session_id="bbbb2222", state="working", idle_min=20),
+    ]
+    out = _run_agents(monkeypatch, capsys, rows)
+    assert out.index("bbbb2222") < out.index("aaaa1111")
+
+
+def test_agent_row_names_the_repo_of_a_removed_worktree(tmp_path):
+    rec = {
+        "sessionId": "dddd4444",
+        "cwd": "/gone/proj/.claude/worktrees/fix-x",
+        "kind": "background",
+    }
+    row = cl._agent_row(rec, str(tmp_path))
+    assert row.repo == "/gone/proj" and row.worktree == "fix-x (gone)"
