@@ -4729,3 +4729,17 @@ def test_agents_flags_before_search_survive(monkeypatch, capsys):
     ]
     out = _run_agents(monkeypatch, capsys, rows, "--state", "done", "search", "midi")
     assert "1 of 2 agents match" in out and "cccc3333" in out
+
+
+def test_agents_search_leaves_out_the_session_running_it(monkeypatch, capsys):
+    rows = [
+        _agent(session_id="aaaa1111", name="midi bridge"),
+        _agent(session_id="bbbb2222", name="midi notes"),
+    ]
+    monkeypatch.setattr(cl, "_live_registry", lambda *a: [])
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "aaaa1111")
+    out = _run_agents(monkeypatch, capsys, rows, "search", "midi")
+    assert "1 of 2 agents match" in out and "aaaa1111" not in out
+    # The plain list still shows it.
+    out = _run_agents(monkeypatch, capsys, rows)
+    assert "aaaa1111" in out

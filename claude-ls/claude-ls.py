@@ -7718,6 +7718,38 @@ def _human_prompt(rec: Dict) -> str:
     return text
 
 
+def _lines_backward(
+    path: Path, needle: bytes, chunk: int = 256 * 1024, max_bytes: Optional[int] = None
+) -> Iterator[Dict]:
+    """Records containing `needle`, newest first, read from the end in chunks so a
+    long transcript is never read whole. Stops after `max_bytes`, if given."""
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return
+    with fh:
+        fh.seek(0, os.SEEK_END)
+        pos = end = fh.tell()
+        carry = b""
+        while pos > 0 and (max_bytes is None or end - pos < max_bytes):
+            start = max(0, pos - chunk)
+            fh.seek(start)
+            data = fh.read(pos - start) + carry
+            pos = start
+            lines = data.split(b"\n")
+            # The first piece may be the tail of a line that began earlier.
+            carry = lines.pop(0) if pos > 0 else b""
+            for ln in reversed(lines):
+                if needle not in ln:
+                    continue
+                try:
+                    rec = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    yield rec
+
+
 def _last_sent(path: Path, chunk: int = 256 * 1024, max_prompts: int = 20) -> Tuple[str, str]:
     """(text, ISO timestamp): the last substantive thing a person asked, and when
     they last sent anything at all, read backwards from the end in chunks. The
@@ -7729,39 +7761,16 @@ def _last_sent(path: Path, chunk: int = 256 * 1024, max_prompts: int = 20) -> Tu
     is when you last spoke, but the ask is what the agent is working on. After
     `max_prompts` small-talk replies the newest of them stands in."""
     first_text, first_ts, seen = "", "", 0
-    try:
-        fh = open(path, "rb")
-    except OSError:
-        return "", ""
-    with fh:
-        fh.seek(0, os.SEEK_END)
-        pos = fh.tell()
-        carry = b""
-        while pos > 0:
-            start = max(0, pos - chunk)
-            fh.seek(start)
-            data = fh.read(pos - start) + carry
-            pos = start
-            lines = data.split(b"\n")
-            # The first piece may be the tail of a line that began earlier.
-            carry = lines.pop(0) if pos > 0 else b""
-            for ln in reversed(lines):
-                if b'"user"' not in ln:
-                    continue
-                try:
-                    rec = json.loads(ln)
-                except ValueError:
-                    continue
-                if isinstance(rec, dict):
-                    text = _human_prompt(rec)
-                    if not text:
-                        continue
-                    text = text.replace("\n", " ")
-                    if not seen:
-                        first_text, first_ts = text, rec.get("timestamp") or ""
-                    seen += 1
-                    if not _is_small_talk(text) or seen >= max_prompts:
-                        return (first_text if _is_small_talk(text) else text), first_ts
+    for rec in _lines_backward(path, b'"user"', chunk):
+        text = _human_prompt(rec)
+        if not text:
+            continue
+        text = text.replace("\n", " ")
+        if not seen:
+            first_text, first_ts = text, rec.get("timestamp") or ""
+        seen += 1
+        if not _is_small_talk(text) or seen >= max_prompts:
+            return (first_text if _is_small_talk(text) else text), first_ts
     return first_text, first_ts
 
 
@@ -7983,6 +7992,10 @@ def agents_mode(args, console: Optional[Console]):
         ]
     query = " ".join(getattr(args, "query", None) or []).strip()
     if query:
+        # The session running the search always matches: the query is in its own
+        # transcript, and often in its last ask. Nobody is looking for themselves.
+        me = _me_session_id(_live_registry())
+        rows = [r for r in rows if r.session_id != me]
         for r in rows:
             r.matched = _agent_match(r, query)
         if getattr(args, "deep", False):
