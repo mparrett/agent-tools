@@ -480,6 +480,26 @@ def test_a_confirmation_for_another_repo_does_not_confirm_this_one():
     assert foreign(w, [_merger(S2, cmd, result)]) == _unconfirmed_for("acme/meadow#5")
 
 
+def test_a_merge_whose_local_cleanup_failed_is_unconfirmed_not_dropped():
+    # GitHub merged; gh then failed to switch branches in a linked worktree.
+    w = ws("origin", "gh:acme/meadow#319")
+    result = "Exit code 1\nfatal: 'main' is already used by worktree at '/src/meadow'"
+    m = _merger(S2, "gh pr merge 319 --repo acme/meadow --squash --delete-branch", result)
+    assert foreign(w, [m]) == _unconfirmed()
+
+
+def test_one_api_reply_does_not_confirm_every_merge_in_the_command():
+    w = ws("origin", "gh:acme/meadow#5", "gh:acme/meadow#6")
+    cmd = (
+        "gh api -X PUT repos/acme/meadow/pulls/5/merge"
+        " && gh api -X PUT repos/acme/meadow/pulls/6/merge"
+    )
+    result = 'Exit code 1\n{"merged":true}\ngh: Pull Request is not mergeable (HTTP 405)'
+    out = foreign(w, [_merger(S2, cmd, result)])
+    assert not any("was merged" in line for line in out)
+    assert [line.split(":", 2)[1] for line in out] == ["acme/meadow#5"]
+
+
 def test_gh_global_repo_flag_before_the_subcommand():
     w = ws("origin", "gh:acme/meadow#319")
     m = _merger(S2, "gh -R acme/meadow pr merge 319 --squash", "")

@@ -1116,39 +1116,59 @@ _API_MERGED_RE = re.compile(r'"merged"\s*:\s*true')
 
 
 def pr_outcome(
-    how: str, pr: str, result: str, *, exit_state: Optional[str], held: bool, last: bool
+    how: str,
+    pr: str,
+    result: str,
+    *,
+    exit_state: Optional[str],
+    held: bool,
+    last: bool,
+    shared: bool = False,
 ) -> Optional[bool]:
     """Whether the merge or close named by `how` happened, from its tool
     result. `exit_state` is the command's (`_exit_state`). `held`: only `&&`
     follows this segment, so a clean exit means it succeeded. `last`: it is
-    the final segment, so a failed exit is its own."""
+    the final segment, so a failed exit is its own. `shared`: the command
+    holds more than one merge or close, so only output naming this PR's repo
+    and number can speak for it."""
     verb = closing_verb(how)
     if verb is None:
         return None
     text = result or ""
-    num = pr.partition("#")[2]
+    repo, _, num = pr.partition("#")
+    repo = repo.lower()
     if how.startswith("gh api"):
-        if _API_MERGED_RE.search(text):
+        # The API's reply names no PR, so it speaks only for a lone merge.
+        if not shared and _API_MERGED_RE.search(text):
             return True
     else:
-        repo = pr.partition("#")[0].lower()
         for m in _PR_DONE_RE.finditer(text):
-            # A line naming another repo is another segment's merge.
             named = (m.group(2) or "").lower()
-            if (
-                m.group(1).lower() == verb
-                and m.group(3) == num
-                and not (repo and named and named != repo)
-            ):
-                return True
+            if m.group(1).lower() != verb or m.group(3) != num:
+                continue
+            # A line naming another repo is another segment's; with several
+            # merges in one command, a line naming none could be any of them.
+            if (named and repo and named != repo) or (shared and not (named and named == repo)):
+                continue
+            return True
         # "already merged" is someone else's merge, not this command's.
         if any(m.group(1) == num for m in _PR_ALREADY_RE.finditer(text)):
             return False
     if exit_state == "denied":
         return False
     if exit_state == "failed":
-        return False if last else None
+        # gh can merge and then fail its local cleanup (--delete-branch in a
+        # linked worktree): only output saying the merge failed counts.
+        return False if last and _MERGE_FAILED_RE.search(text) else None
     return True if exit_state == "clean" and held else None
+
+
+# gh's and GitHub's own words for a merge or close that did not happen.
+_MERGE_FAILED_RE = re.compile(
+    r"not mergeable|is not open|already closed|could not (?:be )?merge|merge conflict"
+    r"|GraphQL: |HTTP 40[59]|Required status check",
+    re.I,
+)
 
 
 # A call refused before it ran: by the person, or by a permission rule.
@@ -1233,6 +1253,7 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
         state = _exit_state(scan, t.call_id, codex)
         cur = t.cwd
         parts = _split_segments(strip_heredocs(t.command))
+        found: list[tuple[Acted, dict]] = []
         # A trailing `&` backgrounds the last segment: the exit says nothing of it.
         background = bool(parts) and parts[-1][1] == "&"
         for i, (seg, sep) in enumerate(parts):
@@ -1248,15 +1269,19 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
                 for a in _segment_acts(words, cur, result, t.at, filtered):
                     if a.kind != "pr" or not closing_verb(a.how) or not _plausible(a):
                         continue
-                    ok = pr_outcome(
-                        a.how,
-                        a.value,
-                        result,
-                        exit_state=None if "--auto" in words else state,
-                        held=held,
-                        last=last,
-                    )
-                    out.append(replace(a, ok=ok))
+                    auto = "--auto" in words
+                    found.append((a, {"held": held, "last": last, "auto": auto}))
+        for a, how in found:
+            ok = pr_outcome(
+                a.how,
+                a.value,
+                result,
+                exit_state=None if how["auto"] else state,
+                held=how["held"],
+                last=how["last"],
+                shared=len(found) > 1,
+            )
+            out.append(replace(a, ok=ok))
     return out
 
 
