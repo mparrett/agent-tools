@@ -53,7 +53,9 @@ def _shims(root: Path, gh_mode: str, gh_delay: float, path: str) -> Path:
             delay = f"sleep {gh_delay}\n" if gh_mode == "slow" else ""
             body = f'{delay}echo "bench: gh stubbed" >&2\nexit 1\n'
         else:
-            body = f'exec {shlex.quote(_real(name, path))} "$@"\n'
+            # workstream's own override names the weft it runs; honour it.
+            target = (name == "weft" and os.environ.get("WORKSTREAM_WEFT_BIN")) or _real(name, path)
+            body = f'exec {shlex.quote(target)} "$@"\n'
         script = bindir / name
         script.write_text(f"#!/bin/sh\necho {name} >> {shlex.quote(str(log))}\n{body}")
         script.chmod(0o755)
@@ -96,6 +98,9 @@ def _real_cache() -> Path:
     return (Path(xdg) if xdg else Path.home() / ".cache") / "workstream"
 
 
+_SESSION_LABELS = {"ls --session", "attach --new", "match"}
+
+
 def _commands(ws: str, session: str | None, out: Path, run: int) -> list[tuple[str, list[str]]]:
     cmds: list[tuple[str, list[str]]] = []
     if session:
@@ -134,8 +139,17 @@ def main() -> int:
         default=f"{shlex.quote(sys.executable)} -m workstream",
         help="the workstream entry point to time (default: this checkout's)",
     )
+    ap.add_argument(
+        "--timeout", type=float, default=300, help="seconds before a command is cut off (300)"
+    )
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
+    labels = {label for label, _ in _commands(args.ws, "s", Path(), 1)}
+    unknown = set(args.only.split(",")) - labels if args.only else set()
+    if unknown:
+        sys.exit(f"bench: unknown --only label(s) {sorted(unknown)}; choose from {sorted(labels)}")
+    if args.only and not args.session and set(args.only.split(",")) <= _SESSION_LABELS:
+        sys.exit("bench: those commands need a session; pass --session")
 
     path = os.environ.get("PATH", "")
     rows = []
@@ -166,13 +180,18 @@ def main() -> int:
                 _fill_cache(cache, args.gh == "warm")
                 log.write_text("")
                 started = time.monotonic()
-                proc = subprocess.run(
-                    [*shlex.split(args.cli), *argv],
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
+                try:
+                    proc = subprocess.run(
+                        [*shlex.split(args.cli), *argv],
+                        env=env,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=args.timeout,
+                    )
+                    code, err = proc.returncode, proc.stderr
+                except subprocess.TimeoutExpired:
+                    code, err = "timeout", f"cut off after {args.timeout:g}s"
                 took = time.monotonic() - started
                 calls = log.read_text().split()
                 rows.append(
@@ -180,9 +199,9 @@ def main() -> int:
                         "run": run,
                         "command": label,
                         "seconds": round(took, 2),
-                        "exit": proc.returncode,
+                        "exit": code,
                         **{name: calls.count(name) for name in COUNTED},
-                        "stderr": proc.stderr.strip().splitlines()[-1:] if proc.returncode else [],
+                        "stderr": (err or "").strip().splitlines()[-1:] if code else [],
                     }
                 )
     if args.json:
