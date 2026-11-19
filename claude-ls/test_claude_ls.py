@@ -4663,35 +4663,35 @@ def _agent(**over):
         idle_min=5,
         sent_at="",
         sent_min=5,
-        cwd="/Users/x/projects/slab",
+        cwd="/Users/x/projects/webapp",
         branch="main",
         worktree="main",
         topic="",
         last_prompt="",
         gist="",
-        repo="/Users/x/projects/slab",
+        repo="/Users/x/projects/webapp",
     )
     base.update(over)
     return cl.AgentRow(**base)
 
 
 def test_agent_match_prefers_plain_fields_and_names_them():
-    r = _agent(name="midi bridge", gist="MIDI port ready", worktree="midi-bridge")
-    assert cl._agent_match(r, "MIDI") == "worktree"  # before name and gist
+    r = _agent(name="billing fix", gist="Billing export ready", worktree="billing-export")
+    assert cl._agent_match(r, "BILLING") == "worktree"  # before name and gist
     assert cl._agent_match(_agent(gist="port ready"), "PORT") == "gist"
     assert cl._agent_match(_agent(), "aaaa") == "id"
-    assert cl._agent_match(_agent(), "projects/sl").startswith("dir: ")
+    assert cl._agent_match(_agent(), "projects/we").startswith("dir: ")
     assert cl._agent_match(_agent(), "nothing-here") == ""
 
 
 def test_transcript_hits_returns_a_snippet_per_matching_file(tmp_path):
     a = tmp_path / "a.jsonl"
     b = tmp_path / "b.jsonl"
-    a.write_text(json.dumps({"text": "line one\nthe Sideband listener is up"}) + "\n")
+    a.write_text(json.dumps({"text": "line one\nthe Webhook listener is up"}) + "\n")
     b.write_text(json.dumps({"text": "nothing to see"}) + "\n")
-    hits = cl._transcript_hits([str(a), str(b)], "sideband")
+    hits = cl._transcript_hits([str(a), str(b)], "webhook")
     assert list(hits) == [str(a)]
-    assert "Sideband listener" in hits[str(a)] and "\\n" not in hits[str(a)]
+    assert "Webhook listener" in hits[str(a)] and "\\n" not in hits[str(a)]
 
 
 def _run_agents(monkeypatch, capsys, rows, *argv):
@@ -4705,15 +4705,15 @@ def _run_agents(monkeypatch, capsys, rows, *argv):
 
 def test_agents_filters_by_state_project_and_query(monkeypatch, capsys):
     rows = [
-        _agent(session_id="aaaa1111", state="blocked", name="midi bridge"),
-        _agent(session_id="bbbb2222", state="working", repo="/Users/x/projects/maru"),
-        _agent(session_id="cccc3333", state="done", name="midi notes"),
+        _agent(session_id="aaaa1111", state="blocked", name="billing fix"),
+        _agent(session_id="bbbb2222", state="working", repo="/Users/x/projects/api"),
+        _agent(session_id="cccc3333", state="done", name="billing notes"),
     ]
     out = _run_agents(monkeypatch, capsys, rows, "--state", "blocked,working")
     assert "2 of 3 agents match" in out and "cccc3333" not in out
-    out = _run_agents(monkeypatch, capsys, rows, "-p", "maru")
+    out = _run_agents(monkeypatch, capsys, rows, "-p", "api")
     assert "bbbb2222" in out and "aaaa1111" not in out
-    out = _run_agents(monkeypatch, capsys, rows, "search", "midi", "--state", "done")
+    out = _run_agents(monkeypatch, capsys, rows, "search", "billing", "--state", "done")
     assert "1 of 3 agents match" in out and "cccc3333" in out and "⌕ name" in out
 
 
@@ -4724,21 +4724,21 @@ def test_agents_no_match_suggests_deep(monkeypatch, capsys):
 
 def test_agents_flags_before_search_survive(monkeypatch, capsys):
     rows = [
-        _agent(session_id="aaaa1111", state="blocked", name="midi bridge"),
-        _agent(session_id="cccc3333", state="done", name="midi notes"),
+        _agent(session_id="aaaa1111", state="blocked", name="billing fix"),
+        _agent(session_id="cccc3333", state="done", name="billing notes"),
     ]
-    out = _run_agents(monkeypatch, capsys, rows, "--state", "done", "search", "midi")
+    out = _run_agents(monkeypatch, capsys, rows, "--state", "done", "search", "billing")
     assert "1 of 2 agents match" in out and "cccc3333" in out
 
 
 def test_agents_search_leaves_out_the_session_running_it(monkeypatch, capsys):
     rows = [
-        _agent(session_id="aaaa1111", name="midi bridge"),
-        _agent(session_id="bbbb2222", name="midi notes"),
+        _agent(session_id="aaaa1111", name="billing fix"),
+        _agent(session_id="bbbb2222", name="billing notes"),
     ]
     monkeypatch.setattr(cl, "_live_registry", lambda *a: [])
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "aaaa1111")
-    out = _run_agents(monkeypatch, capsys, rows, "search", "midi")
+    out = _run_agents(monkeypatch, capsys, rows, "search", "billing")
     assert "1 of 2 agents match" in out and "aaaa1111" not in out
     # The plain list still shows it.
     out = _run_agents(monkeypatch, capsys, rows)

@@ -181,7 +181,7 @@ sort:     --sort active   live first, then most recently written (default)
           --reverse       flip any of them
 
 filter:   --state working,blocked   (also done, stopped; busy/idle/shell for ◆)
-          -p, --project slab        repo name or directory contains the text
+          -p, --project webapp        repo name or directory contains the text
           --active                  leave out finished background agents
 
 search:   agents search <text>         id prefix, repo, worktree, branch, name,
@@ -194,10 +194,10 @@ JSON.  Filters, sort and output flags combine, before or after `search`.
 
 examples:
   claude-ls agents --sort sent                 who was I just talking to?
-  claude-ls agents search midi                 which agent was on the MIDI work?
-  claude-ls agents search 'slab#48' --deep     ...mentioned it anywhere
+  claude-ls agents search billing              which agent was on the billing work?
+  claude-ls agents search 'acme#48' --deep     ...mentioned it anywhere
   claude-ls agents --state blocked             who's waiting on me?
-  claude-ls agents -p slab --sort start        this project's agents, newest first
+  claude-ls agents -p webapp --sort start      this project's agents, newest first
   claude-ls resume <id>                        then pick one back up"""
 
 

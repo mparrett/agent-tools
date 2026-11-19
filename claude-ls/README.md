@@ -122,10 +122,10 @@ in short.
 
 ```
 claude-ls agents --sort sent                 who was I just talking to?
-claude-ls agents search midi                 which agent was on the MIDI work?
-claude-ls agents search 'slab#48' --deep     ...mentioned it anywhere at all
+claude-ls agents search billing              which agent was on the billing work?
+claude-ls agents search 'acme#48' --deep     ...mentioned it anywhere at all
 claude-ls agents --state blocked             who's waiting on me?
-claude-ls agents -p slab --sort start        this project's agents, newest first
+claude-ls agents -p webapp --sort start      this project's agents, newest first
 claude-ls resume <id>                        then pick one back up
 ```
 
