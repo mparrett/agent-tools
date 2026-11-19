@@ -561,6 +561,36 @@ def test_already_merged_in_one_repo_leaves_the_others_merge():
     assert len(out) == 1 and out[0].startswith("gh:acme/bramble#5 was merged")
 
 
+def test_a_merge_naming_no_pr_is_not_confirmed_by_a_number_in_other_output():
+    w = ws("origin", "gh:acme/meadow#291")
+    cmd = "git log --oneline -3 && gh pr merge --squash"
+    m = _merger(S2, cmd, "abc123 Fix foo (#291)\n", cwd="/src/meadow")
+    out = foreign(w, [m])
+    assert not any("was merged" in line for line in out)
+
+
+def test_a_bare_merge_in_a_fork_never_lands_on_its_origin():
+    w = ws("origin", "gh:me/meadow#5")
+    m = _merger(S2, "gh pr merge 5", "", cwd="/src/meadow")
+    out = F.foreign_actions(
+        w,
+        [m],
+        set(),
+        slug_of={"/src/meadow": "me/meadow"}.get,
+        upstream_of={"/src/meadow": "acme/meadow"}.get,
+    )
+    assert out == []
+
+
+def test_a_confirmed_merge_replaces_the_same_sessions_earlier_attempt():
+    w = ws("origin", "gh:acme/meadow#5")
+    first = _merger(S2, "gh pr merge 5 --repo acme/meadow; echo done", "")
+    second = _merger(S2, "gh pr merge 5 --repo acme/meadow --squash", "")
+    first.pr_closing += second.pr_closing
+    out = foreign(w, [first])
+    assert len(out) == 1 and out[0].startswith("gh:acme/meadow#5 was merged")
+
+
 def test_gh_global_repo_flag_before_the_subcommand():
     w = ws("origin", "gh:acme/meadow#319")
     m = _merger(S2, "gh -R acme/meadow pr merge 319 --squash", "")

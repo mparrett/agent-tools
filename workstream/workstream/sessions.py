@@ -1287,7 +1287,13 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
                     if a.kind != "pr" or not closing_verb(a.how) or not _plausible(a):
                         continue
                     auto = "--auto" in words
-                    found.append((a, {"held": held, "last": last, "auto": auto}))
+                    # A number read from the output rather than the command
+                    # (`gh pr merge` on the current branch) may be another
+                    # segment's, so only gh's own line naming it confirms it.
+                    named = _names_pr(words, a.value.partition("#")[2])
+                    found.append(
+                        (a, {"held": held and named, "last": last and named, "auto": auto})
+                    )
         for a, how in found:
             ok = pr_outcome(
                 a.how,
@@ -1301,6 +1307,13 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
             )
             out.append(replace(a, ok=ok))
     return out
+
+
+def _names_pr(words: list[str], num: str) -> bool:
+    """Whether the command words give PR `num` itself: as a word, `#N`, a PR
+    URL, or an API path (`…/pulls/N/merge`)."""
+    path = re.compile(rf"/pulls?/{num}(?:/|$)")
+    return any(w.lstrip("#") == num or path.search(w) for w in words)
 
 
 def _plausible(a: Acted) -> bool:

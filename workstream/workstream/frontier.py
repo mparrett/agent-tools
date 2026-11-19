@@ -281,7 +281,9 @@ def foreign_actions(
         return []
     slug_of = slug_of or _origin_slug
     upstream_of = upstream_of or _upstream_slug
-    out: list[str] = []
+    # One line per (PR, session): a confirmed merge replaces an earlier attempt
+    # the same session made, so the two never contradict each other.
+    lines: dict[tuple[str, str], tuple[bool, str]] = {}
     for f in recent:
         if f.id in member_ids or f.kind == "subagent":
             continue
@@ -294,11 +296,12 @@ def foreign_actions(
                 value = anchored.get(f"{repo.lower()}#{num}")
             else:
                 # A bare number is a PR of the repo the command ran in. gh
-                # picks the `upstream` remote ahead of `origin`, so a fork's
-                # merges land on the upstream; check them in that order.
-                found = [r for r in (upstream_of(a.dir), slug_of(a.dir)) if r] if a.dir else []
-                value = next((v for r in found if (v := anchored.get(f"{r.lower()}#{num}"))), None)
-                if not found:
+                # resolves it on the `upstream` remote when there is one, so a
+                # fork's merges land there, never on its origin.
+                target = (upstream_of(a.dir) or slug_of(a.dir)) if a.dir else None
+                if target:
+                    value = anchored.get(f"{target.lower()}#{num}")
+                else:
                     # Its directory is gone, as after merging and removing a worktree.
                     value = _guess(anchored, num, a, f)
             if not value:
@@ -311,9 +314,10 @@ def foreign_actions(
                     f"gh:{value}: {f.id[:8]} ran `{a.how}` at {when} and its output does not"
                     " confirm it, a session not attached here"
                 )
-            if line not in out:
-                out.append(line)
-    return out
+            key = (value, f.id)
+            if key not in lines or (a.ok and not lines[key][0]):
+                lines[key] = (bool(a.ok), line)
+    return [line for _, line in lines.values()]
 
 
 def _guess(anchored: dict[str, str], num: str, a, f) -> Optional[str]:
