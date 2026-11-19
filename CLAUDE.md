@@ -134,7 +134,7 @@ just wt-rm fix/my-thing  # retire one (refuses unless clean and pushed)
 just mine                # commits your branch adds over origin/main
 ```
 
-**`~/projects-new/agent-tools-public` is the canonical checkout: clean `main`,
+**`~/workspace-3p/agent-tools` is the canonical checkout: clean `main`,
 fast-forward only.** Nothing is authored there. That is the whole rule, and it is
 load-bearing rather than tidiness — `git checkout -b` branches from **`HEAD`, not
 `main`**, so running it while a session has left `HEAD` on their branch silently
@@ -155,9 +155,10 @@ merged one — a session may still be working from it.
 
 ## This repo is checked out twice
 
-You commit in a worktree of `~/projects-new/agent-tools-public` (`just wt`).
-Claude Code *loads this repo's skills* from
-`~/projects-new/read-only-clones/agent-tools`, a second clone pinned to `main`.
+You commit in a worktree of `~/workspace-3p/agent-tools` (`just wt`).
+Claude Code *loads this repo's skills, the `agent-tools` plugin marketplace,
+and the `~/bin` links* from `~/repos-read-only/agent-tools`, a second clone
+pinned to `main`.
 Both see this file, so the rules above apply in either — but only one of them is
 yours to write in.
 

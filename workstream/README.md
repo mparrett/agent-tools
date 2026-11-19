@@ -64,10 +64,11 @@ from (the read-only clone, where there is one):
    Claude Code draws a
    plugin's status line as a yellow warning, so the `badge` option in `/config`
    can move it to a one-row band above the prompt (`band`) or drop it (`off`).
-   Install it from the checkout's own marketplace:
+   Install it from the read-only clone's marketplace, so the hooks change only
+   when `just ship` syncs merged work:
 
    ```sh
-   claude plugin marketplace add <checkout>
+   claude plugin marketplace add ~/repos-read-only/agent-tools
    claude plugin install workstream@agent-tools
    ```
 
