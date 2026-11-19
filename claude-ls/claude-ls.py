@@ -178,6 +178,51 @@ modes by intent:
   reports         activity · resolve"""
 
 
+def _agents_options(parser: argparse.ArgumentParser, suppress: bool = False) -> None:
+    """The options `agents` and `agents search` share: filters, sort, output."""
+    d = (lambda v: argparse.SUPPRESS) if suppress else (lambda v: v)
+    parser.add_argument(
+        "--active",
+        action="store_true",
+        default=d(False),
+        help="Leave out finished background agents (`claude agents` without --all)",
+    )
+    parser.add_argument(
+        "--state",
+        action="append",
+        default=d(None),
+        metavar="STATE[,STATE]",
+        help="Only agents in these states: working, blocked, done, stopped, or an "
+        "interactive session's busy, idle, shell (repeatable, or comma-separated)",
+    )
+    parser.add_argument(
+        "--project",
+        "-p",
+        default=d(None),
+        help="Only agents whose repo name or directory contains this text",
+    )
+    parser.add_argument(
+        "--sort",
+        choices=("active", "sent", "start"),
+        default=d("active"),
+        help="active: live agents first, then by last transcript write (default); "
+        "sent: by when you last sent the agent a message; start: newest first",
+    )
+    # No -r: it is --role and --resume elsewhere in claude-ls.
+    parser.add_argument(
+        "--reverse", action="store_true", default=d(False), help="Reverse the --sort order"
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        default=d(False),
+        help="Print every agent; by default the list stops at one screenful",
+    )
+    parser.add_argument(
+        "--json", action="store_true", default=d(False), help="Output as JSON, one object per agent"
+    )
+
+
 def _did_you_mean(argv) -> None:
     """If the mode-position token isn't a known mode, exit with a short suggestion
     instead of argparse's full-choice-list error (a wall of 15 names helps nobody
@@ -716,53 +761,24 @@ def parse_args():
     agents_parser = subparsers.add_parser(
         "agents",
         help="Claude Code's agent list (`claude agents`), with each session's start, "
-        "idle time, checkout, topic, last prompt and gist",
+        "idle time, checkout, topic, last prompt and gist; `agents search <text>` to search",
     )
-    agents_parser.add_argument(
-        "--active",
-        action="store_true",
-        help="Leave out finished background agents (`claude agents` without --all)",
-    )
-    agents_parser.add_argument(
-        "query",
-        nargs="*",
+    _agents_options(agents_parser)
+    agents_sub = agents_parser.add_subparsers(dest="agents_cmd", metavar="{search}")
+    agents_search = agents_sub.add_parser(
+        "search",
         help="Only agents whose id, repo, worktree, branch, name, topic, last ask, gist or "
-        "directory contains this text (case-insensitive); each says where it matched",
+        "directory contains the text (case-insensitive); each says where it matched",
     )
-    agents_parser.add_argument(
+    agents_search.add_argument("query", nargs="+", help="Text to look for")
+    agents_search.add_argument(
         "--deep",
         action="store_true",
         help="Also search each agent's whole transcript: every prompt, reply and tool output",
     )
-    agents_parser.add_argument(
-        "--state",
-        action="append",
-        metavar="STATE[,STATE]",
-        help="Only agents in these states: working, blocked, done, stopped, or an "
-        "interactive session's busy, idle, shell (repeatable, or comma-separated)",
-    )
-    agents_parser.add_argument(
-        "--project",
-        "-p",
-        help="Only agents whose repo name or directory contains this text",
-    )
-    agents_parser.add_argument(
-        "--sort",
-        choices=("active", "sent", "start"),
-        default="active",
-        help="active: live agents first, then by last transcript write (default); "
-        "sent: by when you last sent the agent a message; start: newest first",
-    )
-    # No -r: it is --role and --resume elsewhere in claude-ls.
-    agents_parser.add_argument("--reverse", action="store_true", help="Reverse the --sort order")
-    agents_parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Print every agent; by default the list stops at one screenful",
-    )
-    agents_parser.add_argument(
-        "--json", action="store_true", help="Output as JSON, one object per agent"
-    )
+    # Suppressed defaults: a flag given before `search` (`agents --state done search
+    # x`) is parsed by `agents`, and a default here would overwrite it.
+    _agents_options(agents_search, suppress=True)
 
     # Resume mode (cd to the session's dir and hand off to `claude -r`)
     resume_parser = subparsers.add_parser(
@@ -7923,11 +7939,11 @@ def agents_mode(args, console: Optional[Console]):
             for r in rows
             if p in os.path.basename(r.repo.rstrip(os.sep)).lower() or p in r.cwd.lower()
         ]
-    query = " ".join(args.query or []).strip()
+    query = " ".join(getattr(args, "query", None) or []).strip()
     if query:
         for r in rows:
             r.matched = _agent_match(r, query)
-        if args.deep:
+        if getattr(args, "deep", False):
             hits = _transcript_hits(
                 [r.transcript for r in rows if r.transcript and not r.matched], query
             )
@@ -7960,7 +7976,7 @@ def agents_mode(args, console: Optional[Console]):
         + (f"{len(rows)} of {total} agents match" if narrowed else f"{total} agents")
     )
     if not rows:
-        if query and not args.deep:
+        if query and not getattr(args, "deep", False):
             print("Nothing matches in what the list shows; --deep also searches each transcript.")
         return
     # Fit one screen so the "as of" line doesn't scroll off. Besides the list:

@@ -4713,10 +4713,19 @@ def test_agents_filters_by_state_project_and_query(monkeypatch, capsys):
     assert "2 of 3 agents match" in out and "cccc3333" not in out
     out = _run_agents(monkeypatch, capsys, rows, "-p", "maru")
     assert "bbbb2222" in out and "aaaa1111" not in out
-    out = _run_agents(monkeypatch, capsys, rows, "midi", "--state", "done")
+    out = _run_agents(monkeypatch, capsys, rows, "search", "midi", "--state", "done")
     assert "1 of 3 agents match" in out and "cccc3333" in out and "⌕ name" in out
 
 
 def test_agents_no_match_suggests_deep(monkeypatch, capsys):
-    out = _run_agents(monkeypatch, capsys, [_agent()], "zzz")
+    out = _run_agents(monkeypatch, capsys, [_agent()], "search", "zzz")
     assert "0 of 1 agents match" in out and "--deep" in out
+
+
+def test_agents_flags_before_search_survive(monkeypatch, capsys):
+    rows = [
+        _agent(session_id="aaaa1111", state="blocked", name="midi bridge"),
+        _agent(session_id="cccc3333", state="done", name="midi notes"),
+    ]
+    out = _run_agents(monkeypatch, capsys, rows, "--state", "done", "search", "midi")
+    assert "1 of 2 agents match" in out and "cccc3333" in out
