@@ -314,7 +314,7 @@ def _unconfirmed(sid: str = S2) -> list[str]:
 
 
 def foreign(w, recent, members=frozenset()):
-    return F.foreign_actions(w, recent, set(members), slug_of=SLUGS.get)
+    return F.foreign_actions(w, recent, set(members), slug_of=SLUGS.get, upstream_of=lambda d: None)
 
 
 def test_foreign_merge_is_reported():
@@ -441,8 +441,26 @@ def test_a_bare_merge_in_a_fork_finds_the_upstream_anchor():
     # gh merges a bare number on the upstream; the fork's origin names the fork.
     w = ws("origin", "gh:upstream-org/tool#42")
     m = _merger(S2, "gh pr merge --squash 42", "", cwd="/src/3p/tool")
-    out = F.foreign_actions(w, [m], set(), slug_of={"/src/3p/tool": "mparrett/tool"}.get)
+    origin = {"/src/3p/tool": "mparrett/tool"}.get
+    upstream = {"/src/3p/tool": "upstream-org/tool"}.get
+    out = F.foreign_actions(w, [m], set(), slug_of=origin, upstream_of=upstream)
     assert len(out) == 1 and out[0].startswith("gh:upstream-org/tool#42 was merged")
+    # Same name, but not a fork of it: no upstream remote, so no match.
+    out = F.foreign_actions(w, [m], set(), slug_of=origin, upstream_of=lambda d: None)
+    assert out == []
+
+
+def test_a_bare_merge_from_a_removed_worktree_ignores_case():
+    w = ws("origin", "gh:acme/MeadowApp#5")
+    m = _merger(S2, "gh pr merge 5", "", cwd="/src/MeadowApp-fix")
+    assert len(foreign(w, [m])) == 1
+
+
+def test_a_merge_started_in_the_background_is_unconfirmed():
+    w = ws("origin", "gh:acme/meadow#319")
+    result = "Command running in background with ID: b42. Output is being written to: /tmp/x"
+    m = _merger(S2, "gh pr merge 319 --repo acme/meadow --squash", result)
+    assert foreign(w, [m]) == _unconfirmed()
 
 
 def test_a_bare_merge_in_a_similarly_named_repo_is_not_this_one():

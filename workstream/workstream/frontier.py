@@ -256,7 +256,9 @@ def _lifecycle_text(ev) -> str:
     return f"{ev.event}({detail})" if detail else ev.event
 
 
-def foreign_actions(ws: Workstream, recent, member_ids: set[str], slug_of=None) -> list[str]:
+def foreign_actions(
+    ws: Workstream, recent, member_ids: set[str], slug_of=None, upstream_of=None
+) -> list[str]:
     """Merges and closes of this workstream's PR anchors by sessions attached
     elsewhere: the cross-repo case, where a session rooted in one repo merged
     another workstream's PRs while that workstream's owner was live.
@@ -266,7 +268,8 @@ def foreign_actions(ws: Workstream, recent, member_ids: set[str], slug_of=None) 
     is not #5 in another). A merge is reported as done only when gh's output
     confirmed it; an attempt with no such sign is reported as unconfirmed,
     and one the output shows failing is left out. `slug_of` maps a directory
-    to its GitHub `owner/repo`, for a bare `gh pr merge N`; tests pass one."""
+    to its GitHub `owner/repo`, for a bare `gh pr merge N`, and `upstream_of`
+    to its `upstream` remote's, for a fork; tests pass both."""
     anchored: dict[str, str] = {}
     for ref in ws.refs:
         scheme, _, value = ref.partition(":")
@@ -277,6 +280,7 @@ def foreign_actions(ws: Workstream, recent, member_ids: set[str], slug_of=None) 
     if not anchored:
         return []
     slug_of = slug_of or _origin_slug
+    upstream_of = upstream_of or _upstream_slug
     out: list[str] = []
     for f in recent:
         if f.id in member_ids or f.kind == "subagent":
@@ -294,9 +298,10 @@ def foreign_actions(ws: Workstream, recent, member_ids: set[str], slug_of=None) 
                     # Its directory is gone, as after merging and removing a worktree.
                     value = _guess(anchored, num, a, f)
                 else:
-                    # A fork: origin names the fork, gh merged on the upstream,
-                    # which has the same repo name under another owner.
-                    value = _same_name(anchored, num, repo)
+                    # A fork: origin names the fork and gh merged on the
+                    # upstream, which the checkout's `upstream` remote names.
+                    up = upstream_of(a.dir) if a.dir else None
+                    value = anchored.get(f"{up.lower()}#{num}") if up else None
             if not value:
                 continue
             when = a.at.iso() if a.at else "unknown time"
@@ -317,8 +322,9 @@ def _guess(anchored: dict[str, str], num: str, a, f) -> Optional[str]:
     as after merging and then removing a worktree: the one anchor numbered N
     whose repo the session recorded, or whose name the directory carries
     (`…/meadow/…`, or a worktree named `meadow-…`). None unless exactly one fits."""
-    names = {os.path.basename(r.rstrip("/")) for r in f.repos}
-    parts = Path(a.dir).parts if a.dir else ()
+    # GitHub names are case-insensitive, and `anchored` keys are lowercased.
+    names = {os.path.basename(r.rstrip("/")).lower() for r in f.repos}
+    parts = tuple(p.lower() for p in Path(a.dir).parts) if a.dir else ()
     fits = []
     for key, value in anchored.items():
         repo, _, n = key.partition("#")
@@ -335,30 +341,29 @@ def _guess(anchored: dict[str, str], num: str, a, f) -> Optional[str]:
     return fits[0] if len(fits) == 1 else None
 
 
-def _same_name(anchored: dict[str, str], num: str, slug: str) -> Optional[str]:
-    """The one anchor numbered `num` whose repo is named as `slug`'s is."""
-    name = slug.lower().split("/")[-1]
-    fits = [
-        v
-        for k, v in anchored.items()
-        if k.split("#")[0].split("/")[-1] == name and k.endswith(f"#{num}")
-    ]
-    return fits[0] if len(fits) == 1 else None
-
-
 _slug_cache: dict[str, Optional[str]] = {}
 
 
 def _origin_slug(path: str) -> Optional[str]:
     """`owner/repo` of the GitHub origin of the checkout holding `path`."""
+    return _remote_slug(path, "origin")
+
+
+def _upstream_slug(path: str) -> Optional[str]:
+    """`owner/repo` of the checkout's `upstream` remote, which a fork has."""
+    return _remote_slug(path, "upstream")
+
+
+def _remote_slug(path: str, remote: str) -> Optional[str]:
     root = seam.canonical_repo_root(path) or seam.repo_root_for(path)
     if not root:
         return None
-    if root not in _slug_cache:
-        rc, url = anchors_mod._git(root, "remote", "get-url", "origin")
+    key = f"{root}\0{remote}"
+    if key not in _slug_cache:
+        rc, url = anchors_mod._git(root, "remote", "get-url", remote)
         slug = anchors_mod.gh_repo_from_url(url) if rc == 0 else None
-        _slug_cache[root] = slug if slug and sessions_mod.valid_repo(slug) else None
-    return _slug_cache[root]
+        _slug_cache[key] = slug if slug and sessions_mod.valid_repo(slug) else None
+    return _slug_cache[key]
 
 
 NOT_CLOSED = "all tasks done; workstream not closed"

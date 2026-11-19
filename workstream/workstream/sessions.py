@@ -1167,6 +1167,9 @@ def _exit_state(scan: _Scan, call_id: str, codex: bool = False) -> Optional[str]
     text = text or ""
     if _DENIED_RE.match(text):
         return "denied"
+    # Started with run_in_background: the command had not finished.
+    if text.startswith("Command running in background"):
+        return None
     # Codex records the exit status in its output; a Claude result can print
     # the same text, so it is read only for Codex.
     m = _CODEX_EXIT_RE.search(text) if codex else None
