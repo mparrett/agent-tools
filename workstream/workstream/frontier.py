@@ -290,9 +290,13 @@ def foreign_actions(ws: Workstream, recent, member_ids: set[str], slug_of=None) 
             repo = repo or (slug_of(a.dir) if a.dir else None) or ""
             value = anchored.get(f"{repo.lower()}#{num}")
             if value is None and a.value.startswith("#"):
-                # A bare number whose directory gave no answer, or the wrong
-                # one: a fork's origin, where gh merges on the upstream.
-                value = _guess(anchored, num, a, f)
+                if not repo:
+                    # Its directory is gone, as after merging and removing a worktree.
+                    value = _guess(anchored, num, a, f)
+                else:
+                    # A fork: origin names the fork, gh merged on the upstream,
+                    # which has the same repo name under another owner.
+                    value = _same_name(anchored, num, repo)
             if not value:
                 continue
             when = a.at.iso() if a.at else "unknown time"
@@ -309,7 +313,7 @@ def foreign_actions(ws: Workstream, recent, member_ids: set[str], slug_of=None) 
 
 
 def _guess(anchored: dict[str, str], num: str, a, f) -> Optional[str]:
-    """The anchor a bare `#N` meant when its directory no longer answers,
+    """The anchor a bare `#N` meant when its directory no longer has an origin,
     as after merging and then removing a worktree: the one anchor numbered N
     whose repo the session recorded, or whose name the directory carries
     (`…/meadow/…`, or a worktree named `meadow-…`). None unless exactly one fits."""
@@ -328,6 +332,17 @@ def _guess(anchored: dict[str, str], num: str, a, f) -> Optional[str]:
             or (parts and parts[-1].startswith(f"{name}-"))
         ):
             fits.append(value)
+    return fits[0] if len(fits) == 1 else None
+
+
+def _same_name(anchored: dict[str, str], num: str, slug: str) -> Optional[str]:
+    """The one anchor numbered `num` whose repo is named as `slug`'s is."""
+    name = slug.lower().split("/")[-1]
+    fits = [
+        v
+        for k, v in anchored.items()
+        if k.split("#")[0].split("/")[-1] == name and k.endswith(f"#{num}")
+    ]
     return fits[0] if len(fits) == 1 else None
 
 

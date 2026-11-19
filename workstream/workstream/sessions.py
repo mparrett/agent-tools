@@ -1108,7 +1108,7 @@ def _segment_acts(
 # acme/meadow#319 (title)", or "#319" from older gh. gh prints it only to a
 # terminal, so most tool results lack it. One result can hold several
 # segments' output, so the number has to match.
-_PR_DONE_RE = re.compile(r"\b(merged|closed) pull request (?:[\w.-]+/[\w.-]+)?#(\d+)\b", re.I)
+_PR_DONE_RE = re.compile(r"\b(merged|closed) pull request (?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.I)
 _PR_ALREADY_RE = re.compile(
     r"pull request (?:[\w.-]+/[\w.-]+)?#(\d+) (?:was already merged|is already closed)", re.I
 )
@@ -1131,10 +1131,16 @@ def pr_outcome(
         if _API_MERGED_RE.search(text):
             return True
     else:
-        if any(
-            m.group(1).lower() == verb and m.group(2) == num for m in _PR_DONE_RE.finditer(text)
-        ):
-            return True
+        repo = pr.partition("#")[0].lower()
+        for m in _PR_DONE_RE.finditer(text):
+            # A line naming another repo is another segment's merge.
+            named = (m.group(2) or "").lower()
+            if (
+                m.group(1).lower() == verb
+                and m.group(3) == num
+                and not (repo and named and named != repo)
+            ):
+                return True
         # "already merged" is someone else's merge, not this command's.
         if any(m.group(1) == num for m in _PR_ALREADY_RE.finditer(text)):
             return False

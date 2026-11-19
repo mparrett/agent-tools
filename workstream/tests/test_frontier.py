@@ -299,6 +299,13 @@ def _merger(
     return facts(sid, kind=kind, pr_closing=sessions._closing_acts(scan, kind == "codex"))
 
 
+def _unconfirmed_for(pr: str, sid: str = S2) -> list[str]:
+    return [
+        f"gh:{pr}: {sid[:8]} ran `gh pr merge` at {at(30).iso()} and its output"
+        " does not confirm it, a session not attached here"
+    ]
+
+
 def _unconfirmed(sid: str = S2) -> list[str]:
     return [
         f"gh:acme/meadow#319: {sid[:8]} ran `gh pr merge` at {at(30).iso()} and its output"
@@ -436,6 +443,23 @@ def test_a_bare_merge_in_a_fork_finds_the_upstream_anchor():
     m = _merger(S2, "gh pr merge --squash 42", "", cwd="/src/3p/tool")
     out = F.foreign_actions(w, [m], set(), slug_of={"/src/3p/tool": "mparrett/tool"}.get)
     assert len(out) == 1 and out[0].startswith("gh:upstream-org/tool#42 was merged")
+
+
+def test_a_bare_merge_in_a_similarly_named_repo_is_not_this_one():
+    # meadow-tools resolves; its name only looks like meadow's.
+    w = ws("origin", "gh:acme/meadow#319")
+    m = _merger(S2, "gh pr merge --squash 319", "", cwd="/src/meadow-tools")
+    slugs = {"/src/meadow-tools": "acme/meadow-tools"}
+    assert F.foreign_actions(w, [m], set(), slug_of=slugs.get) == []
+
+
+def test_a_confirmation_for_another_repo_does_not_confirm_this_one():
+    w = ws("origin", "gh:acme/meadow#5")
+    cmd = "gh pr merge 5 --repo acme/meadow; gh pr merge 5 --repo acme/bramble"
+    result = "X Pull request acme/meadow#5 is not mergeable\n" + MERGED.replace(
+        "#{n}", "acme/bramble#{n}"
+    ).format(n=5)
+    assert foreign(w, [_merger(S2, cmd, result)]) == _unconfirmed_for("acme/meadow#5")
 
 
 def test_gh_global_repo_flag_before_the_subcommand():
