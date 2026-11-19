@@ -725,10 +725,10 @@ def parse_args():
     )
     agents_parser.add_argument(
         "--sort",
-        choices=("active", "sent", "started"),
+        choices=("active", "sent", "start"),
         default="active",
         help="active: live agents first, then by last transcript write (default); "
-        "sent: by when you last sent the agent a message; started: newest first",
+        "sent: by when you last sent the agent a message; start: newest first",
     )
     # No -r: it is --role and --resume elsewhere in claude-ls.
     agents_parser.add_argument("--reverse", action="store_true", help="Reverse the --sort order")
@@ -7787,7 +7787,7 @@ def agents_mode(args, console: Optional[Console]):
 
     if args.sort == "sent":
         rows.sort(key=lambda r: mins(r.sent_min))
-    elif args.sort == "started":
+    elif args.sort == "start":
         rows.sort(key=lambda r: r.started_at, reverse=True)
     else:
         # Live first, then by the transcript's last write, whoever made it.
