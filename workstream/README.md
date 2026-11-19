@@ -384,3 +384,13 @@ Tests build a synthetic store (`tests/synthetic.py`) with invented names;
 nothing from a real session store is committed. Tests that need weft skip
 when the installed `weft` does not accept `--kind workstream`, and the
 released-claim round trip skips when its export has no `released_claims`.
+
+To time the commands against your own stores without changing them:
+
+```
+uv run --directory workstream python bench.py --ws <workstream> [--gh stub|warm|slow|live]
+```
+
+It copies the weft store and the GitHub cache into a temporary directory and
+counts the git, gh and weft processes each command starts. Run it on `main`
+and on a branch to compare; it prints numbers and never records them.
