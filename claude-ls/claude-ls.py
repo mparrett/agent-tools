@@ -730,6 +730,8 @@ def parse_args():
         help="active: live agents first, then by last transcript write (default); "
         "sent: by when you last sent the agent a message; started: newest first",
     )
+    # No -r: it is --role and --resume elsewhere in claude-ls.
+    agents_parser.add_argument("--reverse", action="store_true", help="Reverse the --sort order")
     agents_parser.add_argument(
         "--all",
         action="store_true",
@@ -7790,6 +7792,8 @@ def agents_mode(args, console: Optional[Console]):
     else:
         # Live first, then by the transcript's last write, whoever made it.
         rows.sort(key=lambda r: (r.state == "done", mins(r.idle_min)))
+    if args.reverse:
+        rows.reverse()
 
     if args.json:
         print(json.dumps([asdict(r) for r in rows], indent=2))
