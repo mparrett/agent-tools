@@ -167,13 +167,46 @@ KNOWN_MODES = frozenset(
         "lineage",
     }
 )
+# Shown by `agents --help` and `agents search --help`; the README's agents section
+# says the same at more length, so change both together.
+AGENTS_GUIDE = """\
+columns:  id · state · start · idle (last transcript write) · you (your last
+          message) · where.  Under each: name, topic (first ask), ↳ your last
+          real ask (small talk like "yes" skipped), ≡ gist (background jobs),
+          ⌕ where a search matched.  ◆ marks an interactive session.
+
+sort:     --sort active   live first, then most recently written (default)
+          --sort sent     the agent you messaged most recently first
+          --sort start    newest first
+          --reverse       flip any of them
+
+filter:   --state working,blocked   (also done, stopped; busy/idle/shell for ◆)
+          -p, --project slab        repo name or directory contains the text
+          --active                  leave out finished background agents
+
+search:   agents search <text>         id prefix, repo, worktree, branch, name,
+                                       topic, last ask, gist, directory
+          agents search <text> --deep  also every transcript: prompts, replies,
+                                       tool output (slower, noisier)
+
+The list stops at one screenful; --all prints the rest, --json prints all as
+JSON.  Filters, sort and output flags combine, before or after `search`.
+
+examples:
+  claude-ls agents --sort sent                 who was I just talking to?
+  claude-ls agents search midi                 which agent was on the MIDI work?
+  claude-ls agents search 'slab#48' --deep     ...mentioned it anywhere
+  claude-ls agents --state blocked             who's waiting on me?
+  claude-ls agents -p slab --sort start        this project's agents, newest first
+  claude-ls resume <id>                        then pick one back up"""
+
 
 MODE_OVERVIEW = """\
 common:  info <id> · search <text> · last · resume <id>
 
 modes by intent:
   one session     info (aka show, summary) · get · export · resume · lineage
-  find sessions   search · sessions · here (aka find) · pending · who · agents
+  find sessions   search · sessions · here (aka find) · pending · who · agents (search)
   browse          browse · select · list · last
   reports         activity · resolve"""
 
@@ -762,6 +795,10 @@ def parse_args():
         "agents",
         help="Claude Code's agent list (`claude agents`), with each session's start, "
         "idle time, checkout, topic, last prompt and gist; `agents search <text>` to search",
+        description="`claude agents`, with when each agent started, when you last "
+        "messaged it, where it works and what it is about.",
+        epilog=AGENTS_GUIDE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _agents_options(agents_parser)
     agents_sub = agents_parser.add_subparsers(dest="agents_cmd", metavar="{search}")
@@ -769,6 +806,11 @@ def parse_args():
         "search",
         help="Only agents whose id, repo, worktree, branch, name, topic, last ask, gist or "
         "directory contains the text (case-insensitive); each says where it matched",
+        description="Agents whose id, repo, worktree, branch, name, topic, last ask, "
+        "gist or directory contains the text, case-insensitively. Each says where it "
+        "matched (⌕).",
+        epilog=AGENTS_GUIDE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     agents_search.add_argument("query", nargs="+", help="Text to look for")
     agents_search.add_argument(
