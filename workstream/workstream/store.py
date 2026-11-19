@@ -52,8 +52,6 @@ UNASSOCIATED_PREFIX = "unassociated: "
 CLOSED_PREFIX = "closed: "
 # weft states a node can leave open for; a task in either is settled for closure.
 SETTLED = ("done", "dropped")
-# Bound on detach's release loop, in case weft ever reports released=true forever.
-MAX_RELEASES = 50
 # How `sync` writes an anchor. weft's `source` is a closed set (observed,
 # asserted, inferred) and rejects anything else, so "added by sync" is spelled
 # `inferred`: nothing else in this tool writes a ref that way. `--anchor` writes
@@ -698,11 +696,6 @@ def join(
     raise WeftError(
         f"attach: claims kept changing underneath it ({APPLY_RETRIES} tries): {last}", 8
     )
-
-
-def _release_holder(wid: str, holder: str, *, actor: Optional[str] = None) -> bool:
-    out = _apply([], [{"op": "release", "node": wid, "holder": holder}], actor=actor)
-    return bool(out["results"][0].get("claims"))
 
 
 # --- closure -----------------------------------------------------------------
