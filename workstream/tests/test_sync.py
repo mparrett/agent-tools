@@ -509,7 +509,8 @@ def test_a_pipe_into_tee_still_shows_everything():
 def retired(case, synthetic_store, monkeypatch):
     """`retired-ws` anchors the worker's worktree, which was squash-merged and removed.
     The clock is pinned two days after the fixture's sessions: measured from the
-    real one, the hook log's 14-day window aged the worktree's only evidence out."""
+    real one, the hook log's 14-day window aged the worktree's only evidence out.
+    Only that window is pinned; claim windows still read the real clock."""
     monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 11, 3, tzinfo=UTC))
     wt = case["worktrees"]["sync-seam"]
     ws = store.create("retired-ws", "A retired slice", anchors=[f"wt:{wt}"])

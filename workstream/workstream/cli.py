@@ -409,7 +409,7 @@ def cmd_sync(args) -> int:
         others=[w for w in live if w.id not in ids],
         only=only,
         ancillary=args.ancillary,
-        log=_load_log(args.since or RECENT_WINDOW),
+        log=_load_log(args.since),
         history=everything,
     )
     if not args.json:
@@ -1226,6 +1226,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--since",
         metavar="WINDOW",
+        default=RECENT_WINDOW,
         help=f"how far back to read the hook log (default {RECENT_WINDOW}); widen it, e.g. 90d,"
         " to recover worktrees whose only evidence is an older hook-log line",
     )
