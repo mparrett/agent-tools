@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -795,6 +796,32 @@ def test_resume_pick_out_of_range_exits(tmp_path, capsys):
         cl.resume_mode(_resume_args(base, session=uuid, pick=9), None)
     assert exc.value.code == 1
     assert "out of range" in capsys.readouterr().err
+
+
+def test_resume_prints_commands_by_default(tmp_path, capsys, monkeypatch):
+    base, uuid, dirs = _same_id_across_dirs(tmp_path)
+    monkeypatch.setattr(cl, "_exec", lambda cmd: pytest.fail("printing must not exec"))
+    args = _resume_args(base, session=uuid, pick=2)
+    del args.dry_run  # what the CLI passes now: no --exec means print
+    cl.resume_mode(args, None)
+    out = capsys.readouterr().out.strip()
+    assert out == f"cd {shlex.quote(str(dirs['work'][1]))} && claude -r {uuid}"
+
+
+def test_resume_exec_cds_and_execs(tmp_path, monkeypatch):
+    base, uuid, dirs = _same_id_across_dirs(tmp_path)
+    ran = {}
+    monkeypatch.setattr(cl.os, "chdir", lambda d: ran.update(cwd=d))
+    monkeypatch.setattr(cl, "_exec", lambda cmd: ran.update(cmd=cmd))
+    args = _resume_args(base, session=uuid, pick=2, exec_=True)
+    cl.resume_mode(args, None)
+    assert ran == {"cwd": str(dirs["work"][1]), "cmd": ["claude", "-r", uuid]}
+
+
+@pytest.mark.parametrize("argv,want", [([], False), (["--exec"], True), (["-x"], True)])
+def test_resume_exec_flag_parses(monkeypatch, argv, want):
+    monkeypatch.setattr(sys, "argv", ["claude-ls", "resume", "abc123", *argv])
+    assert cl.parse_args().exec_ is want
 
 
 # --- discovery refs (phase 1) ----------------------------------------
@@ -4546,3 +4573,209 @@ def test_lineage_tree_marks_forks_on_the_edge_or_the_root(tmp_path, capsys):
     doc = _lin_json(base, "cleared", capsys)
     forks = {s["sid"] for s in doc["sessions"] if s["fork"]}
     assert forks == {_LIN["root"], _LIN["cleared"]}
+
+
+# --- agents: the last message a person sent ----------------------------
+
+
+def _sent_jsonl(path, records):
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+    return path
+
+
+def _sent_user(text, ts, **extra):
+    return {"type": "user", "timestamp": ts, "message": {"content": text}, **extra}
+
+
+def test_last_sent_skips_tool_results_meta_and_wrappers(tmp_path):
+    f = _sent_jsonl(
+        tmp_path / "s.jsonl",
+        [
+            _sent_user("first ask", "2026-11-18T10:00:00Z"),
+            _sent_user("the real last one", "2026-11-18T11:00:00Z"),
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}},
+            _sent_user([{"type": "tool_result", "content": "x"}], "2026-11-18T11:01:00Z"),
+            _sent_user("reminder", "2026-11-18T11:02:00Z", isMeta=True),
+            _sent_user("<command-name>/clear</command-name>", "2026-11-18T11:03:00Z"),
+        ],
+    )
+    assert cl._last_sent(f) == ("the real last one", "2026-11-18T11:00:00Z")
+
+
+def test_last_sent_finds_a_prompt_split_across_chunks(tmp_path):
+    noise = [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "y" * 200}]}}
+    ] * 50
+    f = _sent_jsonl(
+        tmp_path / "s.jsonl", [_sent_user("way back " * 20, "2026-11-18T09:00:00Z"), *noise]
+    )
+    # A chunk smaller than one record forces every line to be stitched together.
+    text, ts = cl._last_sent(f, chunk=37)
+    assert text.startswith("way back") and ts == "2026-11-18T09:00:00Z"
+
+
+def test_last_sent_none(tmp_path):
+    f = _sent_jsonl(tmp_path / "s.jsonl", [{"type": "assistant", "message": {"content": []}}])
+    assert cl._last_sent(f) == ("", "")
+
+
+def test_last_sent_skips_small_talk_but_keeps_its_time(tmp_path):
+    f = _sent_jsonl(
+        tmp_path / "s.jsonl",
+        [
+            _sent_user("add a sort flag to the agents view", "2026-11-18T10:00:00Z"),
+            _sent_user("[Request interrupted by user]", "2026-11-18T10:05:00Z"),
+            _sent_user("yes please do that", "2026-11-18T10:10:00Z"),
+            _sent_user("3", "2026-11-18T10:20:00Z"),
+        ],
+    )
+    # The ask is what it's working on; the "3" is when you last spoke to it.
+    assert cl._last_sent(f) == ("add a sort flag to the agents view", "2026-11-18T10:20:00Z")
+
+
+def test_last_sent_falls_back_to_newest_when_all_small_talk(tmp_path):
+    f = _sent_jsonl(
+        tmp_path / "s.jsonl",
+        [_sent_user("ok", "2026-11-18T10:00:00Z"), _sent_user("go", "2026-11-18T10:01:00Z")],
+    )
+    assert cl._last_sent(f) == ("go", "2026-11-18T10:01:00Z")
+
+
+def test_last_sent_stops_looking_after_max_prompts(tmp_path):
+    recs = [_sent_user("the real ask from long ago", "2026-11-18T09:00:00Z")]
+    recs += [_sent_user("ok", f"2026-11-18T10:{m:02d}:00Z") for m in range(5)]
+    f = _sent_jsonl(tmp_path / "s.jsonl", recs)
+    assert cl._last_sent(f, max_prompts=3) == ("ok", "2026-11-18T10:04:00Z")
+
+
+# --- agents: search and filters ----------------------------------------
+
+
+def _agent(**over):
+    base = dict(
+        session_id="aaaa1111-0000",
+        name="",
+        kind="background",
+        state="done",
+        status="idle",
+        started_at="2026-11-18T10:00:00-08:00",
+        last_active="",
+        idle_min=5,
+        sent_at="",
+        sent_min=5,
+        cwd="/Users/x/projects/webapp",
+        branch="main",
+        worktree="main",
+        topic="",
+        last_prompt="",
+        gist="",
+        repo="/Users/x/projects/webapp",
+    )
+    base.update(over)
+    return cl.AgentRow(**base)
+
+
+def test_agent_match_prefers_plain_fields_and_names_them():
+    r = _agent(name="billing fix", gist="Billing export ready", worktree="billing-export")
+    assert cl._agent_match(r, "BILLING") == "worktree"  # before name and gist
+    assert cl._agent_match(_agent(gist="port ready"), "PORT") == "gist"
+    assert cl._agent_match(_agent(), "aaaa") == "id"
+    assert cl._agent_match(_agent(), "projects/we").startswith("dir: ")
+    assert cl._agent_match(_agent(), "nothing-here") == ""
+
+
+def test_transcript_hits_returns_a_snippet_per_matching_file(tmp_path):
+    a = tmp_path / "a.jsonl"
+    b = tmp_path / "b.jsonl"
+    a.write_text(json.dumps({"text": "line one\nthe Webhook listener is up"}) + "\n")
+    b.write_text(json.dumps({"text": "nothing to see"}) + "\n")
+    hits = cl._transcript_hits([str(a), str(b)], "webhook")
+    assert list(hits) == [str(a)]
+    assert "Webhook listener" in hits[str(a)] and "\\n" not in hits[str(a)]
+
+
+def _run_agents(monkeypatch, capsys, rows, *argv):
+    monkeypatch.setattr(cl, "_claude_agents", lambda include_done: rows)
+    monkeypatch.setattr(cl, "_agent_row", lambda rec, base: rec)
+    monkeypatch.setattr(sys, "argv", ["claude-ls", "--no-color", "agents", "--all", *argv])
+    args = cl.parse_args()
+    cl.agents_mode(args, None)
+    return capsys.readouterr().out
+
+
+def test_agents_filters_by_state_project_and_query(monkeypatch, capsys):
+    rows = [
+        _agent(session_id="aaaa1111", state="blocked", name="billing fix"),
+        _agent(session_id="bbbb2222", state="working", repo="/Users/x/projects/api"),
+        _agent(session_id="cccc3333", state="done", name="billing notes"),
+    ]
+    out = _run_agents(monkeypatch, capsys, rows, "--state", "blocked,working")
+    assert "2 of 3 agents match" in out and "cccc3333" not in out
+    out = _run_agents(monkeypatch, capsys, rows, "-p", "api")
+    assert "bbbb2222" in out and "aaaa1111" not in out
+    out = _run_agents(monkeypatch, capsys, rows, "search", "billing", "--state", "done")
+    assert "1 of 3 agents match" in out and "cccc3333" in out and "⌕ name" in out
+
+
+def test_agents_no_match_suggests_deep(monkeypatch, capsys):
+    out = _run_agents(monkeypatch, capsys, [_agent()], "search", "zzz")
+    assert "0 of 1 agents match" in out and "--deep" in out
+
+
+def test_agents_flags_before_search_survive(monkeypatch, capsys):
+    rows = [
+        _agent(session_id="aaaa1111", state="blocked", name="billing fix"),
+        _agent(session_id="cccc3333", state="done", name="billing notes"),
+    ]
+    out = _run_agents(monkeypatch, capsys, rows, "--state", "done", "search", "billing")
+    assert "1 of 2 agents match" in out and "cccc3333" in out
+
+
+def test_agents_search_leaves_out_the_session_running_it(monkeypatch, capsys):
+    rows = [
+        _agent(session_id="aaaa1111", name="billing fix"),
+        _agent(session_id="bbbb2222", name="billing notes"),
+    ]
+    monkeypatch.setattr(cl, "_live_registry", lambda *a: [])
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "aaaa1111")
+    out = _run_agents(monkeypatch, capsys, rows, "search", "billing")
+    assert "1 of 2 agents match" in out and "aaaa1111" not in out
+    # The plain list still shows it.
+    out = _run_agents(monkeypatch, capsys, rows)
+    assert "aaaa1111" in out
+
+
+@pytest.mark.parametrize(
+    "text,small",
+    [
+        ("yes please do that", True),
+        ("ok go", True),
+        ("3", True),
+        ("Thanks!", True),
+        ("run the tests", False),
+        ("no, switch the billing sync to the v2 API instead", False),
+        ("go through the review comments on #48 and fix them", False),
+        ("stop using the mock and hit the real staging db", False),
+    ],
+)
+def test_small_talk_needs_the_whole_reply(text, small):
+    assert cl._is_small_talk(text) is small
+
+
+def test_agents_active_sort_puts_stopped_with_finished(monkeypatch, capsys):
+    rows = [
+        _agent(session_id="aaaa1111", state="stopped", idle_min=5),
+        _agent(session_id="bbbb2222", state="working", idle_min=20),
+    ]
+    out = _run_agents(monkeypatch, capsys, rows)
+    assert out.index("bbbb2222") < out.index("aaaa1111")
+
+
+def test_agent_row_names_the_repo_of_a_removed_worktree(tmp_path):
+    rec = {
+        "sessionId": "dddd4444",
+        "cwd": "/gone/proj/.claude/worktrees/fix-x",
+        "kind": "background",
+    }
+    row = cl._agent_row(rec, str(tmp_path))
+    assert row.repo == "/gone/proj" and row.worktree == "fix-x (gone)"

@@ -57,15 +57,17 @@ cautions and proceeds — a transcript is equally warm right after you quit.
 - `here` (alias `find`) — sessions anchored to the current dir; from a git worktree it also surfaces ones started in the source repo (`--deep` also scans for sessions that did work here but launched elsewhere). A session that was `/clear`ed from another shows `↺ cleared from <id>` under its topic, as does `sessions`
 - `pending` — sessions waiting on user input or a permission prompt; `pending --json` includes each session's real `cwd` and `git_branch` (read from the transcript), so callers can join a waiting session to a process by path, and the full `session_id` (the listing abbreviates it for display, the JSON does not — it is a join key)
 - `activity` — recent session activity
+- `agents` — Claude Code's agent list with start, idle, your last message, checkout and gist; search, sort and filter it (see [Agents](#agents-which-one-was-i-talking-to))
 - `who` — the live fleet, grouped by repo: tmux pane, checkout @ branch, taken from where the session's edits land rather than where it launched (a session started in the main checkout and working in a worktree shows the worktree; two live sessions editing one checkout are marked `!`), busy/idle status, model, topic, last prompt, files touched. From inside a session, `who --me` shows that session and its repo-mates, resolved from `CLAUDE_CODE_SESSION_ID` (or the process ancestry). `who --json` is the form a hook consumes. Reads Claude Code's own `~/.claude/sessions/<pid>.json` registry, so nothing has to be posted and nothing goes stale. A pane that has been `/clear`ed shows `cleared from <id> · N sessions in this pane`
-- `resume` — `cd` into a session's anchoring dir and hand off to `claude -r`. When the id you pass matches several sessions (e.g. a short partial id that's a substring of more than one), it lists the candidates by directory and mtime; choose one with `resume <id> --pick <n>`. When the id names a session that was `/clear`ed and its pane now runs a later session, `resume` refuses and points at the pane and the later id (`--attach` jumps there, `--force` resumes the old transcript anyway)
+- `resume` — print the `cd` into a session's anchoring dir and the `claude -r` that resumes it, for your shell to run (`--exec` runs them itself, but under `uv` the `cd` can't move your shell). When the id you pass matches several sessions (e.g. a short partial id that's a substring of more than one), it lists the candidates by directory and mtime; choose one with `resume <id> --pick <n>`. When the id names a session that was `/clear`ed and its pane now runs a later session, `resume` refuses and points at the pane and the later id (`--attach` jumps there, `--force` resumes the old transcript anyway)
 
 ### `-n` means rows
 
 `-n` is the count of *rows this command lists* — sessions, results, matches — on
 `list`, `sessions`, `search`, `browse`, `here` and `pending`. Commands that count
-something else spell it out: `last --turns`, `get --tail`. `resume` takes
-`--dry-run` (it was `-n`, which read as a count and silently consumed nothing).
+something else spell it out: `last --turns`, `get --tail`. `resume` prints by
+default and takes `--exec` to run; `--dry-run`, once its print flag (and before
+that `-n`, which read as a count and silently consumed nothing), is still accepted.
 
 ### `--sort` picks which timestamp
 
@@ -108,6 +110,41 @@ both used to win it:
 - **A placeholder.** A pasted image is written as `[Image: source: <path>]`, and a
   message that is nothing but one bracketed stand-in is not prose. It still counts
   as a turn; it just can't be the topic.
+
+## Agents: which one was I talking to?
+
+`claude-ls agents` is Claude Code's own `claude agents` list, finished background
+agents included, with what that list leaves out: when each started, when its
+transcript last moved, when **you** last sent it a message, the checkout it works
+in, its topic, your last real ask (replies like "yes" or "3" are skipped), and for
+background jobs the gist from their `state.json`. `agents --help` has the same guide
+in short.
+
+```
+claude-ls agents --sort sent                 who was I just talking to?
+claude-ls agents search billing              which agent was on the billing work?
+claude-ls agents search 'acme#48' --deep     ...mentioned it anywhere at all
+claude-ls agents --state blocked             who's waiting on me?
+claude-ls agents -p webapp --sort start      this project's agents, newest first
+claude-ls resume <id>                        then pick one back up
+```
+
+- **Sort** — `--sort active` (default: live agents first, then by the last write to
+  the transcript, whoever made it), `sent` (by your last message: the one to reach
+  for after backgrounding an agent mid-conversation), `start` (newest first);
+  `--reverse` flips any of them.
+- **Filter** — `--state` takes working, blocked, done, stopped, or an interactive
+  session's busy, idle, shell; repeat it or comma-separate. `-p/--project` matches
+  the repo name or the directory. `--active` leaves out finished background agents.
+- **Search** — `agents search <text>` matches the id prefix, repo, worktree,
+  branch, name, topic, last ask, gist and directory, case-insensitively, and a `⌕`
+  line says which field matched. `--deep` also searches each whole transcript
+  (prompts, replies, tool output) in one `rg` pass and quotes the hit; expect more
+  noise, since tool output counts. Search reads transcripts rather than
+  `claude logs`, which is raw terminal repaint and exists only for live agents.
+- **Output** — the list stops at one screenful (`… N more; --all shows them`);
+  `--json` prints every agent. Filter, sort and output flags combine, and go before
+  or after `search`.
 
 ## Lineage across `/clear`
 

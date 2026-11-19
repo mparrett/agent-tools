@@ -52,8 +52,10 @@ Sessions are stored under `~/.claude/projects/<slug-of-starting-cwd>/<session-id
      ```bash
      claude-ls resume <session-id-or-prefix>
      ```
-     `resume` resolves a partial id, `cd`s into the session's anchoring dir (following a removed worktree back to its main repo), and hands off to `claude -r`. It hard-stops if a tmux session named after the project is live, so you don't double-drive an in-progress session (`--attach` to jump to it, `--force` to override).
+     `resume` resolves a partial id and prints `cd <anchoring dir> && claude -r <id>` (following a removed worktree back to its main repo) for the user to run; `--exec` runs it instead. It hard-stops if a tmux session named after the project is live, so you don't double-drive an in-progress session (`--attach` to jump to it, `--force` to override).
    - Note any other sessions that matched but are just passing references.
+
+**A live or recent agent rather than an old session** ("which agent was handling X", "the one I was just talking to"): `claude-ls agents search <text>` (add `--deep` to search whole transcripts) or `claude-ls agents --sort sent`. `claude-ls agents --help` has the guide.
 
 ## claude-ls cheat-sheet
 

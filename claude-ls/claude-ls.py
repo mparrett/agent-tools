@@ -163,18 +163,97 @@ KNOWN_MODES = frozenset(
         "activity",
         "resolve",
         "who",
+        "agents",
         "lineage",
     }
 )
+# Shown by `agents --help` and `agents search --help`; the README's agents section
+# says the same at more length, so change both together.
+AGENTS_GUIDE = """\
+columns:  id · state · start · idle (last transcript write) · you (your last
+          message) · where.  Under each: name, topic (first ask), ↳ your last
+          real ask (small talk like "yes" skipped), ≡ gist (background jobs),
+          ⌕ where a search matched.  ◆ marks an interactive session.
+
+sort:     --sort active   live first, then most recently written (default)
+          --sort sent     the agent you messaged most recently first
+          --sort start    newest first
+          --reverse       flip any of them
+
+filter:   --state working,blocked   (also done, stopped; busy/idle/shell for ◆)
+          -p, --project webapp        repo name or directory contains the text
+          --active                  leave out finished background agents
+
+search:   agents search <text>         id prefix, repo, worktree, branch, name,
+                                       topic, last ask, gist, directory
+          agents search <text> --deep  also every transcript: prompts, replies,
+                                       tool output (slower, noisier)
+
+The list stops at one screenful; --all prints the rest, --json prints all as
+JSON.  Filters, sort and output flags combine, before or after `search`.
+
+examples:
+  claude-ls agents --sort sent                 who was I just talking to?
+  claude-ls agents search billing              which agent was on the billing work?
+  claude-ls agents search 'acme#48' --deep     ...mentioned it anywhere
+  claude-ls agents --state blocked             who's waiting on me?
+  claude-ls agents -p webapp --sort start      this project's agents, newest first
+  claude-ls resume <id>                        then pick one back up"""
+
 
 MODE_OVERVIEW = """\
 common:  info <id> · search <text> · last · resume <id>
 
 modes by intent:
   one session     info (aka show, summary) · get · export · resume · lineage
-  find sessions   search · sessions · here (aka find) · pending · who
+  find sessions   search · sessions · here (aka find) · pending · who · agents (search)
   browse          browse · select · list · last
   reports         activity · resolve"""
+
+
+def _agents_options(parser: argparse.ArgumentParser, suppress: bool = False) -> None:
+    """The options `agents` and `agents search` share: filters, sort, output."""
+    d = (lambda v: argparse.SUPPRESS) if suppress else (lambda v: v)
+    parser.add_argument(
+        "--active",
+        action="store_true",
+        default=d(False),
+        help="Leave out finished background agents (`claude agents` without --all)",
+    )
+    parser.add_argument(
+        "--state",
+        action="append",
+        default=d(None),
+        metavar="STATE[,STATE]",
+        help="Only agents in these states: working, blocked, done, stopped, or an "
+        "interactive session's busy, idle, shell (repeatable, or comma-separated)",
+    )
+    parser.add_argument(
+        "--project",
+        "-p",
+        default=d(None),
+        help="Only agents whose repo name or directory contains this text",
+    )
+    parser.add_argument(
+        "--sort",
+        choices=("active", "sent", "start"),
+        default=d("active"),
+        help="active: live agents first, then by last transcript write (default); "
+        "sent: by when you last sent the agent a message; start: newest first",
+    )
+    # No -r: it is --role and --resume elsewhere in claude-ls.
+    parser.add_argument(
+        "--reverse", action="store_true", default=d(False), help="Reverse the --sort order"
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        default=d(False),
+        help="Print every agent; by default the list stops at one screenful",
+    )
+    parser.add_argument(
+        "--json", action="store_true", default=d(False), help="Output as JSON, one object per agent"
+    )
 
 
 def _did_you_mean(argv) -> None:
@@ -712,10 +791,41 @@ def parse_args():
         "--json", action="store_true", help="Output as JSON, one object per session"
     )
 
+    agents_parser = subparsers.add_parser(
+        "agents",
+        help="Claude Code's agent list (`claude agents`), with each session's start, "
+        "idle time, checkout, topic, last prompt and gist; `agents search <text>` to search",
+        description="`claude agents`, with when each agent started, when you last "
+        "messaged it, where it works and what it is about.",
+        epilog=AGENTS_GUIDE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _agents_options(agents_parser)
+    agents_sub = agents_parser.add_subparsers(dest="agents_cmd", metavar="{search}")
+    agents_search = agents_sub.add_parser(
+        "search",
+        help="Only agents whose id, repo, worktree, branch, name, topic, last ask, gist or "
+        "directory contains the text (case-insensitive); each says where it matched",
+        description="Agents whose id, repo, worktree, branch, name, topic, last ask, "
+        "gist or directory contains the text, case-insensitively. Each says where it "
+        "matched (⌕).",
+        epilog=AGENTS_GUIDE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    agents_search.add_argument("query", nargs="+", help="Text to look for")
+    agents_search.add_argument(
+        "--deep",
+        action="store_true",
+        help="Also search each agent's whole transcript: every prompt, reply and tool output",
+    )
+    # Suppressed defaults: a flag given before `search` (`agents --state done search
+    # x`) is parsed by `agents`, and a default here would overwrite it.
+    _agents_options(agents_search, suppress=True)
+
     # Resume mode (cd to the session's dir and hand off to `claude -r`)
     resume_parser = subparsers.add_parser(
         "resume",
-        help="cd into a session's anchoring dir and resume it with `claude -r`",
+        help="Print the cd + `claude -r` commands that resume a session (--exec runs them)",
     )
     resume_parser.add_argument(
         "session",
@@ -748,10 +858,15 @@ def parse_args():
         "instead of resuming",
     )
     resume_parser.add_argument(
-        "--dry-run",
+        "--exec",
+        "-x",
+        dest="exec_",
         action="store_true",
-        help="Print the cd + claude command instead of running it",
+        help="Run the commands instead of printing them: cd, then replace this "
+        "process with claude (or tmux, under --attach)",
     )
+    # Printing is the default now; the flag stays so scripts that pass it still work.
+    resume_parser.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
 
     # Activity mode (week-in-review across sessions + repos)
     activity_parser = subparsers.add_parser(
@@ -3666,13 +3781,14 @@ def search_content_mode(args, console: Optional[Console]):
                     ident = row_owner.stem
                     break
         # resume_mode resolves the id, locates the anchoring dir, and runs the
-        # tmux safety check. -f passes through to skip that check; attach/dry-run
-        # aren't exposed here — use the dedicated `resume` command for those.
+        # tmux safety check, and prints the commands rather than running them.
+        # -f passes through to skip that check; attach and --exec aren't exposed
+        # here — use the dedicated `resume` command for those.
         args.session = ident
         args.session_id = None
         args.force = getattr(args, "force", False)
         args.attach = False
-        args.dry_run = False
+        args.exec_ = False
         resume_mode(args, console)
         return
 
@@ -7556,6 +7672,469 @@ def who_mode(args, console: Optional[Console]):
             print("   ".join(notes))
 
 
+# Harness text that arrives as a plain user record rather than inside a wrapper
+# tag, so is_wrapper_text can't see it. From the agent-card-titles gist on
+# anthropics/claude-code#58243, which met the same problem titling agent cards.
+_HARNESS_PROSE = re.compile(
+    r"^(\[Request interrupted|\[Image|Caveat: The messages below were generated"
+    r"|This session is being continued from a previous conversation"
+    r"|Base directory for this skill:|Launching skill:|Result of calling the .* tool)",
+    re.IGNORECASE,
+)
+# A reply that steers rather than asks ("yes", "ok go", "3", "thanks"): it says
+# when you last spoke to an agent, but not what the agent is doing for you. The
+# whole reply must be made of these words: "no, switch to the v2 API" and "run
+# the tests" start like small talk, or are short, and are still the real ask.
+_SMALL_TALK_WORDS = frozenset(
+    "wait stop retry go yes yeah yup yep no nope ok okay k kk nvm nevermind never mind "
+    "continue resume option cancel abort pause hold on proceed done next again do it "
+    "that this sure thanks thank you thx ty please pls plz ahead great good nice cool "
+    "perfect lgtm sounds right correct agreed fine".split()
+)
+
+
+def _is_small_talk(text: str) -> bool:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return all(w in _SMALL_TALK_WORDS or w.isdigit() for w in words)
+
+
+def _human_prompt(rec: Dict) -> str:
+    """The text a person typed, if `rec` is such a record, else ''. The same test
+    as `_tail_facts`: no meta, sidechain or compaction records, no tool results,
+    and no harness wrappers (slash-command echoes, reminders)."""
+    if rec.get("type") != "user" or rec.get("isMeta") or rec.get("isSidechain"):
+        return ""
+    if rec.get("isCompactSummary"):
+        return ""
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(content, (str, list)):
+        return ""
+    if isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    ):
+        return ""
+    text = _extract_text(content).strip()
+    if not text or is_wrapper_text(text) or _HARNESS_PROSE.match(text):
+        return ""
+    return text
+
+
+def _lines_backward(
+    path: Path, needle: bytes, chunk: int = 256 * 1024, max_bytes: Optional[int] = None
+) -> Iterator[Dict]:
+    """Records containing `needle`, newest first, read from the end in chunks so a
+    long transcript is never read whole. Stops after `max_bytes`, if given."""
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return
+    with fh:
+        fh.seek(0, os.SEEK_END)
+        pos = end = fh.tell()
+        carry = b""
+        while pos > 0 and (max_bytes is None or end - pos < max_bytes):
+            start = max(0, pos - chunk)
+            fh.seek(start)
+            data = fh.read(pos - start) + carry
+            pos = start
+            lines = data.split(b"\n")
+            # The first piece may be the tail of a line that began earlier.
+            carry = lines.pop(0) if pos > 0 else b""
+            for ln in reversed(lines):
+                if needle not in ln:
+                    continue
+                try:
+                    rec = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    yield rec
+
+
+def _last_sent(path: Path, chunk: int = 256 * 1024, max_prompts: int = 20) -> Tuple[str, str]:
+    """(text, ISO timestamp): the last substantive thing a person asked, and when
+    they last sent anything at all, read backwards from the end in chunks. The
+    fixed-size tail `_tail_facts` reads can hold nothing but tool traffic after a
+    long autonomous stretch, which is exactly when "when did I last talk to it"
+    matters.
+
+    The two can come from different messages: a "yes" an hour after the real ask
+    is when you last spoke, but the ask is what the agent is working on. After
+    `max_prompts` small-talk replies the newest of them stands in."""
+    first_text, first_ts, seen = "", "", 0
+    for rec in _lines_backward(path, b'"user"', chunk):
+        text = _human_prompt(rec)
+        if not text:
+            continue
+        text = text.replace("\n", " ")
+        if not seen:
+            first_text, first_ts = text, rec.get("timestamp") or ""
+        seen += 1
+        if not _is_small_talk(text) or seen >= max_prompts:
+            return (first_text if _is_small_talk(text) else text), first_ts
+    return first_text, first_ts
+
+
+_AGENT_GIST_MAX = 200
+
+
+@dataclass
+class AgentRow:
+    session_id: str
+    name: str
+    kind: str  # "interactive" or "background"
+    state: str  # what `claude agents` says: working, blocked, done, stopped; interactive has none
+    status: str  # busy / idle / shell, for a live process
+    started_at: str  # ISO, local time
+    last_active: str  # ISO, local time, from the transcript's last write
+    idle_min: Optional[int]
+    sent_at: str  # ISO, local time: when a person last sent this session a message
+    sent_min: Optional[int]
+    cwd: str  # where the session last worked, per its transcript
+    branch: str
+    worktree: str
+    topic: str
+    last_prompt: str
+    gist: str  # a background job's own status line and result, when it has a job dir
+    repo: str = ""  # canonical repo root, shared by its worktrees; cwd when not in git
+    transcript: str = ""
+    matched: str = ""  # with a search: which field matched, and the matching text
+
+
+def _claude_agents(include_done: bool) -> List[Dict]:
+    """`claude agents --json`, the CLI's own list, rather than the session registry:
+    it is the only source that still knows finished background agents."""
+    argv = ["claude", "agents", "--json"] + (["--all"] if include_done else [])
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise SystemExit(f"Couldn't run `{' '.join(argv)}`: {exc}")
+    if out.returncode != 0:
+        raise SystemExit(f"`{' '.join(argv)}` failed: {out.stderr.strip() or out.stdout.strip()}")
+    rows = json.loads(out.stdout or "[]")
+    return [r for r in rows if isinstance(r, dict) and isinstance(r.get("sessionId"), str)]
+
+
+def _agent_gist(job_id: str) -> str:
+    """A background job's `state.json`: `detail` is its latest one-line status,
+    `output.result` what it reported when it finished. Interactive sessions have
+    no job dir, so no gist."""
+    path = Path.home() / ".claude" / "jobs" / job_id / "state.json"
+    try:
+        st = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return ""
+    detail = (st.get("detail") or "").strip()
+    out = st.get("output")
+    result = (out.get("result") or "").strip() if isinstance(out, dict) else ""
+    if result and result != detail:
+        return f"{detail} — {result}" if detail else result
+    return detail
+
+
+def _local_iso(ms_or_secs: Optional[float], is_ms: bool = True) -> str:
+    if not isinstance(ms_or_secs, (int, float)):
+        return ""
+    secs = ms_or_secs / 1000 if is_ms else ms_or_secs
+    return datetime.fromtimestamp(secs).astimezone().isoformat(timespec="seconds")
+
+
+def _agent_row(rec: Dict, base_dir: str) -> AgentRow:
+    sid = rec["sessionId"]
+    cwd = rec.get("cwd") or ""
+    topic, last_prompt, branch, last_active, idle = "", "", "", "", None
+    sent_at, sent_min = "", None
+    transcript = _who_transcript(base_dir, cwd, sid) if cwd else None
+    if transcript:
+        slug, first_user, _turns = get_session_preview(transcript, topic_only=True)
+        topic = first_user or slug
+        # A resumed session's first message is the harness's continuation preamble.
+        if topic.startswith("This session is being continued from a previous conversation"):
+            topic = ""
+        last_prompt, sent_ts = _last_sent(transcript)
+        if sent_ts:
+            try:
+                sent = datetime.fromisoformat(sent_ts.replace("Z", "+00:00"))
+                sent_at = sent.astimezone().isoformat(timespec="seconds")
+                sent_min = int((time.time() - sent.timestamp()) / 60)
+            except ValueError:
+                pass
+        # The transcript's own cwd and branch, not the launch dir's: a session that
+        # moved into a worktree records it there, and a finished agent's worktree
+        # may be gone from disk by now.
+        for e in reversed(_tail_entries(transcript)):
+            if e.get("cwd"):
+                cwd = e["cwd"]
+                branch = e.get("gitBranch") or ""
+                break
+        secs = _seconds_since_write(transcript)
+        if secs is not None:
+            idle = int(secs / 60)
+            last_active = _local_iso(time.time() - secs, is_ms=False)
+    repo = _canonical_repo_root(cwd) if cwd and os.path.isdir(cwd) else None
+    if not repo and "/.claude/worktrees/" in cwd:
+        # A removed worktree can't be asked for its repo, but its path names it.
+        repo = cwd.split("/.claude/worktrees/", 1)[0]
+    top = _repo_root_for(cwd) if cwd and os.path.isdir(cwd) else None
+    if top and repo and os.path.realpath(top) != os.path.realpath(repo):
+        worktree = os.path.basename(top.rstrip(os.sep))
+    elif "/.claude/worktrees/" in cwd or "/worktrees/" in cwd:
+        worktree = os.path.basename(cwd.rstrip(os.sep)) + ("" if os.path.isdir(cwd) else " (gone)")
+    else:
+        worktree = "main" if top else ""
+    gist = _agent_gist(rec.get("id") or sid[:8]) if rec.get("kind") == "background" else ""
+    # While a job works, its `detail` is often just the prompt it is working on,
+    # which the last-prompt line already shows.
+    if gist and last_prompt and gist.replace("\n", " ").startswith(last_prompt[:60]):
+        gist = ""
+    if len(gist) > _AGENT_GIST_MAX:
+        gist = gist[: _AGENT_GIST_MAX - 1] + "…"
+    return AgentRow(
+        repo=repo or top or cwd,
+        transcript=str(transcript) if transcript else "",
+        session_id=sid,
+        name=rec.get("name") or "",
+        kind=rec.get("kind") or "",
+        state=rec.get("state") or "",
+        status=rec.get("status") or "",
+        started_at=_local_iso(rec.get("startedAt")),
+        last_active=last_active,
+        idle_min=idle,
+        sent_at=sent_at,
+        sent_min=sent_min,
+        cwd=cwd,
+        branch=branch,
+        worktree=worktree,
+        topic=topic,
+        last_prompt=last_prompt,
+        gist=gist,
+    )
+
+
+def _agent_state(r: AgentRow) -> str:
+    # A background agent's process status repeats its state ("done idle");
+    # an interactive session has no state, so its status is all there is.
+    return (r.state if r.kind == "background" else r.status) or "-"
+
+
+def _agent_match(r: AgentRow, query: str) -> str:
+    """Which field `query` appears in, or ''. Checked plainest first, so an id or
+    repo hit wins over prose. Fields the list already shows are named only; the
+    directory isn't on screen, so its hit carries the text."""
+    q = query.lower()
+    if r.session_id.lower().startswith(q):
+        return "id"
+    for label, text in (
+        ("repo", os.path.basename(r.repo.rstrip(os.sep))),
+        ("worktree", r.worktree),
+        ("branch", r.branch),
+        ("name", r.name),
+        ("topic", r.topic),
+        ("asked", r.last_prompt),
+        ("gist", r.gist),
+        ("dir", _tilde(r.cwd)),
+    ):
+        if text and q in text.lower():
+            return f"dir: {text}" if label == "dir" else label
+    return ""
+
+
+def _transcript_hits(paths: List[str], query: str) -> Dict[str, str]:
+    """{transcript: a snippet around the first hit} for each transcript containing
+    `query`, case-insensitively. One rg over every file; its config is skipped,
+    since ~/.ripgreprc truncates long lines and a JSONL record is one line."""
+    if not paths:
+        return {}
+    pat = f".{{0,40}}{re.escape(query)}.{{0,40}}"
+    argv = ["rg", "--no-config", "-i", "-o", "-m1", "--with-filename", "--", pat, *paths]
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        hits = {}
+        for p in paths:
+            try:
+                text = Path(p).read_text(errors="replace")
+            except OSError:
+                continue
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                hits[p] = m.group(0)
+        return {p: _snippet(t) for p, t in hits.items()}
+    except subprocess.TimeoutExpired:
+        raise SystemExit("--deep: searching the transcripts took over a minute; stopped.")
+    hits: Dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        for p in paths:
+            if line.startswith(p + ":"):
+                hits.setdefault(p, _snippet(line[len(p) + 1 :]))
+                break
+    return hits
+
+
+def _snippet(raw: str) -> str:
+    # A JSONL hit is JSON-escaped text: unescape the common cases for reading.
+    return " ".join(raw.replace("\\n", " ").replace('\\"', '"').split())
+
+
+def agents_mode(args, console: Optional[Console]):
+    """`claude agents`, with the facts it leaves out: when each agent started, how
+    long it has been idle, where it works, and what it is about."""
+    recs = _claude_agents(include_done=not args.active)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        rows = list(pool.map(lambda r: _agent_row(r, args.base_dir), recs))
+    total = len(rows)
+
+    states = {x.strip().lower() for v in (args.state or []) for x in v.split(",") if x.strip()}
+    if states:
+        rows = [r for r in rows if _agent_state(r) in states]
+    if args.project:
+        p = args.project.lower()
+        rows = [
+            r
+            for r in rows
+            if p in os.path.basename(r.repo.rstrip(os.sep)).lower() or p in r.cwd.lower()
+        ]
+    query = " ".join(getattr(args, "query", None) or []).strip()
+    if query:
+        # The session running the search always matches: the query is in its own
+        # transcript, and often in its last ask. Nobody is looking for themselves.
+        me = _me_session_id(_live_registry())
+        rows = [r for r in rows if r.session_id != me]
+        for r in rows:
+            r.matched = _agent_match(r, query)
+        if getattr(args, "deep", False):
+            hits = _transcript_hits(
+                [r.transcript for r in rows if r.transcript and not r.matched], query
+            )
+            for r in rows:
+                if not r.matched and r.transcript in hits:
+                    r.matched = f"transcript: …{hits[r.transcript]}…"
+        rows = [r for r in rows if r.matched]
+    never = 10**9
+
+    def mins(m: Optional[int]) -> int:
+        return m if m is not None else never
+
+    if args.sort == "sent":
+        rows.sort(key=lambda r: mins(r.sent_min))
+    elif args.sort == "start":
+        rows.sort(key=lambda r: r.started_at, reverse=True)
+    else:
+        # Live first, then by the transcript's last write, whoever made it.
+        rows.sort(key=lambda r: (r.state in ("done", "stopped"), mins(r.idle_min)))
+    if args.reverse:
+        rows.reverse()
+
+    if args.json:
+        print(json.dumps([asdict(r) for r in rows], indent=2))
+        return
+    now = datetime.now().astimezone()
+    narrowed = len(rows) != total
+    print(
+        f"as of {now:%Y-%m-%d %H:%M %Z}; "
+        + (f"{len(rows)} of {total} agents match" if narrowed else f"{total} agents")
+    )
+    if not rows:
+        if query and not getattr(args, "deep", False):
+            print("Nothing matches in what the list shows; --deep also searches each transcript.")
+        return
+    # Fit one screen so the "as of" line doesn't scroll off. Besides the list:
+    # that line, the "more" line, and the prompt and command line before and the
+    # prompt after, any of which may take two lines. Off a terminal (an agent's
+    # Bash tool, a pipe) the size falls back to a modest default.
+    budget = None if args.all else max(10, shutil.get_terminal_size((100, 40)).lines - 8)
+
+    def more(hidden: int) -> None:
+        if hidden:
+            print(f"… {hidden} more; --all shows them")
+
+    width = console.width if console else shutil.get_terminal_size((200, 40)).columns
+
+    def started(r: AgentRow) -> str:
+        if not r.started_at:
+            return "-"
+        t = datetime.fromisoformat(r.started_at)
+        return f"{t:%H:%M}" if t.date() == now.date() else f"{t:%m-%d}"
+
+    state = _agent_state
+
+    def where(r: AgentRow) -> str:
+        out = os.path.basename((r.repo or r.cwd).rstrip(os.sep))
+        wt = r.worktree if r.worktree and r.worktree != "main" else ""
+        if wt:
+            out += f" [{wt}]"
+        # The branch only when it says something the worktree name doesn't.
+        if (
+            r.branch
+            and r.branch not in (wt, f"worktree-{wt}")
+            and not (not wt and r.branch in ("main", "master"))
+        ):
+            out += f" @ {r.branch}"
+        return out
+
+    def age(m: Optional[int]) -> str:
+        # One unit, so the column stays a fixed width: "1h 54m" would overflow it.
+        if m is None:
+            return "-"
+        return f"{m}m" if m < 60 else f"{m // 60}h" if m < 24 * 60 else f"{m // (24 * 60)}d"
+
+    def idle(r: AgentRow) -> str:
+        return age(r.idle_min)
+
+    def sent(r: AgentRow) -> str:
+        return age(r.sent_min)
+
+    def clip(text: str, room: int) -> str:
+        return text if len(text) <= room else text[: max(0, room - 1)] + "…"
+
+    state_style = {"working": "green", "blocked": "yellow", "busy": "green", "stopped": "red"}
+    indent = " " * 10  # under the state, so the ids stay a clean column
+
+    def block(r: AgentRow) -> List[Text]:
+        # One line each, clipped rather than wrapped: an agent's height is then
+        # known before printing, and the ids down the left stay scannable.
+        mark = "◆" if r.kind == "interactive" else " "
+        head = Text(f"{mark}", style="magenta")
+        head.append(r.session_id[:8], style="cyan")
+        st = state(r)
+        head.append(f" {st:<8}", style=state_style.get(st, "dim"))
+        head.append(f" {started(r):>5} {idle(r):>6} ", style="dim")
+        head.append(f"{sent(r):>6}  ", style="bold" if args.sort == "sent" else "dim")
+        head.append(clip(where(r), width - len(head.plain)))
+        lines = [head]
+        room = width - len(indent) - 2
+        lines.append(Text(indent) + Text(clip(r.name or "(unnamed)", room + 2), style="bold"))
+        if r.topic and r.topic != r.name:
+            lines.append(Text(indent + clip(r.topic, room + 2)))
+        if r.last_prompt:
+            lines.append(Text(indent + "↳ " + clip(r.last_prompt, room), style="dim"))
+        if r.gist:
+            lines.append(Text(indent) + Text("≡ " + clip(r.gist, room), style="green"))
+        if r.matched:
+            lines.append(Text(indent) + Text("⌕ " + clip(r.matched, room), style="yellow"))
+        return lines
+
+    def emit(line: Text) -> None:
+        if console and not args.no_color:
+            console.print(line, soft_wrap=True, highlight=False)
+        else:
+            print(line.plain)
+
+    emit(Text(f" {'id':<8} {'state':<8} {'start':>5} {'idle':>6} {'you':>6}  where", style="dim"))
+    used = 1
+    for i, r in enumerate(rows):
+        lines = block(r)
+        if budget is not None and i and used + len(lines) > budget:
+            more(len(rows) - i)
+            break
+        used += len(lines)
+        for line in lines:
+            emit(line)
+    if any(r.kind == "interactive" for r in rows):
+        emit(Text("◆ interactive session", style="dim"))
+
+
 # 256-color, not the 16 theme slots: themes remap those freely (one in use
 # here draws "red" as teal), and a refusal has to read as red.
 _ANSI = {"red": "38;5;196", "yellow": "38;5;214", "white": "1;38;5;231"}
@@ -7576,6 +8155,11 @@ def resume_mode(args, console: Optional[Console]):
     to `claude -r`. Guards against double-driving a session already live in a
     matching tmux session. Falls back to the main repo when an anchoring
     worktree has been removed."""
+    # Print by default rather than exec. claude-ls runs under `uv run --script`, so
+    # an exec'd claude is left as a child of uv rather than of your shell, and the
+    # cd only moves that child: your shell stays where it was. Printed, the
+    # commands run in your own shell, which ends up in the session's directory.
+    args.dry_run = not getattr(args, "exec_", False)
     ident = getattr(args, "session_id", None) or getattr(args, "session", None)
     if not ident:
         print("Provide a session id (positional or -s/--session-id).", file=sys.stderr)
@@ -7851,7 +8435,7 @@ def resume_mode(args, console: Optional[Console]):
     if fallback_note:
         _alert("yellow", fallback_note, console)
     if args.dry_run:
-        print(f"cd {target_dir} && {' '.join(claude_cmd)}")
+        print(f"cd {shlex.quote(target_dir)} && {shlex.join(claude_cmd)}")
         return
     print(f"Resuming {full_id[:8]} in {_tilde(target_dir)}", file=sys.stderr)
     try:
@@ -8612,6 +9196,8 @@ def main():
         activity_mode(args, console)
     elif args.mode == "who":
         who_mode(args, console)
+    elif args.mode == "agents":
+        agents_mode(args, console)
     elif args.mode == "lineage":
         lineage_mode(args, console)
 
