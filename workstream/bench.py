@@ -3,15 +3,15 @@ processes each one starts.
 
     uv run --directory workstream python bench.py --ws <name> [--gh stub|warm|slow|live]
 
-Nothing real is written. The weft store and the GitHub cache are copied into
-a temporary directory, `timeline` writes there, and `attach --new` lands in
+Nothing real is written. Each command gets its own copy of the weft store and
+a GitHub cache in a temporary directory, `timeline` writes there, and `attach --new` lands in
 the copied store. Shims for git, gh and weft go first on PATH: they count
 each call and pass it on, except that gh is stubbed to fail unless
 `--gh live`.
 
 gh modes:
   stub  every gh call fails at once; empty cache (the network-free floor)
-  warm  every gh call fails at once; a copy of the real cache
+  warm  every gh call fails at once; a copy of the real cache, stamped fresh
   slow  every gh call fails after --gh-delay seconds; empty cache
   live  real gh; empty cache (the network tail)
 
@@ -65,6 +65,27 @@ def _copy_store(dst: Path) -> None:
     if not (src / "log.jsonl").is_file():
         sys.exit(f"bench: no weft log under {src}")
     shutil.copytree(src, dst)
+
+
+def _fill_cache(dst: Path, warm: bool) -> None:
+    """An empty GitHub cache, or for `warm` a copy of the real one with every
+    entry stamped fresh: a copied entry keeps its `fetched_at`, so one older
+    than the cache's TTL would be a miss and warm would measure cold."""
+    shutil.rmtree(dst, ignore_errors=True)
+    dst.mkdir()
+    src = _real_cache() / "gh"
+    if not (warm and src.is_dir()):
+        return
+    (dst / "gh").mkdir()
+    now = time.time()
+    for f in src.glob("*.json"):
+        try:
+            entry = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(entry, dict) and "fetched_at" in entry:
+            entry["fetched_at"] = now
+            (dst / "gh" / f.name).write_text(json.dumps(entry), encoding="utf-8")
 
 
 def _real_cache() -> Path:
@@ -122,10 +143,6 @@ def main() -> int:
         root = Path(tmp)
         bindir = _shims(root, args.gh, args.gh_delay, path)
         cache = root / "cache"
-        if args.gh == "warm" and (_real_cache() / "gh").is_dir():
-            shutil.copytree(_real_cache() / "gh", cache / "gh")
-        else:
-            cache.mkdir()
         env = dict(
             os.environ,
             PATH=f"{bindir}{os.pathsep}{path}",
@@ -138,12 +155,15 @@ def main() -> int:
         wanted = set(args.only.split(",")) if args.only else None
         log = root / "calls.log"
         for run in range(1, args.runs + 1):
-            # A fresh store per run: attach --new must not see the previous run's workstream.
-            shutil.rmtree(root / "weft", ignore_errors=True)
-            _copy_store(root / "weft")
             for label, argv in _commands(args.ws, args.session, root, run):
                 if wanted and label not in wanted:
                     continue
+                # Every command starts from the same store and cache, so a row
+                # does not depend on which commands ran before it: attach --new
+                # adds a workstream, and live gh answers fill the cache.
+                shutil.rmtree(root / "weft", ignore_errors=True)
+                _copy_store(root / "weft")
+                _fill_cache(cache, args.gh == "warm")
                 log.write_text("")
                 started = time.monotonic()
                 proc = subprocess.run(
