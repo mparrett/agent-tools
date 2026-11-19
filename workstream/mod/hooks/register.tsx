@@ -7,7 +7,8 @@ import { asOfLabel, attachments, badgeMode, badgeText, frontierView, roleLabel, 
 import type { BadgeMode } from './model'
 
 const PANE = 'workstream'
-// A bare `/workstream` opens or closes the pane. The skill that attaches and
+// A bare `/workstream` opens the pane or brings it forward; `/workstream close`
+// closes it. The skill that attaches and
 // resumes is `/workstream-manage`, a name of its own, so nothing here collides.
 const COMMAND = 'workstream'
 // `ls --session` is under a second, so the badge can keep close to the store;
@@ -107,7 +108,7 @@ export const register: Register = (on, options) => {
   mode = badgeMode(options.badge)
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: COMMAND, description: 'Open or close the workstream pane' })
+    await $.command.register({ name: COMMAND, description: 'Open the workstream pane or bring it forward; /workstream close closes it' })
     // Whatever started before is stopped first, so a second start never doubles the polling.
     for (const t of timers) t.cancel()
     timers = [
@@ -149,9 +150,11 @@ export const register: Register = (on, options) => {
     // forward. Typing the command means the prompt held the keys, so the pane
     // was never the focused one to toggle off.
     const opened = await $.ui.open({ id: PANE, title: 'Workstream', focus: true })
-    void kick($, true)
+    // Only a fresh open fetches the frontier: raising an open pane is not a
+    // refresh, and the timer keeps it current.
+    if (!pane) void kick($, true)
     if (!opened.isPlaced) return { text: `Workstream pane waiting: ${opened.reason}. /workstream cancels it.` }
-    return { text: pane ? 'Workstream pane focused. /workstream close closes it.' : 'Workstream pane opened. /workstream close closes it.' }
+    return { text: pane ? 'Workstream pane brought forward. /workstream close closes it.' : 'Workstream pane opened. /workstream close closes it.' }
   }).catch(() => ({ text: 'The workstream pane could not be opened or closed; see claude --debug.' }))
 
   // Never a gate: a failed refresh must not refuse the command it watched.

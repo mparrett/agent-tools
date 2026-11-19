@@ -339,7 +339,7 @@ function stubPanes(on: On, opened: string[], closed: string[], waiting: Set<stri
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 }
 
-test('bare /workstream opens the pane or raises and focuses it, cancels one waiting undrawn, and close closes it', async ($, on) => {
+test('bare /workstream opens the pane or brings it forward with focus, cancels one waiting undrawn, and close closes it', async ($, on) => {
   const clock = mock.clock(on)
   const opened: string[] = []
   const closed: string[] = []
@@ -352,9 +352,9 @@ test('bare /workstream opens the pane or raises and focuses it, cancels one wait
   expect(opened).toEqual([])
 
   expect((await $.command.run(slash(''))).text).toBe('Workstream pane opened. /workstream close closes it.')
-  expect((await $.command.run(slash(''))).text).toBe('Workstream pane focused. /workstream close closes it.')
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane brought forward. /workstream close closes it.')
   behind.add('workstream')
-  expect((await $.command.run(slash(''))).text).toBe('Workstream pane focused. /workstream close closes it.')
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane brought forward. /workstream close closes it.')
   expect(focus).toEqual([true, true, true])
   expect(closed).toEqual([])
   expect((await $.command.run(slash('close'))).text).toBe('Workstream pane closed. /workstream reopens it.')
