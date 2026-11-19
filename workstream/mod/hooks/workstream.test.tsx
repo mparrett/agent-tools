@@ -323,14 +323,14 @@ const slash = (args: string) => ({
 
 // `waiting` holds a pane open but undrawn, as on a terminal too narrow to seat it;
 // `behind` holds one drawn but not shown, behind another pane
-function stubPanes(on: On, opened: string[], closed: string[], waiting: Set<string>, behind = new Set<string>()) {
+function stubPanes(on: On, opened: string[], closed: string[], waiting: Set<string>, behind = new Set<string>(), focus: (true | undefined)[] = []) {
   const up = new Set<string>()
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.id', () => ({ value: SID }))
   on('process.run', (_, e) => ok(e.argv.includes('ls') ? '[]' : FRONTIER))
   on('ui.status', () => ({ value: undefined }))
   on('ui.open', (_, e) => (
-    opened.push(e.id), up.add(e.id), { value: waiting.has(e.id) ? { isPlaced: false, reason: 'too narrow' } : { isPlaced: true } }
+    opened.push(e.id), focus.push(e.focus), up.add(e.id), { value: waiting.has(e.id) ? { isPlaced: false, reason: 'too narrow' } : { isPlaced: true } }
   ))
   on('ui.close', (_, e) => (closed.push(e.id), up.delete(e.id), { value: undefined }))
   on('ui.panes', () => ({
@@ -339,28 +339,30 @@ function stubPanes(on: On, opened: string[], closed: string[], waiting: Set<stri
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 }
 
-test('bare /workstream toggles the pane, cancels one waiting undrawn, and brings one forward', async ($, on) => {
+test('bare /workstream opens the pane or brings it forward with focus, cancels one waiting undrawn, and close closes it', async ($, on) => {
   const clock = mock.clock(on)
   const opened: string[] = []
   const closed: string[] = []
   const waiting = new Set<string>()
   const behind = new Set<string>()
-  stubPanes(on, opened, closed, waiting, behind)
+  const focus: (true | undefined)[] = []
+  stubPanes(on, opened, closed, waiting, behind, focus)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.settle()
   expect(opened).toEqual([])
 
-  expect((await $.command.run(slash(''))).text).toBe('Workstream pane opened. /workstream closes it.')
-  expect((await $.command.run(slash(''))).text).toBe('Workstream pane closed. /workstream reopens it.')
-  expect(closed).toEqual(['workstream'])
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane opened. /workstream close closes it.')
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane brought forward. /workstream close closes it.')
+  behind.add('workstream')
+  expect((await $.command.run(slash(''))).text).toBe('Workstream pane brought forward. /workstream close closes it.')
+  expect(focus).toEqual([true, true, true])
+  expect(closed).toEqual([])
+  expect((await $.command.run(slash('close'))).text).toBe('Workstream pane closed. /workstream reopens it.')
+  expect((await $.command.run(slash('close'))).text).toBe('The workstream pane is not open.')
+  behind.clear()
   waiting.add('workstream')
   expect((await $.command.run(slash(''))).text).toBe('Workstream pane waiting: too narrow. /workstream cancels it.')
   expect((await $.command.run(slash(''))).text).toMatch(/^Workstream pane closed\./)
-  expect(closed).toEqual(['workstream', 'workstream'])
-  waiting.clear()
-  await $.command.run(slash(''))
-  behind.add('workstream')
-  expect((await $.command.run(slash(''))).text).toBe('Workstream pane opened. /workstream closes it.')
   expect(closed).toEqual(['workstream', 'workstream'])
   expect(opened).toEqual(['workstream', 'workstream', 'workstream', 'workstream'])
   // the refresh an open starts must land before the test's engine goes
@@ -373,6 +375,6 @@ test('/workstream with arguments points at the skill and leaves the pane alone',
   stubPanes(on, opened, [], new Set())
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.settle()
-  expect((await $.command.run(slash('attach'))).text).toBe('/workstream takes no arguments; /workstream-manage runs the skill.')
+  expect((await $.command.run(slash('attach'))).text).toBe('Usage: /workstream [close]; /workstream-manage runs the skill.')
   expect(opened).toEqual([])
 })
