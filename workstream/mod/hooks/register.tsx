@@ -50,13 +50,6 @@ async function isPaneOpen($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(p => p.id === PANE)
 }
 
-// What /workstream should do to the pane. A pane drawn but behind another is
-// brought forward; one waiting undrawn on a narrow terminal is closed, so a
-// second /workstream cancels it instead of leaving its frontier polling.
-async function shouldClosePane($: EngineInterface): Promise<boolean> {
-  const pane = (await $.ui.panes()).find(p => p.id === PANE)
-  return !!pane && (pane.isShown || !pane.isPlaced)
-}
 
 async function refresh($: EngineInterface, withFrontier: boolean): Promise<void> {
   await update($, view, v => ({ ...v, isLoading: true }))
@@ -137,15 +130,28 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {
-    if (e.args.trim()) return { text: '/workstream takes no arguments; /workstream-manage runs the skill.' }
-    if (await shouldClosePane($)) {
+    const arg = e.args.trim().toLowerCase()
+    const pane = (await $.ui.panes()).find(p => p.id === PANE)
+    if (arg === 'close' || arg === 'hide') {
+      if (!pane) return { text: 'The workstream pane is not open.' }
       await $.ui.close({ id: PANE })
       return { text: 'Workstream pane closed. /workstream reopens it.' }
     }
-    const opened = await $.ui.open({ id: PANE, title: 'Workstream' })
+    if (arg) return { text: 'Usage: /workstream [close]; /workstream-manage runs the skill.' }
+    // One waiting undrawn on a narrow terminal is closed, so a second
+    // /workstream cancels it instead of leaving its frontier polling.
+    if (pane && !pane.isPlaced) {
+      await $.ui.close({ id: PANE })
+      return { text: 'Workstream pane closed. /workstream reopens it.' }
+    }
+    // Otherwise open, or raise and focus: a re-open of an open pane only
+    // retitles it, so one behind another pane's tab needs `focus` to come
+    // forward. Typing the command means the prompt held the keys, so the pane
+    // was never the focused one to toggle off.
+    const opened = await $.ui.open({ id: PANE, title: 'Workstream', focus: true })
     void kick($, true)
     if (!opened.isPlaced) return { text: `Workstream pane waiting: ${opened.reason}. /workstream cancels it.` }
-    return { text: 'Workstream pane opened. /workstream closes it.' }
+    return { text: pane ? 'Workstream pane focused. /workstream close closes it.' : 'Workstream pane opened. /workstream close closes it.' }
   }).catch(() => ({ text: 'The workstream pane could not be opened or closed; see claude --debug.' }))
 
   // Never a gate: a failed refresh must not refuse the command it watched.
