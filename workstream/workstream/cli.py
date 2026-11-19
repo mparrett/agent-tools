@@ -834,7 +834,11 @@ def cmd_retire(args) -> int:
     # Closed workstreams too: a session attached to one still needs its frontier recorded.
     wss = store.list_workstreams(include_closed=True)
     done = []
-    for raw in args.sid:
+    history = wss
+    for n, raw in enumerate(args.sid):
+        if n:
+            # The previous session's detaches released claims `wss` still shows held.
+            history = store.list_workstreams(include_closed=True)
         sid = sessions.resolve(raw)
         me = sessions.facts(sid, log=log)
         mine = [ws for ws in wss if any(r.endswith(sid) or r.endswith(me.ref) for r in ws.refs)]
@@ -857,7 +861,7 @@ def cmd_retire(args) -> int:
             # Every workstream, not just this session's: the capture covers
             # each member, and a member's window starts where its previous
             # claim, wherever it was, ended (store.session_windows).
-            fr = frontier.build(ws, log=log, recent=recent, history=wss)
+            fr = frontier.build(ws, log=log, recent=recent, history=history)
             path = frontier.capture(fr, slug=args.slug, recorded_by=frontier.BY_RETIRE)
             store.detach(ws, me.ref)
             caps.append(
