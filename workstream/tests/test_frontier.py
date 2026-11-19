@@ -336,14 +336,35 @@ def test_the_same_number_in_two_anchored_repos_stays_apart():
         ]
 
 
-def test_a_merge_its_output_does_not_confirm_is_reported_as_unconfirmed():
+def test_a_clean_exit_confirms_a_merge_gh_printed_nothing_for():
+    # gh prints its confirmation only to a terminal; the Bash tool is not one.
     w = ws("origin", "gh:acme/meadow#319")
-    for result in ("", "some other output", MERGED.format(n=320)):
-        out = foreign(w, [_merger(S2, "gh pr merge 319 --repo acme/meadow", result)])
-        assert out == [
+    for cmd, result in (
+        ("gh pr merge 319 --repo acme/meadow --squash", "(Bash completed with no output)"),
+        ("gh pr merge 319 --repo acme/meadow && git pull", "Already up to date."),
+        ("gh pr merge 319 --repo acme/meadow\n", ""),
+    ):
+        assert foreign(w, [_merger(S2, cmd, result)]) == [
+            f"gh:acme/meadow#319 was merged by {S2[:8]} at {at(30).iso()}, a session not attached here"
+        ], cmd
+
+
+def test_a_merge_nothing_confirms_is_reported_as_unconfirmed():
+    w = ws("origin", "gh:acme/meadow#319")
+    for cmd, result in (
+        # Each of these can exit clean after the merge failed.
+        ("gh pr merge 319 --repo acme/meadow | tail -1", ""),
+        ("gh pr merge 319 --repo acme/meadow; echo done", "done"),
+        ("gh pr merge 319 --repo acme/meadow || true", ""),
+        # A later segment's failure says nothing about the merge.
+        ("gh pr merge 319 --repo acme/meadow && git pull", "Exit code 1\nfatal: no remote"),
+        # --auto queues the merge; it has not happened.
+        ("gh pr merge 319 --repo acme/meadow --auto --squash", ""),
+    ):
+        assert foreign(w, [_merger(S2, cmd, result)]) == [
             f"gh:acme/meadow#319: {S2[:8]} ran `gh pr merge` at {at(30).iso()} and its output"
             " does not confirm it, a session not attached here"
-        ]
+        ], cmd
 
 
 def test_a_failed_or_redundant_merge_is_left_out():
@@ -360,6 +381,23 @@ def test_a_merge_confirmed_before_a_later_segment_failed_still_counts():
     result = "Exit code 1\n" + MERGED.format(n=319) + "\nerror: pathspec"
     m = _merger(S2, "gh pr merge 319 --repo acme/meadow && git checkout nope", result)
     assert len(foreign(w, [m])) == 1
+
+
+def test_gh_global_repo_flag_before_the_subcommand():
+    w = ws("origin", "gh:acme/meadow#319")
+    m = _merger(S2, "gh -R acme/meadow pr merge 319 --squash", "")
+    assert len(foreign(w, [m])) == 1
+
+
+def test_a_bare_merge_from_a_removed_worktree_resolves_by_its_name():
+    # Merged, then the worktree was removed: its directory no longer has an origin.
+    w = ws("origin", "gh:acme/meadow#319", "gh:acme/bramble#7")
+    m = _merger(S2, "gh pr merge --squash 319", "", cwd="/gone/worktrees/meadow-fix")
+    assert len(foreign(w, [m])) == 1
+    # Two anchors numbered 319 and nothing to tell them apart: say nothing.
+    two = ws("origin", "gh:acme/meadow#319", "gh:acme/bramble#319")
+    m = _merger(S2, "gh pr merge --squash 319", "", cwd="/gone/elsewhere")
+    assert foreign(two, [m]) == []
 
 
 def test_foreign_actions_ignore_members_subagents_other_repos_and_other_prs():

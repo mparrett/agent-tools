@@ -288,7 +288,7 @@ def foreign_actions(ws: Workstream, recent, member_ids: set[str], slug_of=None) 
             repo, _, num = a.value.partition("#")
             # A bare number is the PR of the repo the command ran in.
             repo = repo or (slug_of(a.dir) if a.dir else None) or ""
-            value = anchored.get(f"{repo.lower()}#{num}")
+            value = anchored.get(f"{repo.lower()}#{num}") if repo else _guess(anchored, num, a, f)
             if not value:
                 continue
             when = a.at.iso() if a.at else "unknown time"
@@ -302,6 +302,29 @@ def foreign_actions(ws: Workstream, recent, member_ids: set[str], slug_of=None) 
             if line not in out:
                 out.append(line)
     return out
+
+
+def _guess(anchored: dict[str, str], num: str, a, f) -> Optional[str]:
+    """The anchor a bare `#N` meant when its directory no longer answers,
+    as after merging and then removing a worktree: the one anchor numbered N
+    whose repo the session recorded, or whose name the directory carries
+    (`…/meadow/…`, or a worktree named `meadow-…`). None unless exactly one fits."""
+    names = {os.path.basename(r.rstrip("/")) for r in f.repos}
+    parts = Path(a.dir).parts if a.dir else ()
+    fits = []
+    for key, value in anchored.items():
+        repo, _, n = key.partition("#")
+        if n != num:
+            continue
+        name = repo.split("/")[-1]
+        if (
+            repo in {g.lower() for g in f.gh_repos}
+            or name in names
+            or name in parts
+            or (parts and parts[-1].startswith(f"{name}-"))
+        ):
+            fits.append(value)
+    return fits[0] if len(fits) == 1 else None
 
 
 _slug_cache: dict[str, Optional[str]] = {}

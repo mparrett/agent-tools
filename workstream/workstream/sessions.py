@@ -19,7 +19,7 @@ import os
 import re
 import shlex
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
@@ -63,10 +63,10 @@ class Acted:
     (`owner/name`) a push went to; never an anchor, only the "acted in this
     repo" half of the tail-mention rule.
 
-    `ok` is set only for a merge or close (see `pr_outcome`): True when the
-    tool result shows it happened, False when it shows it did not, None when
-    the result says neither. Taking part is enough for an anchor, so sync
-    ignores it; whether the PR is now merged is a different question.
+    `ok` is set only on `SessionFacts.pr_closing` (see `pr_outcome`): True
+    when the tool result shows the merge or close happened, False when it
+    shows it did not, None when it says neither. `acted` leaves it None:
+    taking part is enough for an anchor.
     """
 
     kind: str
@@ -1093,17 +1093,17 @@ def _segment_acts(
         return out
     if words[1] == "pr" and words[2] in _GH_PR_WRITE_VERBS:
         for pr in _gh_pr_acts(words[2], words[3:], result):
-            how = f"gh pr {words[2]}"
-            out.append(Acted("pr", pr, how, at, cur, ok=pr_outcome(how, pr, result)))
+            out.append(Acted("pr", pr, f"gh pr {words[2]}", at, cur))
     elif words[1] == "api":
         hit = _gh_api_pr(words[2:])
         if hit:
-            out.append(Acted("pr", hit[0], hit[1], at, cur, ok=pr_outcome(hit[1], hit[0], result)))
+            out.append(Acted("pr", hit[0], hit[1], at, cur))
     return out
 
 
 # gh's own confirmation, which names the PR: "✓ Squashed and merged pull request
-# acme/meadow#319 (title)", or "#319" from older gh. One result can hold several
+# acme/meadow#319 (title)", or "#319" from older gh. gh prints it only to a
+# terminal, so most tool results lack it. One result can hold several
 # segments' output, so the number has to match.
 _PR_DONE_RE = re.compile(r"\b(merged|closed) pull request (?:[\w.-]+/[\w.-]+)?#(\d+)\b", re.I)
 _PR_ALREADY_RE = re.compile(
@@ -1112,28 +1112,36 @@ _PR_ALREADY_RE = re.compile(
 _API_MERGED_RE = re.compile(r'"merged"\s*:\s*true')
 
 
-def pr_outcome(how: str, pr: str, result: str) -> Optional[bool]:
-    """Whether a merge or close named by `how` happened, from its tool result;
-    None for any other action, and when the result shows neither. A failed
-    command, or one whose output was cut or discarded, is no evidence of a
-    merge, so only gh's confirmation counts as True."""
-    if how in ("gh pr merge", "gh pr close"):
-        want = "merged" if how == "gh pr merge" else "closed"
-    elif how.startswith("gh api pulls/") and how.endswith("/merge"):
-        if _API_MERGED_RE.search(result or ""):
-            return True
-        return False if (result or "").startswith("Exit code") else None
-    else:
+def pr_outcome(
+    how: str, pr: str, result: str, *, held: bool, last: bool, auto: bool = False
+) -> Optional[bool]:
+    """Whether the merge or close named by `how` happened, from its tool
+    result. `held`: every separator from this segment to the end of the
+    command is `&&`, so a clean exit means it succeeded. `last`: it is the
+    final segment, so a failed exit is its own. None when the result shows
+    neither, including `--auto`, which only queues a merge."""
+    verb = closing_verb(how)
+    if verb is None:
         return None
-    num = pr.partition("#")[2]
     text = result or ""
-    if any(m.group(1).lower() == want and m.group(2) == num for m in _PR_DONE_RE.finditer(text)):
-        return True
-    # "already merged" is someone else's merge, not this command's.
-    if any(m.group(1) == num for m in _PR_ALREADY_RE.finditer(text)):
-        return False
-    # The Bash tool prefixes a failed command's result with its exit code.
-    return False if text.startswith("Exit code") else None
+    num = pr.partition("#")[2]
+    if how.startswith("gh api"):
+        if _API_MERGED_RE.search(text):
+            return True
+    else:
+        if any(
+            m.group(1).lower() == verb and m.group(2) == num for m in _PR_DONE_RE.finditer(text)
+        ):
+            return True
+        # "already merged" is someone else's merge, not this command's.
+        if any(m.group(1) == num for m in _PR_ALREADY_RE.finditer(text)):
+            return False
+    if auto:
+        return None
+    # The Bash tool opens a failed command's result with its exit code.
+    if text.startswith("Exit code"):
+        return False if last else None
+    return True if held else None
 
 
 def _acted(scan: _Scan) -> list[Acted]:
@@ -1162,7 +1170,8 @@ def _acted(scan: _Scan) -> list[Acted]:
 
 
 # A cheap test before parsing: only these commands can merge or close a PR.
-_CLOSING_HINT_RE = re.compile(r"\bgh\s+(?:pr\s+(?:merge|close)|api)\b")
+# gh's global flags (`gh -R o/r pr merge 5`) may sit between gh and pr.
+_CLOSING_HINT_RE = re.compile(r"\bgh\b[^\n;|&]*?\b(?:pr\s+(?:merge|close)|api)\b")
 
 
 def closing_verb(how: str) -> Optional[str]:
@@ -1176,22 +1185,30 @@ def closing_verb(how: str) -> Optional[str]:
 
 
 def _closing_acts(scan: _Scan) -> list[Acted]:
-    """The PR merges and closes among the scanned tool calls, with outcomes."""
+    """The PR merges and closes among the scanned tool calls, each with its
+    outcome (`pr_outcome`)."""
     out: list[Acted] = []
     for t in scan.tools:
         if not t.command or not _CLOSING_HINT_RE.search(t.command):
             continue
         result, _ = scan.results.get(t.call_id, ("", {}))
         cur = t.cwd
-        for words, filtered in _segments(t.command):
-            if words[0] == "cd":
-                cur = (_abs_path(words[1], cur) if len(words) > 1 else None) or cur
-                continue
-            out += [
-                a
-                for a in _segment_acts(words, cur, result, t.at, filtered)
-                if a.kind == "pr" and closing_verb(a.how) and _plausible(a)
-            ]
+        parts = _split_segments(strip_heredocs(t.command))
+        for i, (seg, sep) in enumerate(parts):
+            for words, filtered in _segments(seg):
+                if words[0] == "cd":
+                    cur = (_abs_path(words[1], cur) if len(words) > 1 else None) or cur
+                    continue
+                # The final segment's separator joins it to nothing.
+                held = all(s == "&&" for _, s in parts[i:-1])
+                last = i == len(parts) - 1
+                for a in _segment_acts(words, cur, result, t.at, filtered):
+                    if a.kind != "pr" or not closing_verb(a.how) or not _plausible(a):
+                        continue
+                    ok = pr_outcome(
+                        a.how, a.value, result, held=held, last=last, auto="--auto" in words
+                    )
+                    out.append(replace(a, ok=ok))
     return out
 
 
