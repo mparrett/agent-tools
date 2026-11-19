@@ -1182,7 +1182,7 @@ _MERGE_FAILED_RE = re.compile(
 
 # A call refused before it ran: by the person, or by a permission rule.
 _DENIED_RE = re.compile(
-    r"^(?:The user doesn't want to"
+    r"^(?:The user doesn't want to|PreToolUse:\S+ hook error"
     r"|Permission (?:for this (?:action|command)|to use \S+ with command .*?) (?:was|has been) denied)",
     re.S,
 )
@@ -1263,6 +1263,7 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
         result, _ = scan.results.get(t.call_id, ("", {}))
         state = _exit_state(scan, t.call_id, codex)
         cur = t.cwd
+        moved_at = None  # the segment of the last `cd`
         parts = _split_segments(strip_heredocs(t.command))
         found: list[tuple[Acted, dict]] = []
         # A trailing `&` backgrounds the last segment: the exit says nothing of it.
@@ -1271,6 +1272,7 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
             for words, filtered in _segments(seg):
                 if words[0] == "cd":
                     cur = (_abs_path(words[1], cur) if len(words) > 1 else None) or cur
+                    moved_at = i
                     continue
                 if "--disable-auto" in words:
                     continue
@@ -1291,6 +1293,11 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
                     # (`gh pr merge` on the current branch) may be another
                     # segment's, so only gh's own line naming it confirms it.
                     named = _names_pr(words, a.value.partition("#")[2])
+                    # A `cd` inside a subshell, or after `||`, may not have
+                    # applied here: leave the directory unknown rather than
+                    # resolve a bare number against the wrong repo.
+                    if moved_at is not None and any(s in (")", "||") for _, s in parts[:i]):
+                        a = replace(a, dir=None)
                     found.append(
                         (a, {"held": held and named, "last": last and named, "auto": auto})
                     )

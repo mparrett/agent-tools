@@ -296,8 +296,8 @@ def foreign_actions(
                 value = anchored.get(f"{repo.lower()}#{num}")
             else:
                 # A bare number is a PR of the repo the command ran in. gh
-                # resolves it on the `upstream` remote when there is one, so a
-                # fork's merges land there, never on its origin.
+                # resolves it on its set-default repo or `upstream` remote when
+                # there is one, so a fork's merges land there, never on origin.
                 target = (upstream_of(a.dir) or slug_of(a.dir)) if a.dir else None
                 if target:
                     value = anchored.get(f"{target.lower()}#{num}")
@@ -353,7 +353,17 @@ def _origin_slug(path: str) -> Optional[str]:
 
 
 def _upstream_slug(path: str) -> Optional[str]:
-    """`owner/repo` of the checkout's `upstream` remote, which a fork has."""
+    """The repo gh resolves a bare number to ahead of origin: the one
+    `gh repo set-default` chose, else the `upstream` remote a fork has."""
+    root = seam.canonical_repo_root(path) or seam.repo_root_for(path)
+    if root:
+        rc, out = anchors_mod._git(root, "config", "--get-regexp", r"^remote\..*\.gh-resolved$")
+        for line in out.splitlines() if rc == 0 else []:
+            key, _, val = line.partition(" ")
+            remote = key[len("remote.") : -len(".gh-resolved")]
+            slug = _remote_slug(path, remote) if val.strip() == "base" else val.strip()
+            if slug and sessions_mod.valid_repo(slug):
+                return slug
     return _remote_slug(path, "upstream")
 
 

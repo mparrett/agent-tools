@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -589,6 +590,23 @@ def test_a_confirmed_merge_replaces_the_same_sessions_earlier_attempt():
     first.pr_closing += second.pr_closing
     out = foreign(w, [first])
     assert len(out) == 1 and out[0].startswith("gh:acme/meadow#5 was merged")
+
+
+def test_a_hook_blocked_merge_is_left_out():
+    w = ws("origin", "gh:acme/meadow#5")
+    result = "PreToolUse:Bash hook error: Blocked: merges need review"
+    m = _merger(S2, "gh pr merge 5 --repo acme/meadow --squash", result, error=True)
+    assert foreign(w, [m]) == []
+
+
+def test_a_cd_inside_a_subshell_does_not_move_a_later_bare_merge():
+    w = ws("origin", "gh:acme/meadow#5")
+    cmd = "(cd /src/meadow && gh pr view 5) && gh pr merge 5 --squash"
+    m = _merger(S2, cmd, "", cwd="/src/bramble")
+    out = F.foreign_actions(
+        w, [m], set(), slug_of={"/src/meadow": "acme/meadow"}.get, upstream_of=lambda d: None
+    )
+    assert out == []
 
 
 def test_gh_global_repo_flag_before_the_subcommand():
@@ -1193,3 +1211,21 @@ def test_a_decided_branch_anchor_is_not_probed_again(monkeypatch):
     F.settle_gone_worktrees([wt, br], [])
     assert probed == []
     assert wt.liveness["status"] == "gone (branch wt/tempo not merged)"
+
+
+def test_gh_set_default_wins_over_the_upstream_remote(tmp_path):
+    repo = tmp_path / "meadow"
+    repo.mkdir()
+    for args in (
+        ["init", "-q"],
+        ["remote", "add", "origin", "https://github.com/me/meadow.git"],
+        ["remote", "add", "upstream", "https://github.com/acme/meadow.git"],
+    ):
+        subprocess.run(["git", "-C", str(repo), *args], check=True)
+    F._slug_cache.clear()
+    assert F._upstream_slug(str(repo)) == "acme/meadow"
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "remote.origin.gh-resolved", "base"], check=True
+    )
+    F._slug_cache.clear()
+    assert F._upstream_slug(str(repo)) == "me/meadow"
