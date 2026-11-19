@@ -7591,6 +7591,30 @@ def who_mode(args, console: Optional[Console]):
             print("   ".join(notes))
 
 
+# Harness text that arrives as a plain user record rather than inside a wrapper
+# tag, so is_wrapper_text can't see it. From the agent-card-titles gist on
+# anthropics/claude-code#58243, which met the same problem titling agent cards.
+_HARNESS_PROSE = re.compile(
+    r"^(\[Request interrupted|\[Image|Caveat: The messages below were generated"
+    r"|This session is being continued from a previous conversation"
+    r"|Base directory for this skill:|Launching skill:|Result of calling the .* tool)",
+    re.IGNORECASE,
+)
+# A reply that steers rather than asks ("yes", "ok go", "3", "thanks"): it says
+# when you last spoke to an agent, but not what the agent is doing for you.
+_SMALL_TALK = re.compile(
+    r"^(wait|stop|retry|go|yes|no|ok|okay|nvm|never ?mind|continue|resume|option\b"
+    r"|[0-9]+\b|thanks?|thx|cancel|abort|pause|hold on|proceed|done|next|again"
+    r"|do it|sure|yep|nope|k)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_small_talk(text: str) -> bool:
+    t = text.strip()
+    return len(t) < 15 or bool(_SMALL_TALK.match(t))
+
+
 def _human_prompt(rec: Dict) -> str:
     """The text a person typed, if `rec` is such a record, else ''. The same test
     as `_tail_facts`: no meta, sidechain or compaction records, no tool results,
@@ -7608,14 +7632,22 @@ def _human_prompt(rec: Dict) -> str:
     ):
         return ""
     text = _extract_text(content).strip()
-    return "" if not text or is_wrapper_text(text) else text
+    if not text or is_wrapper_text(text) or _HARNESS_PROSE.match(text):
+        return ""
+    return text
 
 
-def _last_sent(path: Path, chunk: int = 256 * 1024) -> Tuple[str, str]:
-    """(text, ISO timestamp) of the last message a person sent, read backwards
-    from the end in chunks. The fixed-size tail `_tail_facts` reads can hold
-    nothing but tool traffic after a long autonomous stretch, which is exactly
-    when "when did I last talk to it" matters."""
+def _last_sent(path: Path, chunk: int = 256 * 1024, max_prompts: int = 20) -> Tuple[str, str]:
+    """(text, ISO timestamp): the last substantive thing a person asked, and when
+    they last sent anything at all, read backwards from the end in chunks. The
+    fixed-size tail `_tail_facts` reads can hold nothing but tool traffic after a
+    long autonomous stretch, which is exactly when "when did I last talk to it"
+    matters.
+
+    The two can come from different messages: a "yes" an hour after the real ask
+    is when you last spoke, but the ask is what the agent is working on. After
+    `max_prompts` small-talk replies the newest of them stands in."""
+    first_text, first_ts, seen = "", "", 0
     try:
         fh = open(path, "rb")
     except OSError:
@@ -7641,9 +7673,15 @@ def _last_sent(path: Path, chunk: int = 256 * 1024) -> Tuple[str, str]:
                     continue
                 if isinstance(rec, dict):
                     text = _human_prompt(rec)
-                    if text:
-                        return text.replace("\n", " "), rec.get("timestamp") or ""
-    return "", ""
+                    if not text:
+                        continue
+                    text = text.replace("\n", " ")
+                    if not seen:
+                        first_text, first_ts = text, rec.get("timestamp") or ""
+                    seen += 1
+                    if not _is_small_talk(text) or seen >= max_prompts:
+                        return (first_text if _is_small_talk(text) else text), first_ts
+    return first_text, first_ts
 
 
 _AGENT_GIST_MAX = 200

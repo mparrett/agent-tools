@@ -4617,3 +4617,32 @@ def test_last_sent_finds_a_prompt_split_across_chunks(tmp_path):
 def test_last_sent_none(tmp_path):
     f = _sent_jsonl(tmp_path / "s.jsonl", [{"type": "assistant", "message": {"content": []}}])
     assert cl._last_sent(f) == ("", "")
+
+
+def test_last_sent_skips_small_talk_but_keeps_its_time(tmp_path):
+    f = _sent_jsonl(
+        tmp_path / "s.jsonl",
+        [
+            _sent_user("add a sort flag to the agents view", "2026-11-18T10:00:00Z"),
+            _sent_user("[Request interrupted by user]", "2026-11-18T10:05:00Z"),
+            _sent_user("yes please do that", "2026-11-18T10:10:00Z"),
+            _sent_user("3", "2026-11-18T10:20:00Z"),
+        ],
+    )
+    # The ask is what it's working on; the "3" is when you last spoke to it.
+    assert cl._last_sent(f) == ("add a sort flag to the agents view", "2026-11-18T10:20:00Z")
+
+
+def test_last_sent_falls_back_to_newest_when_all_small_talk(tmp_path):
+    f = _sent_jsonl(
+        tmp_path / "s.jsonl",
+        [_sent_user("ok", "2026-11-18T10:00:00Z"), _sent_user("go", "2026-11-18T10:01:00Z")],
+    )
+    assert cl._last_sent(f) == ("go", "2026-11-18T10:01:00Z")
+
+
+def test_last_sent_stops_looking_after_max_prompts(tmp_path):
+    recs = [_sent_user("the real ask from long ago", "2026-11-18T09:00:00Z")]
+    recs += [_sent_user("ok", f"2026-11-18T10:{m:02d}:00Z") for m in range(5)]
+    f = _sent_jsonl(tmp_path / "s.jsonl", recs)
+    assert cl._last_sent(f, max_prompts=3) == ("ok", "2026-11-18T10:04:00Z")
