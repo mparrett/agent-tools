@@ -213,10 +213,19 @@ def cmd_attach(args) -> int:
         return 0
     if args.new and not args.name:
         raise SystemExit("workstream attach --new needs --name <slug>")
-    # Before the attach: its claims are what the note and the release read.
+    # Before the attach: its claims are what the note reads.
     before = store.list_workstreams(include_closed=True) if not args.ancillary else []
+    canonical = not args.ancillary
+    subagents = [f"agent:{me.id}/{agent}" for agent in me.subagents]  # D9: they inherit membership
     if args.new:
-        ws = store.create(args.name, args.new, anchors=args.anchor or [])
+        note = args.note or _attach_note(me, None, args.new, before, True)
+        new = (args.name, args.new, args.anchor or [])
+        try:
+            ws, released = store.join(
+                None, me.ref, canonical=canonical, note=note, subagents=subagents, new=new
+            )
+        except store.WeftError as e:
+            raise SystemExit(f"workstream: {e}") from e
         print(f"created workstream {ws.name} ({ws.id[:12]}): {ws.title}")
     else:
         if not args.ws:
@@ -233,27 +242,13 @@ def cmd_attach(args) -> int:
             )
         for ref in args.anchor or []:
             store.add_anchor(ws, ref)
-    canonical = not args.ancillary
-    holder = f"agent:{me.ref}"
-    held = holder in ws.canonical_holders()
-    note = args.note or _attach_note(me, ws, before, bool(args.new))
-    if canonical:
-        # D12: one canonical workstream at a time. A claim left held on the
-        # previous one keeps its window open, so its next sync and `show`
-        # would take this workstream's work too.
-        for w in before:
-            if w.id != ws.id and holder in w.canonical_holders():
-                store.detach(w, me.ref)
-                print(f"released {me.ref}'s canonical claim on {w.name or w.id[:12]}")
-    if canonical and not held:
-        # One canonical claim per session: drop any expired one before claiming.
-        store.detach(ws, me.ref)
-    # Re-attaching while held refreshes anchors and subagents, never stacks a
-    # second claim (store.attach), so one continuous attachment is one interval.
-    store.attach(ws, me.ref, canonical=canonical, note=note)
-    # Subagents of this session inherit membership (D9).
-    for agent in me.subagents:
-        store.attach(ws, f"agent:{me.id}/{agent}", canonical=False, note="subagent of " + me.id[:8])
+        note = args.note or _attach_note(me, ws.id, ws.title, before, False)
+        # D12: one canonical workstream at a time, so the claims on any other
+        # are released in the same batch that takes this one. Re-attaching
+        # while held keeps the claim (one continuous attachment, one interval).
+        ws, released = store.join(ws, me.ref, canonical=canonical, note=note, subagents=subagents)
+    for w in released:
+        print(f"released {me.ref}'s canonical claim on {w.name or w.id[:12]}")
     print(
         f"attached {me.ref} to {ws.name or ws.id[:12]} as {'canonical' if canonical else 'ancillary'}"
     )
@@ -290,7 +285,11 @@ def cmd_attach(args) -> int:
 
 
 def _attach_note(
-    me: sessions.SessionFacts, ws: store.Workstream, before: list[store.Workstream], new: bool
+    me: sessions.SessionFacts,
+    ws_id: Optional[str],
+    title: str,
+    before: list[store.Workstream],
+    new: bool,
 ) -> str:
     """The claim's note when `--note` is not given: the session's latest
     prompt, which is what it is working on now. The first prompt, the old
@@ -298,12 +297,12 @@ def _attach_note(
     `--new`, a latest prompt that predates the session's previous claim
     elsewhere belongs to that work, so the new workstream's title says more."""
     holder = f"agent:{me.ref}"
-    prev = [i.at.utc for w in before if w.id != ws.id for i in w.intervals() if i.holder == holder]
+    prev = [i.at.utc for w in before if w.id != ws_id for i in w.intervals() if i.holder == holder]
     latest = me.human_prompts[-1] if me.human_prompts else None
     recent = latest is not None and (not prev or latest[0].utc > max(prev))
     if latest is not None and (recent or not new):
         return latest[1][:80]
-    return ws.title[:80]
+    return title[:80]
 
 
 # Three full session ids would run a folded line past 200 columns; the first
@@ -921,7 +920,15 @@ def cmd_close(args) -> int:
         for le in fr.closure_blockers:
             sys.stderr.write(f"  loose end: {le}\n")
         return 1
-    closed = store.close(ws, args.note)
+    try:
+        closed = store.close(ws, args.note, force=args.force)
+    except store.Conflict as e:
+        # Something changed between the check above and the close: a claim
+        # taken or a task reopened. Closing over it would hide that.
+        raise SystemExit(
+            f"workstream: {label} changed while closing ({e}); nothing was written. "
+            "Run `workstream close` again to recheck."
+        ) from e
     if args.json:
         return _emit_json(
             {

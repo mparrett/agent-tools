@@ -76,6 +76,16 @@ class NotFound(WeftError):
     pass
 
 
+class Conflict(WeftError):
+    """`weft apply` refused a batch because an expectation no longer held
+    (exit 8): someone changed the store since it was read. Nothing was
+    written. `failed` is weft's list of {i, expect, actual}."""
+
+    def __init__(self, message: str, code: Optional[int], failed: list):
+        super().__init__(message, code)
+        self.failed = failed
+
+
 class Ambiguous(WeftError):
     def __init__(
         self, message: str, code: Optional[int] = 4, candidates: Optional[list[str]] = None
@@ -268,7 +278,13 @@ def _session_for_actor(env_sid: Optional[str]) -> Optional[str]:
     return sid
 
 
-def _run(args: list[str], *, timeout: Optional[float] = None, actor: Optional[str] = None) -> dict:
+def _run(
+    args: list[str],
+    *,
+    timeout: Optional[float] = None,
+    actor: Optional[str] = None,
+    stdin: Optional[str] = None,
+) -> dict:
     timeout = TIMEOUT if timeout is None else timeout
     cmd = [seam.weft_bin(), *args, "--json"]
     env = dict(os.environ)
@@ -280,7 +296,9 @@ def _run(args: list[str], *, timeout: Optional[float] = None, actor: Optional[st
         if default:
             env["WEFT_ACTOR"] = default
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, env=env, input=stdin
+        )
     except FileNotFoundError as e:
         raise WeftError(f"weft not found ({cmd[0]}): {e}") from e
     except subprocess.TimeoutExpired as e:
@@ -307,6 +325,9 @@ def _run(args: list[str], *, timeout: Optional[float] = None, actor: Optional[st
         raise ExternalFailed(msg, rc)
     if rc == 6:
         raise StoreError(msg, rc)
+    if rc == 8:
+        failed = (payload or {}).get("failed") if isinstance(payload, dict) else None
+        raise Conflict(msg, rc, list(failed or []))
     raise WeftError(msg, rc)
 
 
@@ -552,22 +573,136 @@ def attach(
 
 
 def detach(ws: WsArg, session_ref: str, *, actor: Optional[str] = None) -> bool:
-    """Drop the session's claim, keep its ref: it stays a member, no longer
-    canonical. True when any claim was released. `weft release --holder`
-    selects by holder, so any caller can release a session's claim, but it
-    drops one claim per call, and a session attached canonically twice holds
-    two; loop until weft says nothing was released."""
-    return _release_holder(_ws_id(ws), _holder(session_ref), actor=actor)
+    """Drop the session's claims, keep its ref: it stays a member, no longer
+    canonical. True when any claim was released. One `release` by holder
+    drops every live claim the session holds there, stacked ones included."""
+    out = _apply(
+        [], [{"op": "release", "node": _ws_id(ws), "holder": _holder(session_ref)}], actor=actor
+    )
+    return bool(out["results"][0].get("claims"))
+
+
+# How many times an operation rereads the store and tries again after a
+# conflict. Each try is one read and one batch; losing three in a row means
+# something else is rewriting the same claims, which a fourth will not fix.
+APPLY_RETRIES = 3
+
+
+def _apply(
+    expect: list[dict], ops: list[dict], *, actor: Optional[str] = None, dry_run: bool = False
+) -> dict:
+    """One `weft apply`: `ops` all land or none do, and only while every
+    expectation still holds (else Conflict)."""
+    args = ["apply", "--dry-run"] if dry_run else ["apply"]
+    try:
+        return _run(args, actor=actor, stdin=json.dumps({"expect": expect, "ops": ops}))
+    except Conflict:
+        raise
+    except WeftError as e:
+        if e.code == 1 and "apply" in str(e) and "unknown" in str(e).lower():
+            raise WeftError(
+                "this workstream needs a weft with `weft apply` (weft#7 or later); "
+                f"{seam.weft_bin()} has none",
+                e.code,
+            ) from e
+        raise
+
+
+def _scope(holder: str, nodes: Iterable[str]) -> dict:
+    """The expectation that `holder`'s live workstream claims are on exactly
+    `nodes`: what makes one canonical workstream per session hold under
+    concurrent attaches, including two to different new workstreams."""
+    return {"holder": holder, "live_on": sorted(nodes), "ns": NS, "kind": "workstream"}
+
+
+def _membership_ops(
+    node: str, session_ref: str, holder: str, claim: bool, note: Optional[str], subagents
+) -> list[dict]:
+    ops: list[dict] = [{"op": "ref.add", "node": node, "ref": session_ref, "source": "observed"}]
+    if claim:
+        op = {"op": "claim", "node": node, "holder": holder, "source": "observed"}
+        if note:
+            op["note"] = note
+        ops.append(op)
+    ops += [{"op": "ref.add", "node": node, "ref": r, "source": "observed"} for r in subagents]
+    return ops
+
+
+def join(
+    ws: Optional[WsArg],
+    session_ref: str,
+    *,
+    canonical: bool,
+    note: Optional[str] = None,
+    subagents: Iterable[str] = (),
+    new: Optional[tuple[str, str, list[str]]] = None,
+    actor: Optional[str] = None,
+) -> tuple[Workstream, list[Workstream]]:
+    """Attach a session, and its subagents' refs, in one batch.
+
+    Canonical (D12): the session's claims on every other workstream are
+    released and one is taken here, all or nothing, and only while its claims
+    are still where they were read; a concurrent attach makes weft refuse,
+    and this rereads and tries again. A session already holding a claim here
+    keeps it rather than stacking a second (one attachment, one interval).
+    Ancillary: the refs alone.
+
+    `new` is (name, title, anchors): create the workstream in the same batch,
+    only while no other workstream carries `ws:<name>`. Returns the
+    workstream and the ones whose claim was released."""
+    holder = _holder(session_ref)
+    subagents = list(subagents)
+    last: Optional[Conflict] = None
+    for _ in range(APPLY_RETRIES):
+        held = (
+            [w for w in list_workstreams(include_closed=True) if holder in w.canonical_holders()]
+            if canonical
+            else []
+        )
+        expect: list[dict] = [_scope(holder, (w.id for w in held))] if canonical else []
+        if new:
+            name, title, anchors = new
+            node = "$ws"
+            expect.append({"ref": f"ws:{name}", "bound_to": []})
+            refs = [f"ws:{name}", *(_canon_ref(a) for a in anchors)]
+            ops: list[dict] = [
+                {
+                    "op": "add",
+                    "as": node,
+                    "title": title,
+                    "kind": "workstream",
+                    "ns": NS,
+                    "refs": refs,
+                    "source": "asserted",
+                }
+            ]
+            claim = canonical
+        else:
+            current = get(_ws_id(ws))
+            node = current.id
+            expect.append({"node": node, "state": current.state})
+            ops = []
+            claim = canonical and holder not in current.canonical_holders()
+        released = [w for w in held if w.id != node]
+        ops += [{"op": "release", "node": w.id, "holder": holder} for w in released]
+        ops += _membership_ops(node, session_ref, holder, claim, note, subagents)
+        try:
+            out = _apply(expect, ops, actor=actor)
+        except Conflict as e:
+            if new and any("ref" in (f.get("expect") or {}) for f in e.failed):
+                raise WeftError(f"a workstream named {new[0]!r} already exists", 8) from e
+            last = e
+            continue
+        wid = out.get("tmp", {}).get(node, node)
+        return get(wid), released
+    raise WeftError(
+        f"attach: claims kept changing underneath it ({APPLY_RETRIES} tries): {last}", 8
+    )
 
 
 def _release_holder(wid: str, holder: str, *, actor: Optional[str] = None) -> bool:
-    released = False
-    for _ in range(MAX_RELEASES):
-        out = _run(["release", wid, "--holder", holder], actor=actor)
-        if not out.get("released"):
-            break
-        released = True
-    return released
+    out = _apply([], [{"op": "release", "node": wid, "holder": holder}], actor=actor)
+    return bool(out["results"][0].get("claims"))
 
 
 # --- closure -----------------------------------------------------------------
@@ -579,53 +714,61 @@ def blocked_ids() -> set[str]:
     return {n["id"] for n in _run(["ls", "--all-ns", "--blocked"]).get("nodes") or []}
 
 
-def close(ws: WsArg, note: Optional[str] = None, *, actor: Optional[str] = None) -> Workstream:
-    """Release every live claim, then mark the workstream done. Deciding
-    whether it *should* close is the caller's job (cli `close` checks tasks
-    and loose ends). A closed workstream keeps its refs, so `show` still
-    answers who worked on it.
+def close(
+    ws: WsArg, note: Optional[str] = None, *, force: bool = False, actor: Optional[str] = None
+) -> Workstream:
+    """Mark the workstream done, in one batch. Deciding whether it *should*
+    close is the caller's job (cli `close` checks tasks and loose ends); pass
+    the Workstream it checked, so the batch can hold that check to account.
+    A closed workstream keeps its refs, so `show` still answers who worked on
+    it.
+
+    A normal close commits only while nobody holds a claim and every task is
+    in the state the caller saw: a claim taken or a task reopened since then
+    raises Conflict rather than being released or closed over. `force`
+    releases every live claim under the same lock instead.
 
     `weft done` takes no note, so a note becomes a `note` node linked
     `derived-from` the workstream (not part-of: it is not work the workstream
     contains) and is itself marked done, since an open note would surface in
     `weft ls --ready` as if it were work.
 
-    A resolved Workstream is used as given (only its id and claims matter)
-    and the result is built from `done`'s reply, so closing costs no `show`.
-    Its claims are the ones released, so pass one resolved just now; a
-    stale snapshot would leave claims taken since then in place. The claims
-    released here move to `released` stamped with the close time (`done`'s
-    `touched`), a moment after weft's own `released_at`, which only an
-    export could read."""
+    A resolved Workstream is used as given, and the result is built from it,
+    so closing costs no export; pass one resolved just now."""
     current = ws if isinstance(ws, Workstream) else get(ws)
-    holders = list(dict.fromkeys(current.canonical_holders()))
-    for holder in holders:
-        _release_holder(current.id, holder, actor=actor)
+    expect: list[dict] = [{"node": current.id, "state": current.state}]
+    ops: list[dict] = []
+    if force:
+        ops.append({"op": "release", "node": current.id, "all": True})
+    else:
+        expect.append({"node": current.id, "claims": []})
+        expect += [{"node": t.id, "state": t.state} for t in current.tasks]
     if note:
-        nid = _run(
-            [
-                "add",
-                f"{CLOSED_PREFIX}{note}",
-                "--kind",
-                "note",
-                "--ns",
-                NS,
-                "--source",
-                "asserted",
-            ],
-            actor=actor,
-        )["nodes"][0]["id"]
-        _run(["link", nid, "derived-from", current.id], actor=actor)
-        _run(["done", nid], actor=actor)
-    node = _run(["done", current.id], actor=actor)["nodes"][0]
-    closed_at = _instant(node.get("touched")) or Instant.now()
+        ops += [
+            {
+                "op": "add",
+                "as": "$note",
+                "title": f"{CLOSED_PREFIX}{note}",
+                "kind": "note",
+                "ns": NS,
+                "source": "asserted",
+            },
+            {"op": "link", "from": "$note", "kind": "derived-from", "to": current.id},
+            {"op": "done", "node": "$note"},
+        ]
+    ops.append({"op": "done", "node": current.id})
+    _apply(expect, ops, actor=actor)
+    # Built from what was sent rather than read back, so closing costs no
+    # export. The released claims carry the moment after the batch, which is
+    # no earlier than weft's own `released_at`.
+    closed_at = Instant.now()
     released = current.released + [
         replace(c, live=False, released_at=closed_at) for c in current.claims if c.live
     ]
     return replace(
         current,
-        state=node.get("state", "done"),
-        touched=_instant(node.get("touched")) or current.touched,
+        state="done",
+        touched=closed_at,
         # weft keeps expired claims current; released ones are in `released`.
         claims=[c for c in current.claims if not c.live],
         closed_note=note or current.closed_note,
