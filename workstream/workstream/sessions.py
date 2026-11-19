@@ -1111,7 +1111,7 @@ def _segment_acts(
 _PR_DONE_RE = re.compile(r"\b(merged|closed) pull request (?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.I)
 _PR_ALREADY_RE = re.compile(
     # gh puts the PR's title in parentheses between the number and the verdict.
-    r"pull request (?:[\w.-]+/[\w.-]+)?#(\d+)(?: \([^\n]*\))? (?:was already merged|is already closed)",
+    r"pull request (?:([\w.-]+/[\w.-]+))?#(\d+)(?: \([^\n]*\))? (?:was already merged|is already closed)",
     re.I,
 )
 _API_MERGED_RE = re.compile(r'"merged"\s*:\s*true')
@@ -1146,17 +1146,22 @@ def pr_outcome(
         if not shared and _API_MERGED_RE.search(text):
             return True
     else:
-        for m in _PR_DONE_RE.finditer(text):
-            named = (m.group(2) or "").lower()
-            if m.group(1).lower() != verb or m.group(3) != num:
-                continue
+
+        def ours(named: Optional[str], n: str) -> bool:
             # A line naming another repo is another segment's; with several
             # merges in one command, a line naming none could be any of them.
-            if (named and repo and named != repo) or (shared and not (named and named == repo)):
-                continue
+            named = (named or "").lower()
+            if n != num or (named and repo and named != repo):
+                return False
+            return not shared or (bool(named) and named == repo)
+
+        if any(
+            m.group(1).lower() == verb and ours(m.group(2), m.group(3))
+            for m in _PR_DONE_RE.finditer(text)
+        ):
             return True
         # "already merged" is someone else's merge, not this command's.
-        if any(m.group(1) == num for m in _PR_ALREADY_RE.finditer(text)):
+        if any(ours(m.group(1), m.group(2)) for m in _PR_ALREADY_RE.finditer(text)):
             return False
     if exit_state == "denied":
         return False
@@ -1177,7 +1182,9 @@ _MERGE_FAILED_RE = re.compile(
 
 # A call refused before it ran: by the person, or by a permission rule.
 _DENIED_RE = re.compile(
-    r"^(?:The user doesn't want to proceed|Permission for this action was denied)"
+    r"^(?:The user doesn't want to"
+    r"|Permission (?:for this (?:action|command)|to use \S+ with command .*?) (?:was|has been) denied)",
+    re.S,
 )
 _CODEX_EXIT_RE = re.compile(r'"exit_code"\s*:\s*(-?\d+)|^Process exited with code (-?\d+)', re.M)
 
@@ -1268,7 +1275,13 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
                 if "--disable-auto" in words:
                     continue
                 # The final segment's separator joins it to nothing.
-                held = all(s == "&&" for _, s in parts[i:-1]) and not background
+                # After `||` the merge ran only if what came before failed, so
+                # a clean exit says nothing about it.
+                held = (
+                    all(s == "&&" for _, s in parts[i:-1])
+                    and not any(s == "||" for _, s in parts[:i])
+                    and not background
+                )
                 last = i == len(parts) - 1
                 for a in _segment_acts(words, cur, result, t.at, filtered):
                     if a.kind != "pr" or not closing_verb(a.how) or not _plausible(a):

@@ -530,6 +530,37 @@ def test_a_bare_merge_in_a_fork_goes_to_the_upstream_first():
     assert len(out) == 1 and out[0].startswith("gh:acme/meadow#5 was merged")
 
 
+def test_a_merge_after_or_is_unconfirmed_on_a_clean_exit():
+    # The merge ran only if the check failed; a clean exit can't tell which.
+    w = ws("origin", "gh:acme/meadow#5")
+    cmd = "test -f done || gh pr merge 5 --repo acme/meadow --squash"
+    assert foreign(w, [_merger(S2, cmd, "(Bash completed with no output)")]) == _unconfirmed_for(
+        "acme/meadow#5"
+    )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        "Permission to use Bash with command gh pr merge 5 --repo acme/meadow has been denied.",
+        "Permission for this command was denied by a built-in Claude Code safety check.",
+        "The user doesn't want to take this action right now.",
+    ],
+)
+def test_every_denial_form_is_left_out(result):
+    w = ws("origin", "gh:acme/meadow#5")
+    m = _merger(S2, "gh pr merge 5 --repo acme/meadow", result, error=True)
+    assert foreign(w, [m]) == []
+
+
+def test_already_merged_in_one_repo_leaves_the_others_merge():
+    w = ws("origin", "gh:acme/meadow#5", "gh:acme/bramble#5")
+    cmd = "gh pr merge 5 -R acme/meadow && gh pr merge 5 -R acme/bramble"
+    result = "! Pull request acme/meadow#5 (x) was already merged"
+    out = foreign(w, [_merger(S2, cmd, result)])
+    assert len(out) == 1 and out[0].startswith("gh:acme/bramble#5 was merged")
+
+
 def test_gh_global_repo_flag_before_the_subcommand():
     w = ws("origin", "gh:acme/meadow#319")
     m = _merger(S2, "gh -R acme/meadow pr merge 319 --squash", "")
