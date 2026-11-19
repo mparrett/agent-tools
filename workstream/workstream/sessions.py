@@ -1110,7 +1110,9 @@ def _segment_acts(
 # segments' output, so the number has to match.
 _PR_DONE_RE = re.compile(r"\b(merged|closed) pull request (?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.I)
 _PR_ALREADY_RE = re.compile(
-    r"pull request (?:[\w.-]+/[\w.-]+)?#(\d+) (?:was already merged|is already closed)", re.I
+    # gh puts the PR's title in parentheses between the number and the verdict.
+    r"pull request (?:[\w.-]+/[\w.-]+)?#(\d+)(?: \([^\n]*\))? (?:was already merged|is already closed)",
+    re.I,
 )
 _API_MERGED_RE = re.compile(r'"merged"\s*:\s*true')
 
@@ -1124,13 +1126,15 @@ def pr_outcome(
     held: bool,
     last: bool,
     shared: bool = False,
+    queued: bool = False,
 ) -> Optional[bool]:
     """Whether the merge or close named by `how` happened, from its tool
     result. `exit_state` is the command's (`_exit_state`). `held`: only `&&`
     follows this segment, so a clean exit means it succeeded. `last`: it is
     the final segment, so a failed exit is its own. `shared`: the command
     holds more than one merge or close, so only output naming this PR's repo
-    and number can speak for it."""
+    and number can speak for it. `queued`: `--auto`, whose clean exit only
+    means the merge was scheduled."""
     verb = closing_verb(how)
     if verb is None:
         return None
@@ -1160,7 +1164,7 @@ def pr_outcome(
         # gh can merge and then fail its local cleanup (--delete-branch in a
         # linked worktree): only output saying the merge failed counts.
         return False if last and _MERGE_FAILED_RE.search(text) else None
-    return True if exit_state == "clean" and held else None
+    return True if exit_state == "clean" and held and not queued else None
 
 
 # gh's and GitHub's own words for a merge or close that did not happen.
@@ -1276,10 +1280,11 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
                 a.how,
                 a.value,
                 result,
-                exit_state=None if how["auto"] else state,
+                exit_state=state,
                 held=how["held"],
                 last=how["last"],
                 shared=len(found) > 1,
+                queued=how["auto"],
             )
             out.append(replace(a, ok=ok))
     return out

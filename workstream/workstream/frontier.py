@@ -290,18 +290,17 @@ def foreign_actions(
             if not verb or a.ok is False:
                 continue
             repo, _, num = a.value.partition("#")
-            # A bare number is the PR of the repo the command ran in.
-            repo = repo or (slug_of(a.dir) if a.dir else None) or ""
-            value = anchored.get(f"{repo.lower()}#{num}")
-            if value is None and a.value.startswith("#"):
-                if not repo:
+            if repo:
+                value = anchored.get(f"{repo.lower()}#{num}")
+            else:
+                # A bare number is a PR of the repo the command ran in. gh
+                # picks the `upstream` remote ahead of `origin`, so a fork's
+                # merges land on the upstream; check them in that order.
+                found = [r for r in (upstream_of(a.dir), slug_of(a.dir)) if r] if a.dir else []
+                value = next((v for r in found if (v := anchored.get(f"{r.lower()}#{num}"))), None)
+                if not found:
                     # Its directory is gone, as after merging and removing a worktree.
                     value = _guess(anchored, num, a, f)
-                else:
-                    # A fork: origin names the fork and gh merged on the
-                    # upstream, which the checkout's `upstream` remote names.
-                    up = upstream_of(a.dir) if a.dir else None
-                    value = anchored.get(f"{up.lower()}#{num}") if up else None
             if not value:
                 continue
             when = a.at.iso() if a.at else "unknown time"

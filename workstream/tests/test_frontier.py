@@ -500,6 +500,36 @@ def test_one_api_reply_does_not_confirm_every_merge_in_the_command():
     assert [line.split(":", 2)[1] for line in out] == ["acme/meadow#5"]
 
 
+def test_closing_an_already_closed_pr_is_not_a_close():
+    w = ws("origin", "gh:acme/meadow#5")
+    result = "! Pull request acme/meadow#5 (Fix (the) parser) is already closed"
+    assert foreign(w, [_merger(S2, "gh pr close 5 --repo acme/meadow", result)]) == []
+
+
+def test_a_denied_auto_merge_is_left_out():
+    w = ws("origin", "gh:acme/meadow#5")
+    m = _merger(
+        S2,
+        "gh pr merge 5 --repo acme/meadow --auto --squash",
+        "The user doesn't want to proceed with this tool use.",
+    )
+    assert foreign(w, [m]) == []
+
+
+def test_a_bare_merge_in_a_fork_goes_to_the_upstream_first():
+    # gh resolves a bare number on `upstream` when the checkout has one.
+    w = ws("origin", "gh:me/meadow#5", "gh:acme/meadow#5")
+    m = _merger(S2, "gh pr merge 5", "", cwd="/src/meadow")
+    out = F.foreign_actions(
+        w,
+        [m],
+        set(),
+        slug_of={"/src/meadow": "me/meadow"}.get,
+        upstream_of={"/src/meadow": "acme/meadow"}.get,
+    )
+    assert len(out) == 1 and out[0].startswith("gh:acme/meadow#5 was merged")
+
+
 def test_gh_global_repo_flag_before_the_subcommand():
     w = ws("origin", "gh:acme/meadow#319")
     m = _merger(S2, "gh -R acme/meadow pr merge 319 --squash", "")
