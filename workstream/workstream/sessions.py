@@ -1271,7 +1271,9 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
         for i, (seg, sep) in enumerate(parts):
             for words, filtered in _segments(seg):
                 if words[0] == "cd":
-                    cur = (_abs_path(words[1], cur) if len(words) > 1 else None) or cur
+                    # A target it can't resolve (`$WT`, `cd -`) leaves the
+                    # directory unknown, not the old one.
+                    cur = _abs_path(words[1], cur) if len(words) > 1 and cur else None
                     moved_at = i
                     continue
                 if "--disable-auto" in words:
@@ -1296,7 +1298,7 @@ def _closing_acts(scan: _Scan, codex: bool = False) -> list[Acted]:
                     # A `cd` inside a subshell, or after `||`, may not have
                     # applied here: leave the directory unknown rather than
                     # resolve a bare number against the wrong repo.
-                    if moved_at is not None and any(s in (")", "||") for _, s in parts[:i]):
+                    if moved_at is not None and any(s in (")", "||") for _, s in parts[moved_at:i]):
                         a = replace(a, dir=None)
                     found.append(
                         (a, {"held": held and named, "last": last and named, "auto": auto})

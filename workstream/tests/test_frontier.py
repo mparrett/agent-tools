@@ -609,6 +609,21 @@ def test_a_cd_inside_a_subshell_does_not_move_a_later_bare_merge():
     assert out == []
 
 
+def test_a_cd_to_a_variable_leaves_the_directory_unknown():
+    w = ws("origin", "gh:acme/meadow#5")
+    m = _merger(S2, 'cd "$WT" && gh pr merge 5 --squash', "", cwd="/src/meadow")
+    out = F.foreign_actions(
+        w, [m], set(), slug_of={"/src/meadow": "acme/meadow"}.get, upstream_of=lambda d: None
+    )
+    assert out == []
+
+
+def test_a_merge_from_inside_a_removed_worktree_is_found():
+    w = ws("origin", "gh:acme/meadow#5")
+    m = _merger(S2, "gh pr merge 5", "", cwd="/src/worktrees/meadow-fix/workstream")
+    assert len(foreign(w, [m])) == 1
+
+
 def test_gh_global_repo_flag_before_the_subcommand():
     w = ws("origin", "gh:acme/meadow#319")
     m = _merger(S2, "gh -R acme/meadow pr merge 319 --squash", "")

@@ -338,7 +338,8 @@ def _guess(anchored: dict[str, str], num: str, a, f) -> Optional[str]:
             repo in {g.lower() for g in f.gh_repos}
             or name in names
             or name in parts
-            or (parts and parts[-1].startswith(f"{name}-"))
+            # A worktree named `meadow-…`, or a directory inside one.
+            or any(p.startswith(f"{name}-") for p in parts)
         ):
             fits.append(value)
     return fits[0] if len(fits) == 1 else None
@@ -356,15 +357,21 @@ def _upstream_slug(path: str) -> Optional[str]:
     """The repo gh resolves a bare number to ahead of origin: the one
     `gh repo set-default` chose, else the `upstream` remote a fork has."""
     root = seam.canonical_repo_root(path) or seam.repo_root_for(path)
-    if root:
+    if not root:
+        return None
+    key = f"{root}\0gh-default"
+    if key not in _slug_cache:
+        found = None
         rc, out = anchors_mod._git(root, "config", "--get-regexp", r"^remote\..*\.gh-resolved$")
         for line in out.splitlines() if rc == 0 else []:
-            key, _, val = line.partition(" ")
-            remote = key[len("remote.") : -len(".gh-resolved")]
+            name, _, val = line.partition(" ")
+            remote = name[len("remote.") : -len(".gh-resolved")]
             slug = _remote_slug(path, remote) if val.strip() == "base" else val.strip()
             if slug and sessions_mod.valid_repo(slug):
-                return slug
-    return _remote_slug(path, "upstream")
+                found = slug
+                break
+        _slug_cache[key] = found or _remote_slug(path, "upstream")
+    return _slug_cache[key]
 
 
 def _remote_slug(path: str, remote: str) -> Optional[str]:
