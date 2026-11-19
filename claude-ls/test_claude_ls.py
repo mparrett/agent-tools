@@ -4573,3 +4573,47 @@ def test_lineage_tree_marks_forks_on_the_edge_or_the_root(tmp_path, capsys):
     doc = _lin_json(base, "cleared", capsys)
     forks = {s["sid"] for s in doc["sessions"] if s["fork"]}
     assert forks == {_LIN["root"], _LIN["cleared"]}
+
+
+# --- agents: the last message a person sent ----------------------------
+
+
+def _sent_jsonl(path, records):
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+    return path
+
+
+def _sent_user(text, ts, **extra):
+    return {"type": "user", "timestamp": ts, "message": {"content": text}, **extra}
+
+
+def test_last_sent_skips_tool_results_meta_and_wrappers(tmp_path):
+    f = _sent_jsonl(
+        tmp_path / "s.jsonl",
+        [
+            _sent_user("first ask", "2026-11-18T10:00:00Z"),
+            _sent_user("the real last one", "2026-11-18T11:00:00Z"),
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}},
+            _sent_user([{"type": "tool_result", "content": "x"}], "2026-11-18T11:01:00Z"),
+            _sent_user("reminder", "2026-11-18T11:02:00Z", isMeta=True),
+            _sent_user("<command-name>/clear</command-name>", "2026-11-18T11:03:00Z"),
+        ],
+    )
+    assert cl._last_sent(f) == ("the real last one", "2026-11-18T11:00:00Z")
+
+
+def test_last_sent_finds_a_prompt_split_across_chunks(tmp_path):
+    noise = [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "y" * 200}]}}
+    ] * 50
+    f = _sent_jsonl(
+        tmp_path / "s.jsonl", [_sent_user("way back " * 20, "2026-11-18T09:00:00Z"), *noise]
+    )
+    # A chunk smaller than one record forces every line to be stitched together.
+    text, ts = cl._last_sent(f, chunk=37)
+    assert text.startswith("way back") and ts == "2026-11-18T09:00:00Z"
+
+
+def test_last_sent_none(tmp_path):
+    f = _sent_jsonl(tmp_path / "s.jsonl", [{"type": "assistant", "message": {"content": []}}])
+    assert cl._last_sent(f) == ("", "")

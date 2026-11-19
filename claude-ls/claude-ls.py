@@ -724,6 +724,13 @@ def parse_args():
         help="Leave out finished background agents (`claude agents` without --all)",
     )
     agents_parser.add_argument(
+        "--sort",
+        choices=("active", "sent", "started"),
+        default="active",
+        help="active: live agents first, then by last transcript write (default); "
+        "sent: by when you last sent the agent a message; started: newest first",
+    )
+    agents_parser.add_argument(
         "--all",
         action="store_true",
         help="Print every agent; by default the list stops at one screenful",
@@ -7582,6 +7589,61 @@ def who_mode(args, console: Optional[Console]):
             print("   ".join(notes))
 
 
+def _human_prompt(rec: Dict) -> str:
+    """The text a person typed, if `rec` is such a record, else ''. The same test
+    as `_tail_facts`: no meta, sidechain or compaction records, no tool results,
+    and no harness wrappers (slash-command echoes, reminders)."""
+    if rec.get("type") != "user" or rec.get("isMeta") or rec.get("isSidechain"):
+        return ""
+    if rec.get("isCompactSummary"):
+        return ""
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(content, (str, list)):
+        return ""
+    if isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    ):
+        return ""
+    text = _extract_text(content).strip()
+    return "" if not text or is_wrapper_text(text) else text
+
+
+def _last_sent(path: Path, chunk: int = 256 * 1024) -> Tuple[str, str]:
+    """(text, ISO timestamp) of the last message a person sent, read backwards
+    from the end in chunks. The fixed-size tail `_tail_facts` reads can hold
+    nothing but tool traffic after a long autonomous stretch, which is exactly
+    when "when did I last talk to it" matters."""
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return "", ""
+    with fh:
+        fh.seek(0, os.SEEK_END)
+        pos = fh.tell()
+        carry = b""
+        while pos > 0:
+            start = max(0, pos - chunk)
+            fh.seek(start)
+            data = fh.read(pos - start) + carry
+            pos = start
+            lines = data.split(b"\n")
+            # The first piece may be the tail of a line that began earlier.
+            carry = lines.pop(0) if pos > 0 else b""
+            for ln in reversed(lines):
+                if b'"user"' not in ln:
+                    continue
+                try:
+                    rec = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict):
+                    text = _human_prompt(rec)
+                    if text:
+                        return text.replace("\n", " "), rec.get("timestamp") or ""
+    return "", ""
+
+
 _AGENT_GIST_MAX = 200
 
 
@@ -7595,6 +7657,8 @@ class AgentRow:
     started_at: str  # ISO, local time
     last_active: str  # ISO, local time, from the transcript's last write
     idle_min: Optional[int]
+    sent_at: str  # ISO, local time: when a person last sent this session a message
+    sent_min: Optional[int]
     cwd: str  # where the session last worked, per its transcript
     branch: str
     worktree: str
@@ -7645,6 +7709,7 @@ def _agent_row(rec: Dict, base_dir: str) -> AgentRow:
     sid = rec["sessionId"]
     cwd = rec.get("cwd") or ""
     topic, last_prompt, branch, last_active, idle = "", "", "", "", None
+    sent_at, sent_min = "", None
     transcript = _who_transcript(base_dir, cwd, sid) if cwd else None
     if transcript:
         slug, first_user, _turns = get_session_preview(transcript, topic_only=True)
@@ -7652,7 +7717,14 @@ def _agent_row(rec: Dict, base_dir: str) -> AgentRow:
         # A resumed session's first message is the harness's continuation preamble.
         if topic.startswith("This session is being continued from a previous conversation"):
             topic = ""
-        last_prompt = _tail_facts(transcript).last_prompt
+        last_prompt, sent_ts = _last_sent(transcript)
+        if sent_ts:
+            try:
+                sent = datetime.fromisoformat(sent_ts.replace("Z", "+00:00"))
+                sent_at = sent.astimezone().isoformat(timespec="seconds")
+                sent_min = int((time.time() - sent.timestamp()) / 60)
+            except ValueError:
+                pass
         # The transcript's own cwd and branch, not the launch dir's: a session that
         # moved into a worktree records it there, and a finished agent's worktree
         # may be gone from disk by now.
@@ -7689,6 +7761,8 @@ def _agent_row(rec: Dict, base_dir: str) -> AgentRow:
         started_at=_local_iso(rec.get("startedAt")),
         last_active=last_active,
         idle_min=idle,
+        sent_at=sent_at,
+        sent_min=sent_min,
         cwd=cwd,
         branch=branch,
         worktree=worktree,
@@ -7704,7 +7778,18 @@ def agents_mode(args, console: Optional[Console]):
     recs = _claude_agents(include_done=not args.active)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         rows = list(pool.map(lambda r: _agent_row(r, args.base_dir), recs))
-    rows.sort(key=lambda r: (r.state == "done", r.idle_min if r.idle_min is not None else 10**9))
+    never = 10**9
+
+    def mins(m: Optional[int]) -> int:
+        return m if m is not None else never
+
+    if args.sort == "sent":
+        rows.sort(key=lambda r: mins(r.sent_min))
+    elif args.sort == "started":
+        rows.sort(key=lambda r: r.started_at, reverse=True)
+    else:
+        # Live first, then by the transcript's last write, whoever made it.
+        rows.sort(key=lambda r: (r.state == "done", mins(r.idle_min)))
 
     if args.json:
         print(json.dumps([asdict(r) for r in rows], indent=2))
@@ -7752,6 +7837,9 @@ def agents_mode(args, console: Optional[Console]):
     def idle(r: AgentRow) -> str:
         return format_staleness(r.idle_min) if r.idle_min is not None else "-"
 
+    def sent(r: AgentRow) -> str:
+        return format_staleness(r.sent_min) if r.sent_min is not None else "-"
+
     def clip(text: str, room: int) -> str:
         return text if len(text) <= room else text[: max(0, room - 1)] + "…"
 
@@ -7766,7 +7854,8 @@ def agents_mode(args, console: Optional[Console]):
         head.append(r.session_id[:8], style="cyan")
         st = state(r)
         head.append(f" {st:<8}", style=state_style.get(st, "dim"))
-        head.append(f" {started(r):>5} {idle(r):>6}  ", style="dim")
+        head.append(f" {started(r):>5} {idle(r):>6} ", style="dim")
+        head.append(f"{sent(r):>6}  ", style="bold" if args.sort == "sent" else "dim")
         head.append(clip(where(r), width - len(head.plain)))
         lines = [head]
         room = width - len(indent) - 2
@@ -7785,7 +7874,8 @@ def agents_mode(args, console: Optional[Console]):
         else:
             print(line.plain)
 
-    used = 0
+    emit(Text(f" {'id':<8} {'state':<8} {'start':>5} {'idle':>6} {'you':>6}  where", style="dim"))
+    used = 1
     for i, r in enumerate(rows):
         lines = block(r)
         if budget is not None and i and used + len(lines) > budget:
