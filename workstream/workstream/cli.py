@@ -18,7 +18,17 @@ from typing import Optional
 from rich.console import Console
 from rich.markup import escape
 
-from workstream import attribution, frontier, hooklog, seam, sessions, store, sync, timeline
+from workstream import (
+    anchors,
+    attribution,
+    frontier,
+    hooklog,
+    seam,
+    sessions,
+    store,
+    sync,
+    timeline,
+)
 from workstream.clock import Instant
 
 RECENT_WINDOW = "14d"
@@ -1318,11 +1328,28 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# Seconds a command may spend asking GitHub, across every anchor it probes.
+# Past it, a PR reads from the cache (open ones with their age) or "not probed".
+PROBE_DEADLINE = 8.0
+
+
+def _probe_deadline() -> float:
+    raw = os.environ.get("WORKSTREAM_PROBE_DEADLINE")
+    try:
+        return float(raw) if raw else PROBE_DEADLINE
+    except ValueError:
+        raise SystemExit(
+            f"workstream: WORKSTREAM_PROBE_DEADLINE={raw!r} is not a number of seconds"
+        )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     # One weft listing for every frontier this invocation builds.
     frontier._history_cache = {}
     sessions._snapshot = {}
+    anchors._git_memo = {}
+    anchors._gh_deadline = time.monotonic() + _probe_deadline()
     try:
         return args.fn(args)
     except (store.NotFound, sessions.NotFound) as e:
@@ -1337,6 +1364,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     finally:
         frontier._history_cache = None
         sessions._snapshot = None
+        anchors._git_memo = None
+        anchors._gh_deadline = None
 
 
 if __name__ == "__main__":

@@ -82,9 +82,27 @@ def _run(argv: list[str], cwd: str | None = None) -> tuple[int, str]:
     return out.returncode, out.stdout
 
 
+# Set by the CLI for one invocation: git answers keyed by (path, args).
+# `timeline` asks each repo the same questions once per anchor and per
+# workstream (its default branch, its origin, main's tree), so most of its
+# git calls repeat. Every probe here only reads, and one command's run is
+# seconds, so a repo changing underneath it is the same race as without the
+# memo. None outside the CLI, so tests that change a repo between probes
+# see the change.
+_git_memo: dict[tuple, tuple[int, str]] | None = None
+
+
 def _git(path: str, *args: str) -> tuple[int, str]:
+    memo = _git_memo
+    key = (path, *args)
+    if memo is not None and key in memo:
+        return memo[key]
     rc, out = _run(["git", "-C", path, *args])
-    return rc, out.strip()
+    got = (rc, out.strip())
+    # A timeout or missing git is worth asking again.
+    if memo is not None and rc not in (124, 127):
+        memo[key] = got
+    return got
 
 
 def _ref_exists(path: str, ref: str) -> bool:
@@ -311,7 +329,7 @@ def _probe_branch(value: str, a: Anchor, ctx: _Ctx) -> None:
             a.warnings.append("no default branch found")
         return
     lv["merged_into_default"] = any(
-        _run(["git", "-C", r, "merge-base", "--is-ancestor", tip, ref])[0] == 0 for ref in refs
+        _git(r, "merge-base", "--is-ancestor", tip, ref)[0] == 0 for ref in refs
     )
     if not lv["merged_into_default"]:
         lv["merged_via"] = _squash_merged(r, tip, branch, refs, ctx, a)
@@ -371,8 +389,7 @@ def _merged_pr(git_dir: str, tip: str, branch: str, ctx: _Ctx, a: Anchor) -> dic
         r
         for r in rows or []
         if r.get("headRefOid")
-        and _run(["git", "-C", git_dir, "merge-base", "--is-ancestor", tip, r["headRefOid"]])[0]
-        == 0
+        and _git(git_dir, "merge-base", "--is-ancestor", tip, r["headRefOid"])[0] == 0
     ]
     if not landed:
         return None
@@ -451,7 +468,26 @@ def _tree_already_on(git_dir: str, tip: str, refs: list[str]) -> bool:
 
 
 def _default_gh_runner(argv: list[str]) -> tuple[int, str]:
-    return _run(argv)
+    """(returncode, stdout), or gh's error text when it fails: the issue
+    fallback needs to tell "not a PR" from a network error."""
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 124, ""
+    except (FileNotFoundError, OSError):
+        return 127, ""
+    return out.returncode, out.stdout if out.returncode == 0 else out.stderr
+
+
+# gh's answer when a number names an issue, not a PR (they share a number space).
+_NOT_A_PR = "Could not resolve to a PullRequest"
+
+# Set by the CLI for one invocation: the monotonic time after which gh is not
+# called. A slow network then costs at most this long, and an anchor it
+# didn't reach reads "not probed" (or its cached state, with its age), never
+# as gone.
+_gh_deadline: float | None = None
+SETTLED_STATES = ("MERGED", "CLOSED")
 
 
 def gh_cache_dir() -> Path:
@@ -540,27 +576,41 @@ def _probe_gh(
         return
     owner, name = repo.split("/")
     key = f"{owner}__{name}__{num}"
-    cached = _cache_get(key, now, any_age=cache_only)
-    if cached is not None and isinstance(cached.get("liveness"), dict):
-        a.liveness.update(cached["liveness"], cached=True, fetched_at=_iso(cached["fetched_at"]))
-        return
-    if cache_only:
+    cached = _cache_get(key, now, any_age=True)
+    if cached is not None and not isinstance(cached.get("liveness"), dict):
+        cached = None
+    if cached is not None:
+        state = cached["liveness"].get("state")
+        fresh = now - float(cached["fetched_at"]) < GH_CACHE_TTL
+        # A merged or closed PR doesn't change, so its answer never ages out.
+        if fresh or state in SETTLED_STATES or cache_only:
+            _use_cached(a, cached)
+            return
+    if cache_only or (_gh_deadline is not None and time.monotonic() > _gh_deadline):
+        if cached is not None:
+            # An open PR past the TTL: its last known state, with its age.
+            _use_cached(a, cached)
+            return
         # Liveness, not a warning: warnings become loose ends, and an unprobed
         # PR is a gap in this capture, not a problem with the work.
-        a.liveness.update(kind=None, state=None, cached=False, not_probed="no cached gh answer")
+        reason = "no cached gh answer" if cache_only else "probe deadline passed"
+        a.liveness.update(kind=None, state=None, cached=False, not_probed=reason)
         return
 
     shaped = None
     rc, out = runner(["gh", "pr", "view", num, "--repo", repo, "--json", _PR_FIELDS])
     if rc == 0:
         shaped = _parse_gh(out, _shape_pr)
-    if shaped is None:
-        # Issues and PRs share a number space; `pr view` on an issue number
-        # fails the same way a missing PR does, so the issue view decides.
+    elif _NOT_A_PR in out:
+        # Issues and PRs share a number space; only gh saying "not a PR"
+        # sends this to the issue view, not a timeout or a network error.
         rc, out = runner(["gh", "issue", "view", num, "--repo", repo, "--json", _ISSUE_FIELDS])
         if rc == 0:
             shaped = _parse_gh(out, _shape_issue)
     if shaped is None:
+        if cached is not None:
+            _use_cached(a, cached)
+            return
         a.liveness.update(kind=None, state=None)
         a.warnings.append("neither gh pr view nor gh issue view answered")
         return
@@ -569,6 +619,10 @@ def _probe_gh(
     err = _cache_put(key, now, {"liveness": shaped})
     if err:
         a.warnings.append(str(err))
+
+
+def _use_cached(a: Anchor, cached: dict) -> None:
+    a.liveness.update(cached["liveness"], cached=True, fetched_at=_iso(cached["fetched_at"]))
 
 
 def _parse_gh(out: str, shape: Callable[[dict], dict]) -> dict | None:

@@ -204,7 +204,8 @@ class FakeGh:
         self.calls.append(argv)
         payload = self.pr if argv[1] == "pr" else self.issue
         if payload is None:
-            return 1, ""
+            # What gh says for a number with no PR behind it.
+            return 1, f"GraphQL: Could not resolve to a PullRequest with the number of {argv[3]}."
         return 0, json.dumps(payload)
 
 
@@ -549,3 +550,70 @@ def test_pr_row_without_head_oid_is_not_credited(world):
     gh = FakeHeadGh({"feat/gill": [MERGED_ROW]})
     lv = liveness(f"wt:{world['wt']}", gh_runner=gh, now=1.0).liveness
     assert lv["merged_into_default"] is False and lv["merged_via"] is None
+
+
+def test_git_answers_repeat_only_inside_a_cli_run(monkeypatch):
+    calls = []
+
+    def run(argv, cwd=None):
+        calls.append(argv)
+        return (124, "") if "slow" in argv else (0, "main\n")
+
+    monkeypatch.setattr(anchors, "_run", run)
+    anchors._git("/r", "symbolic-ref", "HEAD")
+    anchors._git("/r", "symbolic-ref", "HEAD")
+    assert len(calls) == 2  # no memo outside a run: tests may change the repo
+    monkeypatch.setattr(anchors, "_git_memo", {})
+    assert anchors._git("/r", "symbolic-ref", "HEAD") == (0, "main")
+    assert anchors._git("/r", "symbolic-ref", "HEAD") == (0, "main")
+    assert len(calls) == 3
+    anchors._git("/r", "slow")
+    anchors._git("/r", "slow")
+    assert len(calls) == 5  # a timeout is asked again
+
+
+def _seed(key, fetched_at, **liveness):
+    anchors._cache_put(key, fetched_at, {"liveness": {"kind": "pr", **liveness}})
+
+
+def test_a_merged_pr_comes_from_the_cache_at_any_age(tmp_path):
+    _seed("acme__widget__30", 1.0, state="MERGED")
+    gh = FakeGh(pr=PR_JSON)
+    lv = liveness("gh:acme/widget#30", gh_runner=gh, now=1_000_000.0).liveness
+    assert lv["state"] == "MERGED" and lv["cached"] is True and gh.calls == []
+
+
+def test_a_stale_open_pr_is_refreshed_and_kept_when_gh_fails(tmp_path):
+    _seed("acme__widget__31", 1.0, state="OPEN")
+    fresh = liveness("gh:acme/widget#31", gh_runner=FakeGh(pr=PR_JSON), now=1_000_000.0)
+    assert fresh.liveness["cached"] is False
+    _seed("acme__widget__32", 1.0, state="OPEN")
+
+    def offline(argv):
+        return 1, "error connecting to api.github.com"
+
+    kept = liveness("gh:acme/widget#32", gh_runner=offline, now=1_000_000.0)
+    assert kept.liveness["state"] == "OPEN" and kept.liveness["cached"] is True
+    assert kept.warnings == []
+
+
+def test_a_network_error_does_not_ask_for_an_issue():
+    calls = []
+
+    def offline(argv):
+        calls.append(argv[1])
+        return 1, "error connecting to api.github.com"
+
+    a = liveness("gh:acme/widget#33", gh_runner=offline, now=1.0)
+    assert calls == ["pr"] and a.liveness["kind"] is None
+
+
+def test_past_the_deadline_gh_is_not_called(tmp_path, monkeypatch):
+    monkeypatch.setattr(anchors, "_gh_deadline", 0.0)
+    gh = FakeGh(pr=PR_JSON)
+    a = liveness("gh:acme/widget#34", gh_runner=gh, now=1.0)
+    assert gh.calls == [] and a.liveness["not_probed"] == "probe deadline passed"
+    assert a.warnings == []
+    _seed("acme__widget__35", 1.0, state="OPEN")
+    b = liveness("gh:acme/widget#35", gh_runner=gh, now=1_000_000.0)
+    assert gh.calls == [] and b.liveness["state"] == "OPEN" and b.liveness["cached"] is True

@@ -1080,6 +1080,21 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
 # --- anchor status words -----------------------------------------------------
 
 
+def _cache_age(lv: dict) -> Optional[str]:
+    """How long ago a cached gh answer was fetched, when past the cache TTL."""
+    try:
+        at = datetime.fromisoformat(str(lv.get("fetched_at")))
+    except ValueError:
+        return None
+    secs = (datetime.now(timezone.utc) - at).total_seconds()
+    if secs < anchors_mod.GH_CACHE_TTL:
+        return None
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{int(secs // size)}{unit}"
+    return None
+
+
 def anchor_status(a: anchors_mod.Anchor) -> str:
     """One word (or two) for an anchor's liveness, so a reader can skim:
     merged, open, draft, closed, gone (merged), gone, dirty, unpushed,
@@ -1092,7 +1107,11 @@ def anchor_status(a: anchors_mod.Anchor) -> str:
         if state == "MERGED":
             return "merged"
         if state == "OPEN":
-            return "draft" if lv.get("is_draft") else "open"
+            word = "draft" if lv.get("is_draft") else "open"
+            # An open PR served from the cache past its TTL (deadline passed,
+            # or gh failed) may have moved since: say how old the answer is.
+            age = _cache_age(lv) if lv.get("cached") else None
+            return f"{word}, as of {age} ago" if age else word
         if state == "CLOSED":
             return "closed"
         return "unknown"
