@@ -325,3 +325,15 @@ def test_a_loose_end_names_its_anchor_once(synthetic_store):
     assert F._loose_ends([], [a], []) == [
         "gh:acme/spindle#52: neither gh pr view nor gh issue view answered"
     ]
+
+
+def test_a_stale_cached_open_pr_says_how_old_it_is():
+    old = datetime.now(UTC) - timedelta(hours=3, minutes=5)
+    stamp = old.strftime("%Y-%m-%dT%H:%M:%SZ")
+    a = _a("gh:acme/spindle#60", state="OPEN", cached=True, fetched_at=stamp)
+    assert F.anchor_status(a) == "open, as of 3h ago"
+    recent = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert (
+        F.anchor_status(_a("gh:acme/spindle#61", state="OPEN", cached=True, fetched_at=recent))
+        == "open"
+    )

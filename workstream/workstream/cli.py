@@ -18,7 +18,17 @@ from typing import Optional
 from rich.console import Console
 from rich.markup import escape
 
-from workstream import attribution, frontier, hooklog, seam, sessions, store, sync, timeline
+from workstream import (
+    anchors,
+    attribution,
+    frontier,
+    hooklog,
+    seam,
+    sessions,
+    store,
+    sync,
+    timeline,
+)
 from workstream.clock import Instant
 
 RECENT_WINDOW = "14d"
@@ -437,6 +447,8 @@ def _sync_interactive(targets, run: dict, con: Console, verbose: bool, ask=input
     rows: dict[tuple, dict] = {}
     first = True
     while True:
+        # Each sweep gets the whole gh budget: time spent at the prompt is not gh's.
+        anchors._gh_started = None
         with con.status("reading sessions") as status:
 
             def progress(step: str, done: int, total: int) -> None:
@@ -1318,11 +1330,29 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# Seconds a command may spend asking GitHub, across every anchor it probes,
+# counted from its first gh call.
+# Past it, a PR reads from the cache (open ones with their age) or "not probed".
+PROBE_DEADLINE = 8.0
+
+
+def _probe_deadline() -> float:
+    raw = os.environ.get("WORKSTREAM_PROBE_DEADLINE")
+    try:
+        return float(raw) if raw else PROBE_DEADLINE
+    except ValueError:
+        raise SystemExit(
+            f"workstream: WORKSTREAM_PROBE_DEADLINE={raw!r} is not a number of seconds"
+        )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     # One weft listing for every frontier this invocation builds.
     frontier._history_cache = {}
     sessions._snapshot = {}
+    anchors._git_memo = {}
+    anchors._gh_budget, anchors._gh_started = _probe_deadline(), None
     try:
         return args.fn(args)
     except (store.NotFound, sessions.NotFound) as e:
@@ -1337,6 +1367,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     finally:
         frontier._history_cache = None
         sessions._snapshot = None
+        anchors._git_memo = None
+        anchors._gh_budget = anchors._gh_started = None
 
 
 if __name__ == "__main__":

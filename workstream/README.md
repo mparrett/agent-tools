@@ -359,9 +359,14 @@ transcript records and rounding to 15 minutes.
 | weft | `~/.weft` | `WEFT_HOME`, binary via `WORKSTREAM_WEFT_BIN` |
 | project-docs | `~/projects-new/project-docs/docs` | `WORKSTREAM_DOCS_ROOT` |
 | gh cache | `$XDG_CACHE_HOME/workstream` | `WORKSTREAM_CACHE_DIR` |
+| gh time per command | 8 seconds | `WORKSTREAM_PROBE_DEADLINE` |
 | weft actor | `agent:claude:<sid>` inside a Claude Code session (`CLAUDE_CODE_SESSION_ID`), else weft's git email | `WEFT_ACTOR` |
 
 Missing stores degrade to warnings. Only the hook swallows errors outright.
+
+A gh answer is cached for 10 minutes, and a merged PR's for good.
+Past the deadline, or when gh fails, an open PR shows its last cached state
+with its age ("open, as of 3h ago"), and one never fetched reads `unknown`.
 
 ## Known limits (v1)
 
