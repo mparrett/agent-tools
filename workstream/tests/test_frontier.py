@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from workstream import cli, hooklog, seam
+from workstream import cli, hooklog, seam, sessions
 from workstream import frontier as F
 from workstream.anchors import Anchor
 from workstream.clock import Instant
@@ -278,38 +278,128 @@ def test_unresolved_message():
 # --- foreign actions ---------------------------------------------------------
 
 
-def _merger(sid: str, command: str, kind: str = "claude", repos=()) -> SessionFacts:
-    return facts(sid, kind=kind, repos=list(repos), last_tools=[(at(30), "Bash", command)])
+MERGED = "\u2713 Squashed and merged pull request #{n} (fix)"
+SLUGS = {"/src/meadow": "acme/meadow", "/src/bramble": "acme/bramble"}
+
+
+def _merger(
+    sid: str, command: str, result: str = "", kind: str = "claude", cwd: str = "/src/meadow"
+) -> SessionFacts:
+    """A session whose one Bash call was `command`, parsed the way sync parses it."""
+    tool = sessions._Tool(at(30), "Bash", {}, command, cwd, "t1")
+    scan = sessions._Scan(tools=[tool], results={"t1": (result, {})})
+    return facts(sid, kind=kind, pr_closing=sessions._closing_acts(scan))
+
+
+def foreign(w, recent, members=frozenset()):
+    return [ln for _, ln in F.foreign_actions(w, recent, set(members), slug_of=SLUGS.get)]
 
 
 def test_foreign_merge_is_reported():
     w = ws("origin", "gh:acme/meadow#319")
-    out = F.foreign_actions(w, [_merger(S2, "gh pr merge 319 --repo acme/meadow --squash")], {S1})
-    assert out == [
+    m = _merger(S2, "gh pr merge 319 --repo acme/meadow --squash", MERGED.format(n=319))
+    assert foreign(w, [m], {S1}) == [
         f"gh:acme/meadow#319 was merged by {S2[:8]} at {at(30).iso()}, a session not attached here"
     ]
 
 
-def test_foreign_merge_by_repo_basename_from_the_session():
+def test_foreign_merge_of_a_bare_number_takes_the_repo_it_ran_in():
     w = ws("origin", "gh:acme/meadow#319")
-    m = _merger(S2, "gh pr merge --squash 319", repos=["/src/meadow"])
-    assert len(F.foreign_actions(w, [m], set())) == 1
+    m = _merger(S2, "gh pr merge --squash 319", MERGED.format(n=319))
+    assert len(foreign(w, [m])) == 1
+    elsewhere = _merger(S2, "gh pr merge --squash 319", MERGED.format(n=319), cwd="/src/bramble")
+    assert foreign(w, [elsewhere]) == []
+
+
+def test_foreign_close_is_reported():
+    w = ws("origin", "gh:acme/meadow#319")
+    m = _merger(S2, "gh pr close 319", "\u2713 Closed pull request acme/meadow#319 (fix)")
+    assert foreign(w, [m]) == [
+        f"gh:acme/meadow#319 was closed by {S2[:8]} at {at(30).iso()}, a session not attached here"
+    ]
+
+
+def test_an_echoed_merge_is_not_a_merge():
+    w = ws("origin", "gh:acme/meadow#319")
+    for cmd in ("echo gh pr merge 319 --repo acme/meadow", "echo 'gh pr merge 319'"):
+        assert foreign(w, [_merger(S2, cmd, MERGED.format(n=319))]) == []
+
+
+def test_the_same_number_in_two_anchored_repos_stays_apart():
+    # Keyed by number alone, the second anchor overwrote the first, so a merge
+    # in one repo was missed or credited to the other.
+    w = ws("origin", "gh:acme/meadow#5", "gh:acme/bramble#5")
+    for repo in ("acme/meadow", "acme/bramble"):
+        m = _merger(S2, f"gh pr merge 5 --repo {repo}", MERGED.format(n=5))
+        assert foreign(w, [m]) == [
+            f"gh:{repo}#5 was merged by {S2[:8]} at {at(30).iso()}, a session not attached here"
+        ]
+
+
+def test_a_merge_its_output_does_not_confirm_is_reported_as_unconfirmed():
+    w = ws("origin", "gh:acme/meadow#319")
+    for result in (
+        "",
+        "(Bash completed with no output)",  # gh confirms only on a terminal
+        "some other output",
+        MERGED.format(n=320),
+        # gh merged, then failed to switch branches in a linked worktree.
+        "Exit code 1\nfatal: 'main' is already used by worktree at '/src/meadow'",
+        "Exit code 1\nX Pull request acme/meadow#319 is not mergeable",
+    ):
+        out = foreign(w, [_merger(S2, "gh pr merge 319 --repo acme/meadow", result)])
+        assert out == [
+            f"gh:acme/meadow#319: {S2[:8]} ran `gh pr merge` at {at(30).iso()} and its output"
+            " does not confirm it, a session not attached here"
+        ]
+
+
+def test_a_redundant_merge_or_close_is_left_out():
+    w = ws("origin", "gh:acme/meadow#319")
+    for cmd, result in (
+        ("gh pr merge", "! Pull request acme/meadow#319 was already merged"),
+        ("gh pr close", "! Pull request acme/meadow#319 (Fix (it)) is already closed"),
+    ):
+        assert foreign(w, [_merger(S2, f"{cmd} 319 --repo acme/meadow", result)]) == []
+
+
+def test_a_clean_exit_is_not_a_confirmation():
+    # `!` turns a failed merge into a clean exit; only gh's own line counts.
+    w = ws("origin", "gh:acme/meadow#319")
+    m = _merger(S2, "! gh pr merge 319 --repo acme/meadow 2>/dev/null", "")
+    assert not any("was merged" in line for line in foreign(w, [m]))
+
+
+def test_only_a_confirmed_foreign_merge_blocks_close():
+    w = ws("origin", "gh:acme/meadow#319")
+    unconfirmed = _merger(S2, "gh pr merge 319 --repo acme/meadow", "")
+    confirmed = _merger(S3, "gh pr merge 319 --repo acme/meadow", MERGED.format(n=319))
+    got = F.foreign_actions(w, [unconfirmed, confirmed], set(), slug_of=SLUGS.get)
+    assert [c for c, _ in got] == [False, True]
+
+
+def test_a_merge_confirmed_before_a_later_segment_failed_still_counts():
+    w = ws("origin", "gh:acme/meadow#319")
+    result = "Exit code 1\n" + MERGED.format(n=319) + "\nerror: pathspec"
+    m = _merger(S2, "gh pr merge 319 --repo acme/meadow && git checkout nope", result)
+    assert len(foreign(w, [m])) == 1
 
 
 def test_foreign_actions_ignore_members_subagents_other_repos_and_other_prs():
     w = ws("origin", "gh:acme/meadow#319")
+    ok = MERGED.format(n=319)
     recent = [
-        _merger(S1, "gh pr merge 319 --repo acme/meadow"),  # attached here
-        _merger("ag01", "gh pr merge 319 --repo acme/meadow", kind="subagent"),
-        _merger(S2, "gh pr merge 319 --repo acme/bramble"),
-        _merger(S3, "gh pr merge 3190 --repo acme/meadow"),
-        facts("x", last_tools=[(at(1), "Read", "gh pr merge 319 --repo acme/meadow")]),
+        _merger(S1, "gh pr merge 319 --repo acme/meadow", ok),  # attached here
+        _merger("ag01", "gh pr merge 319 --repo acme/meadow", ok, kind="subagent"),
+        _merger(S2, "gh pr merge 319 --repo acme/bramble", ok),
+        _merger(S3, "gh pr merge 3190 --repo acme/meadow", MERGED.format(n=3190)),
+        _merger("x", "gh pr view 319 --repo acme/meadow", ok),
     ]
-    assert F.foreign_actions(w, recent, {S1}) == []
+    assert foreign(w, recent, {S1}) == []
 
 
 def test_foreign_actions_without_pr_anchors():
-    assert F.foreign_actions(ws("x", "wt:/w"), [_merger(S2, "gh pr merge 1")], set()) == []
+    assert foreign(ws("x", "wt:/w"), [_merger(S2, "gh pr merge 1", MERGED.format(n=1))]) == []
 
 
 # --- timeline ----------------------------------------------------------------
@@ -581,8 +671,8 @@ def test_recorded_capture_clears_dropped(dup, tmp_path):
 def test_explicit_repo_flag_for_another_repo_is_not_a_foreign_merge():
     # The session worked in both repos; --repo says which one it merged in.
     w = ws("origin", "gh:acme/meadow#319")
-    m = _merger(S2, "gh pr merge 319 --repo acme/bramble", repos=["/src/meadow", "/src/bramble"])
-    assert F.foreign_actions(w, [m], set()) == []
+    m = _merger(S2, "gh pr merge 319 --repo acme/bramble", MERGED.format(n=319))
+    assert foreign(w, [m]) == []
 
 
 # --- tasks and closure -------------------------------------------------------
