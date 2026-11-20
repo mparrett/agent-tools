@@ -506,8 +506,12 @@ def test_a_pipe_into_tee_still_shows_everything():
 
 
 @pytest.fixture
-def retired(case, synthetic_store):
-    """`retired-ws` anchors the worker's worktree, which was squash-merged and removed."""
+def retired(case, synthetic_store, monkeypatch):
+    """`retired-ws` anchors the worker's worktree, which was squash-merged and removed.
+    The clock is pinned two days after the fixture's sessions: measured from the
+    real one, the hook log's 14-day window aged the worktree's only evidence out.
+    Only that window is pinned; claim windows still read the real clock."""
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 11, 3, tzinfo=UTC))
     wt = case["worktrees"]["sync-seam"]
     ws = store.create("retired-ws", "A retired slice", anchors=[f"wt:{wt}"])
     store.attach(ws, case["sessions"]["worker"].ref, canonical=True, note="seed")
@@ -577,3 +581,20 @@ def test_sync_keeps_a_worktree_merged_by_branch_name_only(case, capsys, monkeypa
     [wt] = [a for a in fr["anchors"] if a["ref"] == ref]
     assert wt["liveness"]["status"] == "gone (branch fix/tempo merged, by branch name only)"
     assert not any("is gone" in x for x in fr["closure_blockers"])
+
+
+@needs_weft
+def test_sync_since_reaches_hook_log_evidence_older_than_the_default(retired, capsys, monkeypatch):
+    # A month after the fixture, the default window no longer holds the line
+    # naming the worktree; --since reaches back to it.
+    monkeypatch.setattr(cli, "_now", lambda: datetime(2026, 12, 3, tzinfo=UTC))
+    ref = retired["wt_ref"]
+
+    def gone(d):
+        return any(
+            r["ref"] == ref and r["reason"] == "the worktree no longer exists" for r in d["skipped"]
+        )
+
+    run_json(capsys, "sync", "retired-ws")
+    assert not gone(run_json(capsys, "sync", "retired-ws", "--dry-run", "--verbose"))
+    assert gone(run_json(capsys, "sync", "retired-ws", "--dry-run", "--verbose", "--since", "60d"))
