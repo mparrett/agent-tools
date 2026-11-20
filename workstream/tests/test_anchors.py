@@ -683,3 +683,146 @@ def test_a_cache_entry_without_a_stamp_is_a_miss(tmp_path):
     gh = FakeGh(pr=PR_JSON)
     lv = liveness("gh:acme/widget#37", gh_runner=gh, now=1.0).liveness
     assert lv["cached"] is False and len(gh.calls) == 1
+
+
+# --- batched gh --------------------------------------------------------------
+
+
+class BatchGh:
+    """Answers the GraphQL batch from `nodes` ({"o/n#N": node or None}) the way
+    gh does: data for every alias, an error per lookup that resolved to
+    nothing, and exit 1 with gh's message after stdout when any did. Any
+    other gh call is a per-anchor probe, answered by `single`."""
+
+    def __init__(self, nodes, single=None):
+        self.nodes, self.single, self.calls = nodes, single or FakeGh(pr=PR_JSON), []
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        if argv[1] != "api":
+            return self.single(argv)
+        import re
+
+        query = argv[-1]
+        data, errors, repo = {}, [], None
+        for m in re.finditer(
+            r'(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\)'
+            r"|(a\d+): issueOrPullRequest\(number: (\d+)\)",
+            query,
+        ):
+            if m.group(1):
+                repo = (m.group(1), f"{m.group(2)}/{m.group(3)}")
+                data[repo[0]] = {}
+                continue
+            node = self.nodes.get(f"{repo[1]}#{m.group(5)}")
+            data[repo[0]][m.group(4)] = node
+            if node is None:
+                errors.append({"type": "NOT_FOUND", "path": [repo[0], m.group(4)]})
+        out = json.dumps({"data": data, **({"errors": errors} if errors else {})})
+        return (
+            (1, out + "gh: Could not resolve to an issue or pull request\n") if errors else (0, out)
+        )
+
+
+GQL_PR = {
+    "__typename": "PullRequest",
+    **{k: v for k, v in PR_JSON.items() if k != "reviews"},
+    "reviews": {"nodes": PR_JSON["reviews"][-3:]},
+}
+GQL_ISSUE = {"__typename": "Issue", "state": "CLOSED", "updatedAt": "x", "closedAt": "y"}
+
+
+def test_one_batch_answers_prs_and_issues_across_repos_as_a_fetch_would():
+    # The same PR fetched on its own, under another number, for comparison.
+    one = liveness("gh:acme/widget#99", gh_runner=FakeGh(pr=PR_JSON), now=1.0).liveness
+    gh = BatchGh({"acme/widget#12": GQL_PR, "acme/gadget#7": GQL_ISSUE})
+    got = anchors.liveness_many(["gh:acme/widget#12", "gh:acme/gadget#7"], gh_runner=gh, now=1.0)
+    assert [c[1] for c in gh.calls] == ["api"]
+    assert got[0].liveness == one  # same fields, cached False, as a gh pr view
+    assert got[1].liveness["kind"] == "issue" and got[1].liveness["cached"] is False
+
+
+def test_a_number_the_batch_says_is_not_found_is_not_asked_about_again():
+    gh = BatchGh({"acme/widget#12": GQL_PR, "acme/widget#13": None})
+    got = anchors.liveness_many(["gh:acme/widget#12", "gh:acme/widget#13"], gh_runner=gh, now=1.0)
+    assert [c[1] for c in gh.calls] == ["api"]
+    # What `gh pr view` then `gh issue view` would have concluded.
+    alone = liveness("gh:acme/widget#13", gh_runner=FakeGh(), now=1.0)
+    assert got[1].liveness == alone.liveness and got[1].warnings == alone.warnings
+
+
+def _batch_reply(data, errors):
+    return 1, json.dumps({"data": data, "errors": errors}) + "gh: some error\n"
+
+
+def test_a_repo_the_batch_could_not_resolve_is_probed_on_its_own():
+    single = FakeGh(pr=PR_JSON)
+
+    def gh(argv):
+        if argv[1] == "api":
+            return _batch_reply({"r0": None}, [{"type": "NOT_FOUND", "path": ["r0"]}])
+        return single(argv)
+
+    got = anchors.liveness_many(["gh:acme/gone#1", "gh:acme/gone#2"], gh_runner=gh, now=1.0)
+    assert [c[1] for c in single.calls] == ["pr", "pr"]
+    assert all(a.liveness["state"] == "OPEN" for a in got)
+
+
+def test_an_error_other_than_not_found_is_probed_on_its_own():
+    single = FakeGh(pr=PR_JSON)
+
+    def gh(argv):
+        if argv[1] == "api":
+            return _batch_reply(
+                {"r0": {"a0": None, "a1": None}},
+                [
+                    {"type": "FORBIDDEN", "path": ["r0", "a0"]},
+                    {"type": "RATE_LIMITED", "path": ["r0", "a1"]},
+                ],
+            )
+        return single(argv)
+
+    got = anchors.liveness_many(["gh:acme/w#1", "gh:acme/w#2"], gh_runner=gh, now=1.0)
+    assert [c[1] for c in single.calls] == ["pr", "pr"]
+    assert all(a.liveness["state"] == "OPEN" for a in got)
+
+
+def test_a_failed_batch_leaves_every_ref_to_its_own_probe():
+    gh = BatchGh({})
+
+    def gh_fail(argv):
+        if argv[1] == "api":
+            return 1, "error connecting to api.github.com"
+        return gh(argv)
+
+    got = anchors.liveness_many(["gh:acme/a#1", "gh:acme/b#2"], gh_runner=gh_fail, now=1.0)
+    assert [c[1] for c in gh.calls] == ["pr", "pr"]
+    assert all(a.liveness["state"] == "OPEN" for a in got)
+
+
+def test_the_batch_skips_fresh_and_merged_entries_and_a_lone_lookup(tmp_path):
+    _seed("acme__widget__20", 1_000_000.0, state="OPEN")  # fresh
+    _seed("acme__widget__21", 1.0, state="MERGED")  # settled
+    gh = BatchGh({})
+    anchors.liveness_many(
+        ["gh:acme/widget#20", "gh:acme/widget#21", "gh:acme/widget#22"],
+        gh_runner=gh,
+        now=1_000_100.0,
+    )
+    assert [c[1] for c in gh.calls] == ["pr"]  # one left to ask about: no batch
+
+
+def test_past_the_deadline_there_is_no_batch(monkeypatch):
+    monkeypatch.setattr(anchors, "_gh_budget", 0.0)
+    monkeypatch.setattr(anchors, "_gh_started", 0.0)
+    gh = BatchGh({"acme/a#1": GQL_PR, "acme/b#2": GQL_PR})
+    anchors.liveness_many(["gh:acme/a#1", "gh:acme/b#2"], gh_runner=gh, now=1.0)
+    assert gh.calls == []
+
+
+def test_the_default_runner_keeps_stdout_when_gh_fails(monkeypatch):
+    import subprocess
+
+    done = subprocess.CompletedProcess([], 1, stdout='{"data": {}}', stderr="gh: oops\n")
+    monkeypatch.setattr(anchors.subprocess, "run", lambda *a, **k: done)
+    assert anchors._default_gh_runner(["gh"]) == (1, '{"data": {}}gh: oops\n')

@@ -490,16 +490,19 @@ def _tree_already_on(git_dir: str, tip: str, refs: list[str]) -> bool:
 
 
 def _default_gh_runner(argv: list[str]) -> tuple[int, str]:
-    """(returncode, stdout), or gh's error text when it fails: the issue
-    fallback needs to tell "not a PR" from a network error."""
+    """(returncode, stdout), and gh's error text after it when it fails: the
+    issue fallback needs to tell "not a PR" from a network error, and a
+    GraphQL batch exits 1 when one lookup fails while stdout holds the rest."""
     try:
         out = subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
     except subprocess.TimeoutExpired:
         return 124, ""
     except (FileNotFoundError, OSError):
         return 127, ""
-    return out.returncode, out.stdout if out.returncode == 0 else out.stderr
+    return out.returncode, out.stdout if out.returncode == 0 else out.stdout + out.stderr
 
+
+_NEITHER_ANSWERED = "neither gh pr view nor gh issue view answered"
 
 # gh's answer when a number names an issue, not a PR (they share a number space).
 _NOT_A_PR = "Could not resolve to a PullRequest"
@@ -601,7 +604,12 @@ def _shape_issue(d: dict) -> dict:
 
 
 def _probe_gh(
-    value: str, a: Anchor, runner: GhRunner, now: float, cache_only: bool = False
+    value: str,
+    a: Anchor,
+    runner: GhRunner,
+    now: float,
+    cache_only: bool = False,
+    batch: dict[str, dict] | None = None,
 ) -> None:
     repo, sep, num = value.partition("#")
     if not sep or repo.count("/") != 1 or not num.isdigit():
@@ -621,6 +629,20 @@ def _probe_gh(
         if fresh or settled or cache_only:
             _use_cached(a, cached)
             return
+    if batch and value in batch:
+        shaped = batch[value]
+        if shaped is not None:
+            # Answered by _batch_gh in this run: the same as a fetch of our own.
+            _store_fetched(a, key, now, shaped)
+            return
+        # GitHub said no PR or issue has this number: what the two views
+        # below would conclude, without asking twice more.
+        if cached is not None:
+            _use_cached(a, cached)
+            return
+        a.liveness.update(kind=None, state=None)
+        a.warnings.append(_NEITHER_ANSWERED)
+        return
     if cache_only or _past_deadline():
         if cached is not None:
             # An open PR past the TTL: its last known state, with its age.
@@ -647,13 +669,119 @@ def _probe_gh(
             _use_cached(a, cached)
             return
         a.liveness.update(kind=None, state=None)
-        a.warnings.append("neither gh pr view nor gh issue view answered")
+        a.warnings.append(_NEITHER_ANSWERED)
         return
 
+    _store_fetched(a, key, now, shaped)
+
+
+def _store_fetched(a: Anchor, key: str, now: float, shaped: dict) -> None:
     a.liveness.update(shaped, cached=False, fetched_at=_iso(now))
     err = _cache_put(key, now, {"liveness": shaped})
     if err:
         a.warnings.append(str(err))
+
+
+# Lookups per GraphQL request. Each is one alias; 50 keeps a request well
+# inside GitHub's per-query node limit.
+GH_BATCH = 50
+_GQL_FRAGMENTS = (
+    "fragment pr on PullRequest { state isDraft reviewDecision updatedAt mergedAt"
+    " headRefName reviews(last: 3) { nodes { author { login } state submittedAt } } }"
+    " fragment issue on Issue { state updatedAt closedAt }"
+)
+
+
+def _needs_gh(value: str, now: float) -> tuple[str, str, str] | None:
+    """(owner, name, number) when _probe_gh would ask gh about `value`: a
+    well-formed ref with no fresh cache entry and no merged one."""
+    repo, sep, num = value.partition("#")
+    if not sep or repo.count("/") != 1 or not num.isdigit():
+        return None
+    owner, name = repo.split("/")
+    cached = _cache_get(f"{owner}__{name}__{num}", now, any_age=True)
+    if cached is not None and isinstance(cached.get("liveness"), dict):
+        lv = cached["liveness"]
+        if now - float(cached["fetched_at"]) < GH_CACHE_TTL:
+            return None
+        if lv.get("kind") == "pr" and lv.get("state") == "MERGED":
+            return None
+    return owner, name, num
+
+
+def _batch_gh(values: Iterable[str], ctx: "_Ctx") -> dict[str, dict | None]:
+    """Shaped answers for the gh refs this run would probe, from one GraphQL
+    request per GH_BATCH lookups instead of a `gh pr view` each. None for a
+    ref GitHub answered NOT_FOUND for that very lookup: its repo resolved and
+    no PR or issue has the number. Anything else unclear (a failed request, a
+    repo that didn't resolve, another error, an unexpected shape) is left out,
+    and _probe_gh asks about it on its own exactly as without the batch."""
+    if ctx.gh_cache_only:
+        return {}
+    now = ctx.now() if callable(ctx.now) else ctx.now
+    wanted: dict[str, tuple[str, str, str]] = {}
+    for v in values:
+        got = _needs_gh(v, now)
+        if got is not None:
+            wanted.setdefault(v, got)
+    if len(wanted) < 2:
+        return {}  # One lookup gains nothing from a batch.
+    out: dict[str, dict | None] = {}
+    items = list(wanted.items())
+    for i in range(0, len(items), GH_BATCH):
+        if _past_deadline():
+            break
+        chunk = items[i : i + GH_BATCH]
+        repos: dict[tuple[str, str], str] = {}
+        fields: dict[str, list[str]] = {}
+        where: dict[str, tuple[str, str]] = {}
+        for j, (v, (owner, name, num)) in enumerate(chunk):
+            ra = repos.setdefault((owner, name), f"r{len(repos)}")
+            fields.setdefault(ra, []).append(
+                f"a{j}: issueOrPullRequest(number: {num}) {{ __typename ...pr ...issue }}"
+            )
+            where[v] = (ra, f"a{j}")
+        body = " ".join(
+            f"{ra}: repository(owner: {json.dumps(o)}, name: {json.dumps(n)}) {{ {' '.join(fields[ra])} }}"
+            for (o, n), ra in repos.items()
+        )
+        _, text = ctx.gh_runner(
+            ["gh", "api", "graphql", "-f", f"query={_GQL_FRAGMENTS} query {{ {body} }}"]
+        )
+        try:
+            # The answers come first; gh may append its error text after them.
+            doc, _ = json.JSONDecoder().raw_decode(text.lstrip())
+        except ValueError:
+            continue
+        data = doc.get("data") if isinstance(doc, dict) else None
+        if not isinstance(data, dict):
+            continue
+        errors = doc.get("errors") if isinstance(doc.get("errors"), list) else []
+        not_found = {
+            tuple(e["path"])
+            for e in errors
+            if isinstance(e, dict)
+            and e.get("type") == "NOT_FOUND"
+            and isinstance(e.get("path"), list)
+        }
+        for v, (ra, aa) in where.items():
+            if (
+                (ra, aa) in not_found
+                and isinstance(data.get(ra), dict)
+                and data[ra].get(aa) is None
+            ):
+                out[v] = None
+                continue
+            node = (data.get(ra) or {}).get(aa) if isinstance(data.get(ra), dict) else None
+            if not isinstance(node, dict):
+                continue
+            if node.get("__typename") == "PullRequest":
+                reviews = node.get("reviews")
+                d = {**node, "reviews": reviews.get("nodes") if isinstance(reviews, dict) else []}
+                out[v] = _shape_pr(d)
+            elif node.get("__typename") == "Issue":
+                out[v] = _shape_issue(node)
+    return out
 
 
 def _use_cached(a: Anchor, cached: dict) -> None:
@@ -735,6 +863,8 @@ class _Ctx:
         # round trip per PR anchor.
         self.gh_cache_only = gh_cache_only
         self.now = now
+        # gh answers fetched in one batch by liveness_many, by ref value.
+        self.gh_batch: dict[str, dict] = {}
         self._registry = registry
         self._registry_loaded = registry is not None
         self._registry_err: str | None = None
@@ -756,7 +886,7 @@ def _probe(ref: str, ctx: _Ctx) -> Anchor:
             _probe_branch(value, a, ctx)
         elif scheme == "gh":
             now = ctx.now() if callable(ctx.now) else ctx.now
-            _probe_gh(value, a, ctx.gh_runner, now, ctx.gh_cache_only)
+            _probe_gh(value, a, ctx.gh_runner, now, ctx.gh_cache_only, ctx.gh_batch)
         elif scheme in ("file", "frontier"):
             _probe_file(value, a)
         elif scheme in ("claude", "codex", "agent"):
@@ -799,4 +929,10 @@ def liveness_many(
     gh_cache_only: bool = False,
 ) -> list[Anchor]:
     ctx = _Ctx(repo_hints, gh_runner, now, registry, gh_cache_only)
+    refs = list(refs)
+    gh_values = [v for s, v in (parse_ref(r) for r in refs) if s == "gh"]
+    try:
+        ctx.gh_batch = _batch_gh(gh_values, ctx)
+    except Exception:  # noqa: BLE001 -- the batch is an optimisation; probes still run
+        ctx.gh_batch = {}
     return [_probe(r, ctx) for r in refs]
