@@ -661,3 +661,24 @@ def test_join_rereads_after_a_concurrent_attach(weft_store, monkeypatch):
     assert [w.id for w in released] == [a.id]
     assert store.get(a.id).canonical_holders() == []
     assert got.canonical_holders() == ["agent:claude:j5j5j5j5"]
+
+
+def test_join_does_not_claim_a_workstream_closed_during_a_retry(weft_store, monkeypatch):
+    # Between join's read and its batch, another session claims the workstream
+    # (so the batch conflicts) and then force-closes it. The retry must refuse.
+    ws = store.create("closing", "Closing")
+    real = store.list_workstreams
+    raced = []
+
+    def racing(**kw):
+        got = real(**kw)
+        if not raced:
+            raced.append(True)
+            store.join(ws, "claude:j7j7j7j7", canonical=True)
+            store.close(ws, force=True)
+        return got
+
+    monkeypatch.setattr(store, "list_workstreams", racing)
+    with pytest.raises(store.WeftError, match="is closed"):
+        store.join(ws, "claude:j7j7j7j7", canonical=True)
+    assert store.get(ws.id).canonical_holders() == []

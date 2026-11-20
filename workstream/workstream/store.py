@@ -678,6 +678,9 @@ def join(
         else:
             current = get(_ws_id(ws))
             node = current.id
+            if current.closed:
+                # Closed since the caller checked: a retry must not claim it.
+                raise WeftError(f"workstream {current.name or node[:12]} is closed", 8)
             expect.append({"node": node, "state": current.state})
             ops = []
             claim = canonical and holder not in current.canonical_holders()
