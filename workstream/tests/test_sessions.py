@@ -505,3 +505,65 @@ def test_worktree_add_after_an_unresolvable_cd_is_not_recorded(store):
     assert sessions.facts(sid).worktrees == [
         os.path.normpath(os.path.join(store["alpha"], "../beta/wt/y"))
     ]
+
+
+# --- overlap cache -----------------------------------------------------------
+
+
+def test_overlap_facts_match_a_full_read_and_are_cached(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKSTREAM_CACHE_DIR", str(tmp_path / "cache"))
+    ids = [S_MAIN, AGENT, "not-a-session"]
+    got = {f.id: f for f in sessions.overlap_facts(ids)}
+    assert set(got) == {S_MAIN, AGENT}
+    for sid in (S_MAIN, AGENT):
+        full = sessions.facts(sid)
+        assert got[sid].repos == full.repos
+        assert got[sid].work.edited_paths == list(full.work.edited_paths)
+
+    def boom(path):
+        raise AssertionError("an unchanged transcript must not be parsed again")
+
+    monkeypatch.setattr(sessions, "_full_entries", boom)
+    again = {f.id: f for f in sessions.overlap_facts(ids)}
+    assert again[S_MAIN].repos == got[S_MAIN].repos
+
+
+def test_overlap_cache_rereads_a_transcript_that_grew(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKSTREAM_CACHE_DIR", str(tmp_path / "cache"))
+    sid = "88888888-aaaa-4bbb-8ccc-00000000000b"
+    r = Rec(sid, store["alpha"])
+    path = store["proj"] / f"{sid}.jsonl"
+    write_jsonl(path, [r.user(0, "start")])
+    (before,) = sessions.overlap_facts([sid])
+    assert before.repos == []
+    write_jsonl(
+        path,
+        [r.user(0, "start"), r.tool(1, "Bash", "b1", command=f"git -C {store['beta']} status")],
+    )
+    (after,) = sessions.overlap_facts([sid])
+    assert after.repos == [store["beta"]]
+
+
+def test_a_corrupt_overlap_cache_entry_is_a_miss(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKSTREAM_CACHE_DIR", str(tmp_path / "cache"))
+    (first,) = sessions.overlap_facts([S_MAIN])
+    for f in (tmp_path / "cache" / "overlap").iterdir():
+        f.write_text('{"stamp": ')
+    (second,) = sessions.overlap_facts([S_MAIN])
+    assert second.repos == first.repos
+
+
+def test_overlap_repos_are_resolved_now_not_when_cached(store, tmp_path, monkeypatch):
+    # A repo deleted since the cache was written drops out, as a full read would.
+    import shutil
+
+    monkeypatch.setenv("WORKSTREAM_CACHE_DIR", str(tmp_path / "cache"))
+    seam_cl = sessions.seam._cl
+    (first,) = sessions.overlap_facts([S_MAIN])
+    assert store["beta"] in first.repos
+    shutil.rmtree(store["beta"])
+    for fn in (seam_cl._repo_root_for, seam_cl._canonical_repo_root):
+        getattr(fn, "cache_clear", lambda: None)()
+    (second,) = sessions.overlap_facts([S_MAIN])
+    assert store["beta"] not in second.repos
+    assert second.repos == sessions.facts(S_MAIN).repos

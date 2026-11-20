@@ -131,22 +131,18 @@ def _hooklog_hint() -> None:
     )
 
 
-def _recent_facts(log, workstreams) -> list[sessions.SessionFacts]:
-    """Full facts for every session attached anywhere, so overlap signals have
-    something to compare against; the cheap pass leaves those fields empty."""
-    out = []
-    seen: set[str] = set()
+def _recent_facts(workstreams) -> list[sessions.SessionFacts]:
+    """Repos and edited files for every session attached anywhere, so overlap
+    signals have something to compare against; the cheap pass leaves those
+    fields empty. Read through the overlap cache, not a full parse."""
+    sids: list[str] = []
     for ws in workstreams:
         for ref in ws.refs:
             scheme, _, value = ref.partition(":")
             sid = value.partition("/")[2] if scheme == "agent" else value
-            if scheme in ("claude", "codex", "agent") and sid and sid not in seen:
-                seen.add(sid)
-                try:
-                    out.append(sessions.facts(sid, log=log))
-                except Exception:
-                    continue
-    return out
+            if scheme in ("claude", "codex", "agent") and sid and sid not in sids:
+                sids.append(sid)
+    return sessions.overlap_facts(sids)
 
 
 def _rank_for(
@@ -169,7 +165,7 @@ def _rank_for(
     msgs = []
     if log and with_messages:
         msgs = log.messages(involving={sid})
-    recent = _recent_facts(log, wss) if with_overlap else []
+    recent = _recent_facts(wss) if with_overlap else []
     return me, attribution.rank(me, wss, recent, msgs)
 
 
