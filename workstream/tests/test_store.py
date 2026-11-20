@@ -212,6 +212,16 @@ def test_a_normal_close_refuses_a_task_reopened_since_the_check(weft_store):
     assert not store.get(ws.id).closed
 
 
+def test_a_normal_close_refuses_a_task_linked_since_the_check(weft_store):
+    ws = store.create("linked-ws", "Linked")
+    checked = store.get(ws.id)
+    tid = _weft("add", "late work", "--ns", store.NS)["nodes"][0]["id"]
+    _weft("link", tid, "part-of", ws.id)
+    with pytest.raises(store.Conflict):
+        store.close(checked)
+    assert not store.get(ws.id).closed
+
+
 def test_close_releases_claims_marks_done_and_hides_from_ls(weft_store):
     ws = store.create("fin-ws", "Finished")
     other = store.create("live-ws", "Still going")

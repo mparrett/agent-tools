@@ -599,7 +599,7 @@ def _apply(
     except WeftError as e:
         if e.code == 1 and "apply" in str(e) and "unknown" in str(e).lower():
             raise WeftError(
-                "this workstream needs a weft with `weft apply` (weft#7 or later); "
+                "this workstream needs a weft with `weft apply` (weft#10 or later); "
                 f"{seam.weft_bin()} has none",
                 e.code,
             ) from e
@@ -719,8 +719,9 @@ def close(
     A closed workstream keeps its refs, so `show` still answers who worked on
     it.
 
-    A normal close commits only while nobody holds a claim and every task is
-    in the state the caller saw: a claim taken or a task reopened since then
+    A normal close commits only while nobody holds a claim and the tasks are
+    the ones the caller saw, in the states it saw: a claim taken, a task
+    linked or a task reopened since then
     raises Conflict rather than being released or closed over. `force`
     releases every live claim under the same lock instead.
 
@@ -739,6 +740,9 @@ def close(
     else:
         expect.append({"node": current.id, "claims": []})
         expect += [{"node": t.id, "state": t.state} for t in current.tasks]
+        # And no task linked since: weft counts the non-dropped part-of children.
+        live = [c.id for c in current.children if c.state != "dropped"]
+        expect.append({"node": current.id, "children": live})
     if note:
         ops += [
             {
