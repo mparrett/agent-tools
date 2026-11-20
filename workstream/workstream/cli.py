@@ -74,7 +74,13 @@ def _window(spec: str) -> datetime:
         raise SystemExit(f"workstream: bad window {spec!r}; use e.g. 72h, 14d, 2w")
     n, unit = int(m.group(1)), m.group(2)
     delta = {"h": timedelta(hours=n), "d": timedelta(days=n), "w": timedelta(weeks=n)}[unit]
-    return datetime.now(timezone.utc) - delta
+    return _now() - delta
+
+
+def _now() -> datetime:
+    # A seam for tests whose fixtures are dated: a window measured from the
+    # real clock drops their evidence once they age past it.
+    return datetime.now(timezone.utc)
 
 
 def _load_log(since=RECENT_WINDOW):
@@ -403,7 +409,7 @@ def cmd_sync(args) -> int:
         others=[w for w in live if w.id not in ids],
         only=only,
         ancillary=args.ancillary,
-        log=_load_log(),
+        log=_load_log(args.since),
         history=everything,
     )
     if not args.json:
@@ -1216,6 +1222,13 @@ def build_parser() -> argparse.ArgumentParser:
         "-i",
         action="store_true",
         help="review each addition and retraction before anything is written (needs a terminal)",
+    )
+    sp.add_argument(
+        "--since",
+        metavar="WINDOW",
+        default=RECENT_WINDOW,
+        help=f"how far back to read the hook log (default {RECENT_WINDOW}); widen it, e.g. 90d,"
+        " to recover worktrees whose only evidence is an older hook-log line",
     )
     common(sp, session=True)
     sp.set_defaults(fn=cmd_sync)
