@@ -364,7 +364,7 @@ transcript records and rounding to 15 minutes.
 
 Missing stores degrade to warnings. Only the hook swallows errors outright.
 
-A gh answer is cached for 10 minutes, and a merged or closed PR's for good.
+A gh answer is cached for 10 minutes, and a merged PR's for good.
 Past the deadline, or when gh fails, an open PR shows its last cached state
 with its age ("open, as of 3h ago"), and one never fetched reads `unknown`.
 

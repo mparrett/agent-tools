@@ -447,6 +447,8 @@ def _sync_interactive(targets, run: dict, con: Console, verbose: bool, ask=input
     rows: dict[tuple, dict] = {}
     first = True
     while True:
+        # Each sweep gets the whole gh budget: time spent at the prompt is not gh's.
+        anchors._gh_started = None
         with con.status("reading sessions") as status:
 
             def progress(step: str, done: int, total: int) -> None:

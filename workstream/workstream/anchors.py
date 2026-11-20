@@ -424,12 +424,15 @@ def _merged_prs_by_head(repo: str, branch: str, ctx: _Ctx, a: Anchor) -> list[di
     list is an answer and is cached; None (gh failed) is not."""
     now = ctx.now() if callable(ctx.now) else ctx.now
     key = re.sub(r"[^\w.-]", "_", f"head__{repo}__{branch}")
-    late = _past_deadline()
-    cached = _cache_get(key, now, any_age=ctx.gh_cache_only or late)
-    if cached is not None and isinstance(cached.get("rows"), list):
-        return cached["rows"]
-    if ctx.gh_cache_only or late:
-        return None
+    cached = _cache_get(key, now, any_age=True)
+    rows = cached.get("rows") if cached is not None else None
+    if not isinstance(rows, list):
+        rows = None
+    fresh = cached is not None and now - float(cached["fetched_at"]) < GH_CACHE_TTL
+    if rows is not None and (fresh or ctx.gh_cache_only):
+        return rows
+    if ctx.gh_cache_only or _past_deadline():
+        return rows
     rc, out = ctx.gh_runner(
         [
             "gh", "pr", "list", "--repo", repo, "--state", "merged", "--head", branch,
@@ -489,7 +492,6 @@ _NOT_A_PR = "Could not resolve to a PullRequest"
 # reach reads its cached state with its age, or unknown, never gone.
 _gh_budget: float | None = None
 _gh_started: float | None = None
-SETTLED_STATES = ("MERGED", "CLOSED")
 
 
 def _past_deadline() -> bool:
@@ -519,9 +521,9 @@ def _cache_get(key: str, now: float, *, any_age: bool = False) -> dict | None:
     stale entry is a miss."""
     try:
         cached = json.loads((gh_cache_dir() / f"{key}.json").read_text(encoding="utf-8"))
-        if isinstance(cached, dict) and (
-            any_age or now - float(cached["fetched_at"]) < GH_CACHE_TTL
-        ):
+        # Checked even at any age: callers read the stamp to show the age.
+        fetched = float(cached["fetched_at"])
+        if isinstance(cached, dict) and (any_age or now - fetched < GH_CACHE_TTL):
             return cached
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -593,10 +595,12 @@ def _probe_gh(
     if cached is not None and not isinstance(cached.get("liveness"), dict):
         cached = None
     if cached is not None:
-        state = cached["liveness"].get("state")
+        lv = cached["liveness"]
         fresh = now - float(cached["fetched_at"]) < GH_CACHE_TTL
-        # A merged or closed PR doesn't change, so its answer never ages out.
-        if fresh or state in SETTLED_STATES or cache_only:
+        # A merged PR doesn't change, so its answer never ages out. A closed PR
+        # or any issue can be reopened, so those keep the TTL.
+        settled = lv.get("kind") == "pr" and lv.get("state") == "MERGED"
+        if fresh or settled or cache_only:
             _use_cached(a, cached)
             return
     if cache_only or _past_deadline():

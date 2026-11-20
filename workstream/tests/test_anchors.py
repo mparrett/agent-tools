@@ -639,3 +639,19 @@ def test_the_gh_budget_starts_at_the_first_gh_call(monkeypatch):
     assert anchors._past_deadline() is False  # starts the budget at 1000
     assert anchors._past_deadline() is False
     assert anchors._past_deadline() is True
+
+
+def test_a_closed_pr_or_issue_keeps_the_ttl_since_it_can_be_reopened(tmp_path):
+    _seed("acme__widget__36", 1.0, state="CLOSED")
+    gh = FakeGh(pr=PR_JSON)
+    lv = liveness("gh:acme/widget#36", gh_runner=gh, now=1_000_000.0).liveness
+    assert lv["state"] == "OPEN" and lv["cached"] is False and len(gh.calls) == 1
+
+
+def test_a_cache_entry_without_a_stamp_is_a_miss(tmp_path):
+    d = tmp_path / "cache" / "gh"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "acme__widget__37.json").write_text('{"liveness": {"kind": "pr", "state": "OPEN"}}')
+    gh = FakeGh(pr=PR_JSON)
+    lv = liveness("gh:acme/widget#37", gh_runner=gh, now=1.0).liveness
+    assert lv["cached"] is False and len(gh.calls) == 1
