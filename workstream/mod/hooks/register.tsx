@@ -34,7 +34,8 @@ const WS_COLORS = ['claude', 'suggestion', 'merged', 'planMode', 'ide', 'remembe
 const flipped = atom({ plugin: 'workstream', key: 'flipped' } as const, [] as string[], { shape: 'flipped-2' })
 // The pane folded to its header and a line a workstream, by its [-] button.
 const minimized = atom({ plugin: 'workstream', key: 'minimized' } as const, false)
-// Minimized, a line each for this many workstreams, then a count of the rest.
+// Minimized, a line each for this many workstreams, then a count of the rest;
+// a count of one would take the row its line needs, so one more is drawn instead.
 const MINIMIZED_ROWS = 2
 
 // Where the badge goes, from the `badge` option. Options are fixed for an
@@ -271,14 +272,15 @@ export const register: Register = (on, options) => {
       WS_COLORS.length,
     )
     if (isMin) {
-      const rest = v.frontiers.length - MINIMIZED_ROWS
+      const shown = v.frontiers.length <= MINIMIZED_ROWS + 1 ? v.frontiers.length : MINIMIZED_ROWS
+      const rest = v.frontiers.length - shown
       return (
         <Box flexDirection="column">
           {header}
-          {v.frontiers.slice(0, MINIMIZED_ROWS).map((f, i) => {
+          {v.frontiers.slice(0, shown).map((f, i) => {
             const color = WS_COLORS[slots.get(f.id) ?? i % WS_COLORS.length] ?? 'claude'
             return (
-              <Text wrap="truncate-end">
+              <Text key={f.id} wrap="truncate-end">
                 <Text color={color}>◆ </Text>
                 <Text color={color} weight="semibold">
                   {f.name}

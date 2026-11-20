@@ -60,7 +60,7 @@ from (the read-only clone, where there is one):
    registers both hooks, and adds a badge naming the session's workstreams and
    its role in each (`workstream: <name> (owner)`, `(helping)`, `none`) and a
    side pane with their frontier (it opens by itself for an attached session
-   where the terminal is wide enough; `/workstream` opens it, or brings it forward and focuses it; `/workstream close` closes it; its `[-]` folds it to a line a workstream, and loose ends start folded).
+   where the terminal is wide enough; `/workstream` opens it, or brings it forward and focuses it; `/workstream close` closes it; its `[-]` folds it to a line a workstream, three at most before a count of the rest, and loose ends start folded).
    Claude Code draws a
    plugin's status line as a yellow warning, so the `badge` option in `/config`
    can move it to a one-row band above the prompt (`band`) or drop it (`off`).
