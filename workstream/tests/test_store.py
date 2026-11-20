@@ -190,13 +190,45 @@ def test_blocked_ids(weft_store):
 # --- close ------------------------------------------------------------------
 
 
+def test_a_normal_close_refuses_a_claim_taken_since_the_check(weft_store):
+    ws = store.create("racy-ws", "Racy")
+    checked = store.get(ws.id)
+    store.attach(ws, "claude:c1c1c1c1", canonical=True)
+    with pytest.raises(store.Conflict):
+        store.close(checked)
+    after = store.get(ws.id)
+    assert not after.closed and after.canonical_holders() == ["agent:claude:c1c1c1c1"]
+
+
+def test_a_normal_close_refuses_a_task_reopened_since_the_check(weft_store):
+    ws = store.create("task-ws", "Tasks")
+    tid = _weft("add", "write it", "--ns", store.NS)["nodes"][0]["id"]
+    _weft("link", tid, "part-of", ws.id)
+    _weft("done", tid)
+    checked = store.get(ws.id)
+    _weft("done", "--undo", tid)
+    with pytest.raises(store.Conflict):
+        store.close(checked)
+    assert not store.get(ws.id).closed
+
+
+def test_a_normal_close_refuses_a_task_linked_since_the_check(weft_store):
+    ws = store.create("linked-ws", "Linked")
+    checked = store.get(ws.id)
+    tid = _weft("add", "late work", "--ns", store.NS)["nodes"][0]["id"]
+    _weft("link", tid, "part-of", ws.id)
+    with pytest.raises(store.Conflict):
+        store.close(checked)
+    assert not store.get(ws.id).closed
+
+
 def test_close_releases_claims_marks_done_and_hides_from_ls(weft_store):
     ws = store.create("fin-ws", "Finished")
     other = store.create("live-ws", "Still going")
     store.attach(ws, "claude:c1c1c1c1", canonical=True)
     store.attach(ws, "claude:c1c1c1c1", canonical=True)
     store.attach(ws, "claude:c2c2c2c2", canonical=True)
-    got = store.close("fin-ws", "shipped in the synthetic release")
+    got = store.close("fin-ws", "shipped in the synthetic release", force=True)
     assert got.closed and got.state == "done"
     assert got.canonical_holders() == []
     assert {"claude:c1c1c1c1", "claude:c2c2c2c2"} <= set(got.refs)
@@ -232,7 +264,7 @@ def test_close_resolved_workstream_needs_no_show(weft_store, monkeypatch):
         return real(args, **kw)
 
     monkeypatch.setattr(store, "_run", spy)
-    got = store.close(ws, "done here")
+    got = store.close(ws, "done here", force=True)
     assert "show" not in calls and "export" not in calls
     assert got.closed and got.canonical_holders() == [] and got.closed_note == "done here"
     monkeypatch.setattr(store, "_run", real)
@@ -403,7 +435,7 @@ def test_close_keeps_released_intervals(released_store):
     store.detach(ws, "claude:eeee0001")
     store.attach(ws, "claude:eeee0001", canonical=True, note="last")
     store.attach(ws, "claude:eeee0002", canonical=True, note="other")
-    closed = store.close(store.get(ws.id))
+    closed = store.close(store.get(ws.id), force=True)
     ivs, fresh = closed.intervals(), store.get(ws.id).intervals()
     assert [i.note for i in ivs] == ["earlier", "last", "other"]
     # close reads no export, so the claims it released carry the close time,
@@ -576,3 +608,97 @@ def test_actor_defaults_to_the_calling_session(
             monkeypatch.setenv(var, value)
     monkeypatch.delenv("CLAUDE_PID", raising=False)
     assert store._run(["ls"])["actor"] == expected
+
+
+# --- join: attach through one `weft apply` -----------------------------------
+
+
+def test_join_moves_the_canonical_claim_in_one_batch(weft_store):
+    a = store.create("join-a", "A")
+    b = store.create("join-b", "B")
+    store.join(a, "claude:j1j1j1j1", canonical=True)
+    got, released = store.join(b, "claude:j1j1j1j1", canonical=True)
+    assert [w.id for w in released] == [a.id]
+    assert got.canonical_holders() == ["agent:claude:j1j1j1j1"]
+    assert store.get(a.id).canonical_holders() == []
+    assert "claude:j1j1j1j1" in store.get(a.id).refs  # still a member
+
+
+def test_join_rejoining_keeps_the_one_claim(weft_store):
+    a = store.create("join-same", "Same")
+    store.join(a, "claude:j2j2j2j2", canonical=True)
+    got, released = store.join(a, "claude:j2j2j2j2", canonical=True)
+    assert released == [] and len(got.claims) == 1
+
+
+def test_join_new_refuses_a_taken_name(weft_store):
+    store.create("taken", "First")
+    with pytest.raises(store.WeftError, match="already exists"):
+        store.join(None, "claude:j3j3j3j3", canonical=True, new=("taken", "Second", []))
+    assert len([w for w in store.list_workstreams() if w.name == "taken"]) == 1
+
+
+def test_join_new_creates_claims_and_adds_subagents(weft_store):
+    got, _ = store.join(
+        None,
+        "claude:j4j4j4j4",
+        canonical=True,
+        note="start",
+        subagents=["agent:j4j4j4j4/sub1"],
+        new=("fresh", "Fresh", ["gh:acme/meadow#9"]),
+    )
+    assert got.name == "fresh" and got.canonical_holders() == ["agent:claude:j4j4j4j4"]
+    assert {"claude:j4j4j4j4", "agent:j4j4j4j4/sub1", "gh:acme/meadow#9"} <= set(got.refs)
+
+
+def test_join_rereads_after_a_concurrent_attach(weft_store, monkeypatch):
+    # Another attach moves the session between the read and the batch: weft
+    # refuses the stale batch, and join reads again rather than stacking claims.
+    a = store.create("race-a", "A")
+    b = store.create("race-b", "B")
+    real = store._held_by
+    raced = []
+
+    def stale(holder):
+        got = real(holder)
+        if not raced:
+            raced.append(True)
+            store.join(a, "claude:j5j5j5j5", canonical=True)
+        return got
+
+    monkeypatch.setattr(store, "_held_by", stale)
+    got, released = store.join(b, "claude:j5j5j5j5", canonical=True)
+    assert [w.id for w in released] == [a.id]
+    assert store.get(a.id).canonical_holders() == []
+    assert got.canonical_holders() == ["agent:claude:j5j5j5j5"]
+
+
+def test_join_does_not_claim_a_workstream_closed_during_a_retry(weft_store, monkeypatch):
+    # Between join's read and its batch, another session claims the workstream
+    # (so the batch conflicts) and then force-closes it. The retry must refuse.
+    ws = store.create("closing", "Closing")
+    real = store._held_by
+    raced = []
+
+    def racing(holder):
+        got = real(holder)
+        if not raced:
+            raced.append(True)
+            store.join(ws, "claude:j7j7j7j7", canonical=True)
+            store.close(ws, force=True)
+        return got
+
+    monkeypatch.setattr(store, "_held_by", racing)
+    with pytest.raises(store.WeftError, match="is closed"):
+        store.join(ws, "claude:j7j7j7j7", canonical=True)
+    assert store.get(ws.id).canonical_holders() == []
+
+
+def test_join_releases_a_claim_left_on_a_dropped_workstream(weft_store):
+    gone = store.create("dropped-ws", "Dropped")
+    store.join(gone, "claude:j8j8j8j8", canonical=True)
+    _weft("drop", gone.id)
+    here = store.create("next-ws", "Next")
+    got, released = store.join(here, "claude:j8j8j8j8", canonical=True)
+    assert [w.id for w in released] == [gone.id]
+    assert got.canonical_holders() == ["agent:claude:j8j8j8j8"]
