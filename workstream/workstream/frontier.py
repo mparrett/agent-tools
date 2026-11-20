@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -257,48 +256,71 @@ def _lifecycle_text(ev) -> str:
     return f"{ev.event}({detail})" if detail else ev.event
 
 
-def foreign_actions(ws: Workstream, recent, member_ids: set[str]) -> list[str]:
+def foreign_actions(
+    ws: Workstream, recent, member_ids: set[str], slug_of=None
+) -> list[tuple[bool, str]]:
     """Merges and closes of this workstream's PR anchors by sessions attached
     elsewhere: the cross-repo case, where a session rooted in one repo merged
-    another workstream's PRs while that workstream's owner was live."""
-    nums: dict[str, str] = {}
+    another workstream's PRs while that workstream's owner was live.
+
+    The evidence is each session's parsed `pr_closing` (so `echo gh pr merge 5`
+    is not a merge), matched on repo and number (so #5 in one anchored repo
+    is not #5 in another). Each line comes with whether gh's output confirmed
+    it: only a confirmed one blocks `close`, since an unconfirmed attempt may
+    have failed. One gh says was already merged is left out. `slug_of` maps
+    a directory to its GitHub `owner/repo`, for a bare `gh pr merge N`; tests
+    pass one. A bare number from a directory that no longer exists can't be
+    resolved and is skipped."""
+    anchored: dict[str, str] = {}
     for ref in ws.refs:
         scheme, _, value = ref.partition(":")
         if scheme in ("gh", "pr"):
-            repo, _, num = value.partition("#")
-            nums[num] = value
-    if not nums:
+            repo, sep, num = value.partition("#")
+            if sep and repo and num:
+                anchored[f"{repo.lower()}#{num}"] = value
+    if not anchored:
         return []
-    out: list[str] = []
+    slug_of = slug_of or _origin_slug
+    out: list[tuple[bool, str]] = []
     for f in recent:
         if f.id in member_ids or f.kind == "subagent":
             continue
-        for at, name, summary in f.last_tools:
-            if name != "Bash":
+        for a in f.pr_closing:
+            verb = sessions_mod.closing_verb(a.how)
+            if not verb or a.ok is False:
                 continue
-            m = _MERGE_RE.search(summary)
-            if not m or m.group(2) not in nums:
+            repo, _, num = a.value.partition("#")
+            # A bare number is the PR of the repo the command ran in.
+            repo = repo or (slug_of(a.dir) if a.dir else None) or ""
+            value = anchored.get(f"{repo.lower()}#{num}")
+            if not value:
                 continue
-            verb = "merged" if m.group(1) == "merge" else "closed"
-            repo = nums[m.group(2)].partition("#")[0]
-            # An explicit --repo is the answer; the repo fallbacks below are for
-            # a bare `gh pr merge N` run from inside a checkout.
-            named = _REPO_FLAG_RE.search(summary)
-            if named and named.group(1) != repo:
-                continue
-            basename = repo.split("/")[-1]
-            in_checkout = any(os.path.basename(r.rstrip("/")) == basename for r in f.repos)
-            if repo not in summary and not in_checkout:
-                continue
-            when = at.iso() if at else "unknown time"
-            out.append(
-                f"gh:{nums[m.group(2)]} was {verb} by {f.id[:8]} at {when}, a session not attached here"
-            )
+            when = a.at.iso() if a.at else "unknown time"
+            if a.ok:
+                line = f"gh:{value} was {verb} by {f.id[:8]} at {when}, a session not attached here"
+            else:
+                line = (
+                    f"gh:{value}: {f.id[:8]} ran `{a.how}` at {when} and its output does not"
+                    " confirm it, a session not attached here"
+                )
+            if (bool(a.ok), line) not in out:
+                out.append((bool(a.ok), line))
     return out
 
 
-_MERGE_RE = re.compile(r"gh pr (merge|close) (?:[^\s]*\s+)*?#?(\d+)")
-_REPO_FLAG_RE = re.compile(r"(?:--repo[=\s]|-R\s)\s*(\S+)")
+_slug_cache: dict[str, Optional[str]] = {}
+
+
+def _origin_slug(path: str) -> Optional[str]:
+    """`owner/repo` of the GitHub origin of the checkout holding `path`."""
+    root = seam.canonical_repo_root(path) or seam.repo_root_for(path)
+    if not root:
+        return None
+    if root not in _slug_cache:
+        rc, url = anchors_mod._git(root, "remote", "get-url", "origin")
+        slug = anchors_mod.gh_repo_from_url(url) if rc == 0 else None
+        _slug_cache[root] = slug if slug and sessions_mod.valid_repo(slug) else None
+    return _slug_cache[root]
 
 
 NOT_CLOSED = "all tasks done; workstream not closed"
@@ -462,10 +484,11 @@ def build(
 
     timeline = _timeline(sfs, messages, anchor_list)
     foreign = foreign_actions(ws, recent, member_ids)
-    loose = _loose_ends(sfs, anchor_list, messages) + foreign + task_ends
+    loose = _loose_ends(sfs, anchor_list, messages) + [ln for _, ln in foreign] + task_ends
+    # An unconfirmed attempt is worth knowing about, not proof of a merge.
     blockers = (
         _loose_ends(sfs, anchor_list, messages, include_dropped=False)
-        + foreign
+        + [ln for confirmed, ln in foreign if confirmed]
         + [t for t in task_ends if t != NOT_CLOSED]
     )
     captures = _capture_paths(ws)
