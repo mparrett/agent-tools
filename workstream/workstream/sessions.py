@@ -1094,48 +1094,60 @@ def _segment_acts(
     if words[1] == "pr" and words[2] in _GH_PR_WRITE_VERBS:
         for pr in _gh_pr_acts(words[2], words[3:], result):
             how = f"gh pr {words[2]}"
-            out.append(Acted("pr", pr, how, at, cur, ok=pr_outcome(how, pr, result)))
+            ok, named = pr_outcome(how, pr, result)
+            out.append(Acted("pr", named, how, at, cur, ok=ok))
     elif words[1] == "api":
         hit = _gh_api_pr(words[2:])
         if hit:
-            out.append(Acted("pr", hit[0], hit[1], at, cur, ok=pr_outcome(hit[1], hit[0], result)))
+            out.append(Acted("pr", hit[0], hit[1], at, cur))
     return out
 
 
 # gh's own confirmation, which names the PR: "✓ Squashed and merged pull request
 # acme/meadow#319 (title)", or "#319" from older gh. One result can hold several
 # segments' output, so the number has to match.
-_PR_DONE_RE = re.compile(r"\b(merged|closed) pull request (?:[\w.-]+/[\w.-]+)?#(\d+)\b", re.I)
+_PR_DONE_RE = re.compile(r"\b(merged|closed) pull request (?:([\w.-]+/[\w.-]+))?#(\d+)\b", re.I)
 _PR_ALREADY_RE = re.compile(
     # gh puts the PR's title in parentheses between the number and the verdict.
-    r"pull request (?:[\w.-]+/[\w.-]+)?#(\d+)(?: \([^\n]*\))? (?:was already merged|is already closed)",
+    r"pull request (?:([\w.-]+/[\w.-]+))?#(\d+)(?: \([^\n]*\))? (?:was already merged|is already closed)",
     re.I,
 )
-_API_MERGED_RE = re.compile(r'"merged"\s*:\s*true')
 
 
-def pr_outcome(how: str, pr: str, result: str) -> Optional[bool]:
-    """Whether a merge or close named by `how` happened, from its tool result:
-    True only on positive evidence (gh's confirmation naming the PR, or the
-    API's reply), False when gh says it was already merged or closed, else
-    None. gh prints its confirmation only to a terminal, so most real merges
-    come back None; inferring success from the exit status would mean
+def pr_outcome(how: str, pr: str, result: str) -> tuple[Optional[bool], str]:
+    """Whether a merge or close named by `how` happened, from its tool result,
+    and the PR as gh named it. True only on gh's confirmation line naming
+    this PR, False when gh says it was already merged or closed, else None.
+
+    gh prints its confirmation only to a terminal, so most real merges come
+    back None. Inferring success from the exit status would mean
     interpreting the whole shell command (`!`, `||`, subshells), and failure
-    is no better (gh can merge, then fail its local cleanup)."""
-    if how in ("gh pr merge", "gh pr close"):
-        want = "merged" if how == "gh pr merge" else "closed"
-    elif how.startswith("gh api pulls/") and how.endswith("/merge"):
-        return True if _API_MERGED_RE.search(result or "") else None
-    else:
-        return None
-    num = pr.partition("#")[2]
+    is no better (gh can merge, then fail its local cleanup). The API's
+    reply names no PR, so a `gh api` merge stays None too.
+
+    A line naming another repo is about another PR. For a bare `#N`, gh's
+    line names the repo gh actually chose, which is returned in its place."""
+    if how not in ("gh pr merge", "gh pr close"):
+        return None, pr
+    want = "merged" if how == "gh pr merge" else "closed"
+    repo, _, num = pr.partition("#")
     text = result or ""
-    if any(m.group(1).lower() == want and m.group(2) == num for m in _PR_DONE_RE.finditer(text)):
-        return True
+
+    def match(named: Optional[str], n: str) -> Optional[str]:
+        if n != num or (repo and named and named.lower() != repo.lower()):
+            return None
+        return f"{named or repo}#{num}"
+
+    for m in _PR_DONE_RE.finditer(text):
+        hit = m.group(1).lower() == want and match(m.group(2), m.group(3))
+        if hit:
+            return True, hit
     # "already merged" is someone else's merge, not this command's.
-    if any(m.group(1) == num for m in _PR_ALREADY_RE.finditer(text)):
-        return False
-    return None
+    for m in _PR_ALREADY_RE.finditer(text):
+        hit = match(m.group(1), m.group(2))
+        if hit:
+            return False, hit
+    return None, pr
 
 
 def _acted(scan: _Scan) -> list[Acted]:

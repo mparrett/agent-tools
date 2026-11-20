@@ -363,6 +363,35 @@ def test_a_redundant_merge_or_close_is_left_out():
         assert foreign(w, [_merger(S2, f"{cmd} 319 --repo acme/meadow", result)]) == []
 
 
+def test_a_line_about_another_repos_pr_confirms_nothing():
+    w = ws("origin", "gh:acme/meadow#5", "gh:acme/bramble#5")
+    cmd = "gh pr merge 5 --repo acme/meadow; gh pr merge 5 --repo acme/bramble"
+    result = "X Pull request acme/meadow#5 is not mergeable\n" + (
+        "\u2713 Squashed and merged pull request acme/bramble#5 (x)"
+    )
+    got = F.foreign_actions(w, [_merger(S2, cmd, result)], set(), slug_of=SLUGS.get)
+    assert [(c, ln.split()[0]) for c, ln in got] == [
+        (False, "gh:acme/meadow#5:"),
+        (True, "gh:acme/bramble#5"),
+    ]
+
+
+def test_a_confirmed_bare_merge_takes_the_repo_gh_named():
+    # GH_REPO, set-default or an upstream remote can send gh elsewhere than
+    # origin; its own line says where.
+    w = ws("origin", "gh:acme/meadow#5", "gh:acme/bramble#5")
+    line = "\u2713 Squashed and merged pull request acme/bramble#5 (x)"
+    m = _merger(S2, "GH_REPO=acme/bramble gh pr merge 5", line)
+    assert [ln.split()[0] for ln in foreign(w, [m])] == ["gh:acme/bramble#5"]
+
+
+def test_an_api_merge_is_never_confirmed():
+    w = ws("origin", "gh:acme/meadow#319")
+    cmd = "gh api -X PUT repos/acme/meadow/pulls/319/merge || gh api repos/acme/meadow/pulls/318"
+    out = foreign(w, [_merger(S2, cmd, '{"merged":true}')])
+    assert out and not any("was merged" in ln for ln in out)
+
+
 def test_a_clean_exit_is_not_a_confirmation():
     # `!` turns a failed merge into a clean exit; only gh's own line counts.
     w = ws("origin", "gh:acme/meadow#319")
