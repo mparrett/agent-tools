@@ -656,17 +656,17 @@ def test_join_rereads_after_a_concurrent_attach(weft_store, monkeypatch):
     # refuses the stale batch, and join reads again rather than stacking claims.
     a = store.create("race-a", "A")
     b = store.create("race-b", "B")
-    real = store.list_workstreams
+    real = store._held_by
     raced = []
 
-    def stale(**kw):
-        got = real(**kw)
+    def stale(holder):
+        got = real(holder)
         if not raced:
             raced.append(True)
             store.join(a, "claude:j5j5j5j5", canonical=True)
         return got
 
-    monkeypatch.setattr(store, "list_workstreams", stale)
+    monkeypatch.setattr(store, "_held_by", stale)
     got, released = store.join(b, "claude:j5j5j5j5", canonical=True)
     assert [w.id for w in released] == [a.id]
     assert store.get(a.id).canonical_holders() == []
@@ -677,18 +677,28 @@ def test_join_does_not_claim_a_workstream_closed_during_a_retry(weft_store, monk
     # Between join's read and its batch, another session claims the workstream
     # (so the batch conflicts) and then force-closes it. The retry must refuse.
     ws = store.create("closing", "Closing")
-    real = store.list_workstreams
+    real = store._held_by
     raced = []
 
-    def racing(**kw):
-        got = real(**kw)
+    def racing(holder):
+        got = real(holder)
         if not raced:
             raced.append(True)
             store.join(ws, "claude:j7j7j7j7", canonical=True)
             store.close(ws, force=True)
         return got
 
-    monkeypatch.setattr(store, "list_workstreams", racing)
+    monkeypatch.setattr(store, "_held_by", racing)
     with pytest.raises(store.WeftError, match="is closed"):
         store.join(ws, "claude:j7j7j7j7", canonical=True)
     assert store.get(ws.id).canonical_holders() == []
+
+
+def test_join_releases_a_claim_left_on_a_dropped_workstream(weft_store):
+    gone = store.create("dropped-ws", "Dropped")
+    store.join(gone, "claude:j8j8j8j8", canonical=True)
+    _weft("drop", gone.id)
+    here = store.create("next-ws", "Next")
+    got, released = store.join(here, "claude:j8j8j8j8", canonical=True)
+    assert [w.id for w in released] == [gone.id]
+    assert got.canonical_holders() == ["agent:claude:j8j8j8j8"]

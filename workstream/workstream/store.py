@@ -626,6 +626,19 @@ def _membership_ops(
     return ops
 
 
+def _held_by(holder: str) -> list[Workstream]:
+    """Workstreams on which `holder` has a live claim, dropped ones included:
+    weft's `live_on` counts those, and `ls` (so `list_workstreams`) hides them."""
+    out = []
+    for n in _run(["export", "--include", "claims"]).get("nodes") or []:
+        if n.get("ns") != NS or n.get("kind") != "workstream":
+            continue
+        w = _workstream(n, n.get("claims") or [], released=n.get("released_claims") or [])
+        if holder in w.canonical_holders():
+            out.append(w)
+    return out
+
+
 def join(
     ws: Optional[WsArg],
     session_ref: str,
@@ -652,11 +665,7 @@ def join(
     subagents = list(subagents)
     last: Optional[Conflict] = None
     for _ in range(APPLY_RETRIES):
-        held = (
-            [w for w in list_workstreams(include_closed=True) if holder in w.canonical_holders()]
-            if canonical
-            else []
-        )
+        held = _held_by(holder) if canonical else []
         expect: list[dict] = [_scope(holder, (w.id for w in held))] if canonical else []
         if new:
             name, title, anchors = new
