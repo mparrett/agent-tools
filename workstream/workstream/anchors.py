@@ -694,9 +694,13 @@ _GQL_FRAGMENTS = (
 
 def _needs_gh(value: str, now: float) -> tuple[str, str, str] | None:
     """(owner, name, number) when _probe_gh would ask gh about `value`: a
-    well-formed ref with no fresh cache entry and no merged one."""
+    well-formed ref with no fresh cache entry and no merged one. A number
+    GraphQL's Int can't hold is left to the probe: one bad literal fails the
+    whole request."""
     repo, sep, num = value.partition("#")
-    if not sep or repo.count("/") != 1 or not num.isdigit():
+    if not sep or repo.count("/") != 1 or not (num.isascii() and num.isdigit()):
+        return None
+    if not 0 < int(num) <= 2**31 - 1:
         return None
     owner, name = repo.split("/")
     cached = _cache_get(f"{owner}__{name}__{num}", now, any_age=True)
@@ -706,7 +710,7 @@ def _needs_gh(value: str, now: float) -> tuple[str, str, str] | None:
             return None
         if lv.get("kind") == "pr" and lv.get("state") == "MERGED":
             return None
-    return owner, name, num
+    return owner, name, str(int(num))
 
 
 def _batch_gh(values: Iterable[str], ctx: "_Ctx") -> dict[str, dict | None]:
@@ -757,20 +761,27 @@ def _batch_gh(values: Iterable[str], ctx: "_Ctx") -> dict[str, dict | None]:
         if not isinstance(data, dict):
             continue
         errors = doc.get("errors") if isinstance(doc.get("errors"), list) else []
-        not_found = {
-            tuple(e["path"])
+        paths = [
+            tuple(e["path"]) if isinstance(e, dict) and isinstance(e.get("path"), list) else None
             for e in errors
-            if isinstance(e, dict)
-            and e.get("type") == "NOT_FOUND"
-            and isinstance(e.get("path"), list)
+        ]
+        if None in paths:
+            continue  # An error we can't place could touch any lookup.
+        not_found = {
+            pth for e, pth in zip(errors, paths) if e.get("type") == "NOT_FOUND" and len(pth) == 2
         }
         for v, (ra, aa) in where.items():
-            if (
-                (ra, aa) in not_found
-                and isinstance(data.get(ra), dict)
-                and data[ra].get(aa) is None
-            ):
-                out[v] = None
+            touched = [pth for pth in paths if pth[:2] == (ra, aa) or pth == (ra,)]
+            if touched:
+                # Only an exact NOT_FOUND for this lookup is an answer; any
+                # other error on it, its repo, or a field inside it is not.
+                if (
+                    touched == [(ra, aa)]
+                    and (ra, aa) in not_found
+                    and isinstance(data.get(ra), dict)
+                    and data[ra].get(aa) is None
+                ):
+                    out[v] = None
                 continue
             node = (data.get(ra) or {}).get(aa) if isinstance(data.get(ra), dict) else None
             if not isinstance(node, dict):

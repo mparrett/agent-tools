@@ -366,8 +366,8 @@ Missing stores degrade to warnings. Only the hook swallows errors outright.
 
 A gh answer is cached for 10 minutes, and a merged PR's for good. The PRs and
 issues a command needs that the cache can't answer are fetched together, in
-one `gh api graphql` request per 50; one the batch can't resolve is asked
-about on its own, as `gh pr view` then `gh issue view`.
+`gh api graphql` requests of up to `GH_BATCH` lookups each; one the batch
+can't resolve is asked about on its own, as `gh pr view` then `gh issue view`.
 Past the deadline, or when gh fails, an open PR shows its last cached state
 with its age ("open, as of 3h ago"), and one never fetched reads `unknown`.
 

@@ -826,3 +826,42 @@ def test_the_default_runner_keeps_stdout_when_gh_fails(monkeypatch):
     done = subprocess.CompletedProcess([], 1, stdout='{"data": {}}', stderr="gh: oops\n")
     monkeypatch.setattr(anchors.subprocess, "run", lambda *a, **k: done)
     assert anchors._default_gh_runner(["gh"]) == (1, '{"data": {}}gh: oops\n')
+
+
+def test_an_error_inside_a_batched_node_sends_that_lookup_to_its_own_probe():
+    single = FakeGh(pr=PR_JSON)
+    partial = {**GQL_PR, "reviews": None}
+
+    def gh(argv):
+        if argv[1] == "api":
+            return _batch_reply(
+                {"r0": {"a0": partial, "a1": GQL_PR}},
+                [{"type": "FORBIDDEN", "path": ["r0", "a0", "reviews"]}],
+            )
+        return single(argv)
+
+    got = anchors.liveness_many(["gh:acme/w#1", "gh:acme/w#2"], gh_runner=gh, now=1.0)
+    assert [c[3] for c in single.calls] == ["1"]  # #2 came from the batch
+    assert [r["author"] for r in got[0].liveness["reviews"]] == ["rev2", "rev3", "rev4"]
+
+
+def test_an_error_with_no_path_sends_the_whole_batch_to_probes():
+    single = FakeGh(pr=PR_JSON)
+
+    def gh(argv):
+        if argv[1] == "api":
+            return _batch_reply({"r0": {"a0": GQL_PR, "a1": GQL_PR}}, [{"message": "something"}])
+        return single(argv)
+
+    anchors.liveness_many(["gh:acme/w#1", "gh:acme/w#2"], gh_runner=gh, now=1.0)
+    assert [c[3] for c in single.calls] == ["1", "2"]
+
+
+def test_numbers_graphql_cannot_hold_are_left_out_of_the_batch():
+    assert anchors._needs_gh("acme/w#007", 1.0) == ("acme", "w", "7")
+    assert anchors._needs_gh(f"acme/w#{2**31}", 1.0) is None
+    assert anchors._needs_gh("acme/w#0", 1.0) is None
+    assert anchors._needs_gh("acme/w#²", 1.0) is None
+    gh = BatchGh({"acme/w#7": GQL_PR, "acme/w#8": GQL_PR})
+    anchors.liveness_many(["gh:acme/w#007", "gh:acme/w#8"], gh_runner=gh, now=1.0)
+    assert "number: 7)" in gh.calls[0][-1] and "007" not in gh.calls[0][-1]
