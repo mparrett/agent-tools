@@ -1414,8 +1414,27 @@ def facts(sid_or_prefix: str, log=None) -> SessionFacts:
     return sf
 
 
-# Bump when what _overlap_inputs stores, or how it is derived, changes.
+# Bump when what _overlap_inputs stores changes shape.
 OVERLAP_CACHE_VERSION = 1
+_code_stamp: Optional[str] = None
+
+
+def _overlap_code_stamp() -> str:
+    """A hash of the code that derives the cached paths: this module and
+    claude-ls, which supplies derive_work_signals through the seam. An edit to
+    either invalidates the cache without anyone having to remember to."""
+    global _code_stamp
+    if _code_stamp is None:
+        import hashlib
+
+        h = hashlib.sha256()
+        for f in (__file__, seam._cl.__file__):
+            try:
+                h.update(Path(f).read_bytes())
+            except (OSError, TypeError):
+                h.update(b"?")
+        _code_stamp = h.hexdigest()[:16]
+    return _code_stamp
 
 
 def _overlap_cache_dir() -> Path:
@@ -1433,7 +1452,13 @@ def _overlap_inputs(ref: _Ref) -> Optional[tuple[list[str], list[str]]]:
         st = ref.path.stat()
     except OSError:
         return None
-    stamp = [OVERLAP_CACHE_VERSION, str(ref.path), st.st_size, st.st_mtime_ns]
+    stamp = [
+        OVERLAP_CACHE_VERSION,
+        _overlap_code_stamp(),
+        str(ref.path),
+        st.st_size,
+        st.st_mtime_ns,
+    ]
     cache = _overlap_cache_dir() / f"{ref.kind}-{ref.id}.json"
     try:
         got = json.loads(cache.read_text())
@@ -1441,7 +1466,10 @@ def _overlap_inputs(ref: _Ref) -> Optional[tuple[list[str], list[str]]]:
             return list(got["repo_paths"]), list(got["edited"])
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
-    entries = _full_entries(ref.path)
+    try:
+        entries = seam.load_raw_entries(str(ref.path))
+    except OSError:
+        return None  # A failed read is not an empty transcript; don't cache it.
     scan = (
         _scan_codex(entries, None)
         if ref.kind == "codex"
@@ -1472,13 +1500,16 @@ def overlap_facts(sids: Iterable[str]) -> list[SessionFacts]:
         if not hits or len({r.id for r in hits}) > 1:
             continue
         ref = hits[0]
-        got = _overlap_inputs(ref)
-        if got is None:
-            continue
-        repo_paths, edited = got
-        repos: list[str] = []
-        for p in repo_paths:
-            _add_unique(repos, _canonical(p))
+        try:
+            got = _overlap_inputs(ref)
+            if got is None:
+                continue
+            repo_paths, edited = got
+            repos: list[str] = []
+            for p in repo_paths:
+                _add_unique(repos, _canonical(p))
+        except Exception:
+            continue  # One odd transcript must not sink the whole ranking.
         out.append(
             SessionFacts(
                 id=ref.id,

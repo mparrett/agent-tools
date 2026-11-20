@@ -523,7 +523,7 @@ def test_overlap_facts_match_a_full_read_and_are_cached(store, tmp_path, monkeyp
     def boom(path):
         raise AssertionError("an unchanged transcript must not be parsed again")
 
-    monkeypatch.setattr(sessions, "_full_entries", boom)
+    monkeypatch.setattr(sessions.seam, "load_raw_entries", boom)
     again = {f.id: f for f in sessions.overlap_facts(ids)}
     assert again[S_MAIN].repos == got[S_MAIN].repos
 
@@ -567,3 +567,41 @@ def test_overlap_repos_are_resolved_now_not_when_cached(store, tmp_path, monkeyp
     (second,) = sessions.overlap_facts([S_MAIN])
     assert store["beta"] not in second.repos
     assert second.repos == sessions.facts(S_MAIN).repos
+
+
+def test_a_failed_read_is_skipped_and_not_cached(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKSTREAM_CACHE_DIR", str(tmp_path / "cache"))
+    real = sessions.seam.load_raw_entries
+
+    def fail(path):
+        raise PermissionError(path)
+
+    monkeypatch.setattr(sessions.seam, "load_raw_entries", fail)
+    assert sessions.overlap_facts([S_MAIN]) == []
+    monkeypatch.setattr(sessions.seam, "load_raw_entries", real)
+    (got,) = sessions.overlap_facts([S_MAIN])
+    assert got.repos == sessions.facts(S_MAIN).repos
+
+
+def test_one_bad_transcript_does_not_sink_the_rest(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKSTREAM_CACHE_DIR", str(tmp_path / "cache"))
+    real = sessions._scan_claude
+
+    def picky(entries, is_subagent, hint=None):
+        if is_subagent:
+            raise KeyError("odd record")
+        return real(entries, is_subagent, hint)
+
+    monkeypatch.setattr(sessions, "_scan_claude", picky)
+    assert [f.id for f in sessions.overlap_facts([AGENT, S_MAIN])] == [S_MAIN]
+
+
+def test_a_code_change_invalidates_the_overlap_cache(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKSTREAM_CACHE_DIR", str(tmp_path / "cache"))
+    sessions.overlap_facts([S_MAIN])
+    calls = []
+    real = sessions.seam.load_raw_entries
+    monkeypatch.setattr(sessions.seam, "load_raw_entries", lambda p: calls.append(p) or real(p))
+    monkeypatch.setattr(sessions, "_code_stamp", "a-different-build")
+    sessions.overlap_facts([S_MAIN])
+    assert len(calls) == 1
