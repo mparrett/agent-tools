@@ -572,6 +572,34 @@ def test_git_answers_repeat_only_inside_a_cli_run(monkeypatch):
     assert len(calls) == 5  # a timeout is asked again
 
 
+def test_full_ref_names_are_answered_from_one_listing_in_a_run(tmp_path, monkeypatch):
+    import subprocess
+
+    repo = tmp_path / "r"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+         "commit", "-q", "--allow-empty", "-m", "x"],
+        check=True,
+    )  # fmt: skip
+    asks = [
+        "refs/heads/main",
+        "refs/heads/nope",
+        "refs/remotes/origin/main",
+        "refs/heads/refs/notes/x",
+        "HEAD",
+    ]
+    want = {r: anchors._ref_exists(str(repo), r) for r in asks}
+    assert want["refs/heads/main"] and want["HEAD"] and not want["refs/heads/nope"]
+    calls = []
+    real = anchors._run
+    monkeypatch.setattr(anchors, "_run", lambda argv, cwd=None: calls.append(argv) or real(argv))
+    monkeypatch.setattr(anchors, "_git_memo", {})
+    assert {r: anchors._ref_exists(str(repo), r) for r in asks} == want
+    # One listing for the four full names; HEAD still asks rev-parse.
+    assert [a[3] for a in calls] == ["for-each-ref", "rev-parse"]
+
+
 def _seed(key, fetched_at, **liveness):
     anchors._cache_put(key, fetched_at, {"liveness": {"kind": "pr", **liveness}})
 
