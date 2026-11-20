@@ -21,14 +21,22 @@ const INITIAL: WorkstreamView = { attached: null, frontiers: [], error: null, is
 // Change the tag when WorkstreamView's fields change: a value outlives a reload.
 const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-3' })
 // The pane's foldable parts of each workstream, and whether each starts open:
-// the sections do; the agent-facing instructions behind `how` do not.
-const FOLDS = { ws: true, how: false, loose: true, anchors: true, sessions: true } as const
+// the sections do, save loose ends, a list that only grows and is read on
+// purpose; the agent-facing instructions behind `how` do not.
+const FOLDS = { ws: true, how: false, loose: false, anchors: true, sessions: true } as const
 type Fold = keyof typeof FOLDS
 // Theme colors for telling workstreams apart once some are folded; each keeps
 // its own (colorSlots), and its next-step line is drawn in it too.
 const WS_COLORS = ['claude', 'suggestion', 'merged', 'planMode', 'ide', 'remember'] as const
-// `${workstream id}:${fold}` for each fold flipped from its default.
-const flipped = atom({ plugin: 'workstream', key: 'flipped' } as const, [] as string[], { shape: 'flipped-1' })
+// `${workstream id}:${fold}` for each fold flipped from its default. The tag
+// changes with FOLDS' defaults, since a flip stored against an old default
+// would now mean the opposite.
+const flipped = atom({ plugin: 'workstream', key: 'flipped' } as const, [] as string[], { shape: 'flipped-2' })
+// The pane folded to its header and a line a workstream, by its [-] button.
+const minimized = atom({ plugin: 'workstream', key: 'minimized' } as const, false)
+// Minimized, a line each for this many workstreams, then a count of the rest;
+// a count of one would take the row its line needs, so one more is drawn instead.
+const MINIMIZED_ROWS = 2
 
 // Where the badge goes, from the `badge` option. Options are fixed for an
 // activation; a change reloads the plugin and runs `register` again.
@@ -196,6 +204,7 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const v = await read($, view)
     const flips = await read($, flipped)
+    const isMin = await read($, minimized)
     const isOpen = (id: string, fold: Fold) => FOLDS[fold] !== flips.includes(`${id}:${fold}`)
     const toggle = async (id: string, fold: Fold) => {
       const k = `${id}:${fold}`
@@ -224,7 +233,13 @@ export const register: Register = (on, options) => {
     const header = (
       <Box flexDirection="row" justifyContent="space-between">
         <Text dimColor>{v.isLoading ? 'refreshing…' : asOfLabel(v.frontiers[0]?.asOf ?? null)}</Text>
-        <Button key="refresh" label="refresh" onPress={() => kick($, true)} />
+        <Box flexDirection="row">
+          <Button key="refresh" label="refresh" onPress={() => kick($, true)} />
+          <Text> </Text>
+          <Button plain key="size" label={isMin ? 'Restore' : 'Minimize'} onPress={() => update($, minimized, m => !m)}>
+            <Text dimColor>{isMin ? '[+]' : '[-]'}</Text>
+          </Button>
+        </Box>
       </Box>
     )
     if (v.error) {
@@ -256,6 +271,35 @@ export const register: Register = (on, options) => {
       v.frontiers.map(f => f.id),
       WS_COLORS.length,
     )
+    if (isMin) {
+      const shown = v.frontiers.length <= MINIMIZED_ROWS + 1 ? v.frontiers.length : MINIMIZED_ROWS
+      const rest = v.frontiers.length - shown
+      return (
+        <Box flexDirection="column">
+          {header}
+          {v.frontiers.slice(0, shown).map((f, i) => {
+            const color = WS_COLORS[slots.get(f.id) ?? i % WS_COLORS.length] ?? 'claude'
+            return (
+              <Text key={f.id} wrap="truncate-end">
+                <Text color={color}>◆ </Text>
+                <Text color={color} weight="semibold">
+                  {f.name}
+                </Text>
+                <Text dimColor> [{f.state}]</Text>
+                {f.next ? (
+                  <Text color={color}>
+                    {' '}
+                    next: {f.next.action}
+                    {f.next.session ? ` ${f.next.session}` : ''}
+                  </Text>
+                ) : null}
+              </Text>
+            )
+          })}
+          {rest > 0 ? <Text dimColor>+{rest} more</Text> : null}
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column">
         {header}
