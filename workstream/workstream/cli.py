@@ -834,7 +834,11 @@ def cmd_retire(args) -> int:
     # Closed workstreams too: a session attached to one still needs its frontier recorded.
     wss = store.list_workstreams(include_closed=True)
     done = []
-    for raw in args.sid:
+    history = wss
+    for n, raw in enumerate(args.sid):
+        if n:
+            # The previous session's detaches released claims `wss` still shows held.
+            history = store.list_workstreams(include_closed=True)
         sid = sessions.resolve(raw)
         me = sessions.facts(sid, log=log)
         mine = [ws for ws in wss if any(r.endswith(sid) or r.endswith(me.ref) for r in ws.refs)]
@@ -854,7 +858,10 @@ def cmd_retire(args) -> int:
         nodes = store.export_nodes()
         for listed in mine:
             ws = store.get(f"ws:{listed.name}" if listed.name else listed.id, nodes)
-            fr = frontier.build(ws, log=log, recent=recent, history=mine)
+            # Every workstream, not just this session's: the capture covers
+            # each member, and a member's window starts where its previous
+            # claim, wherever it was, ended (store.session_windows).
+            fr = frontier.build(ws, log=log, recent=recent, history=history)
             path = frontier.capture(fr, slug=args.slug, recorded_by=frontier.BY_RETIRE)
             store.detach(ws, me.ref)
             caps.append(
@@ -1048,11 +1055,8 @@ def _session_end(sid: str) -> dict:
     skipped: list[dict] = []
     out = {"session": sid, "recorded": recorded, "skipped": skipped}
     # Closed workstreams too, as retire does: their sessions still need a capture.
-    mine = [
-        ws
-        for ws in store.list_workstreams(include_closed=True)
-        if any(r.endswith(sid) for r in ws.refs)
-    ]
+    everything = store.list_workstreams(include_closed=True)
+    mine = [ws for ws in everything if any(r.endswith(sid) for r in ws.refs)]
     if not mine:
         return out
     # The canonical workstream first: if the budget runs out, it is the one
@@ -1087,8 +1091,9 @@ def _session_end(sid: str) -> dict:
                 continue
             # `ls` leaves tasks empty; the capture should carry them.
             ws = store.get(f"ws:{listed.name}" if listed.name else listed.id, nodes)
-            # `mine` holds every claim this session made: all the windows need.
-            fr = frontier.build(ws, log=log, recent=(), gh_cache_only=True, history=mine)
+            # Every workstream: each member's window starts where its previous
+            # claim ended, and that claim may be on one this session never joined.
+            fr = frontier.build(ws, log=log, recent=(), gh_cache_only=True, history=everything)
             recorded.append(str(frontier.capture(fr, recorded_by=frontier.BY_SESSION_END)))
             slowest = max(slowest, time.monotonic() - started)
         except Exception as e:  # one workstream's failure must not cost the others theirs

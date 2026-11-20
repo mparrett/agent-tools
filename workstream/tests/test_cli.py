@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from workstream import cli, seam, store, timeline
+from workstream import cli, frontier, seam, store, timeline
 
 TESTS = Path(__file__).resolve().parent
 
@@ -1266,3 +1266,52 @@ def test_frontier_marks_a_session_the_hook_log_saw_start_as_a_fork(env, capsys):
     assert code == 0, err
     [row] = [ln for ln in out.splitlines() if ln.strip().startswith(target["ref"])]
     assert "⑂ fork" in row
+
+
+def _spy_history(monkeypatch) -> dict:
+    """The history each frontier.build call is given, by workstream name."""
+    seen: dict = {}
+    real = frontier.build
+
+    def build(ws, *a, **kw):
+        seen[ws.name] = (ws, list(kw.get("history") or ()))
+        return real(ws, *a, **kw)
+
+    monkeypatch.setattr(frontier, "build", build)
+    return seen
+
+
+def _member_with_an_earlier_claim_elsewhere(env, capsys):
+    """`fresh` claims `elsewhere`, then moves its claim to `default-track`,
+    which `first` (the session being retired or ended) also holds."""
+    fresh = env["fresh"]
+    args = ["attach", "--new", "Elsewhere", "--name", "elsewhere", "--session", fresh.id]
+    assert run(capsys, *args)[0] == 0
+    assert run(capsys, "attach", "default-track", "--session", fresh.id)[0] == 0
+    return fresh
+
+
+def _assert_window_starts_after_the_earlier_claim(seen, fresh):
+    # Without `elsewhere` in history, fresh's window on default-track has no
+    # earlier claim to start after, so it reaches back to fresh's first line.
+    ws, history = seen["default-track"]
+    assert "elsewhere" in {w.name for w in history}
+    [(start, _)] = store.session_windows(fresh.ref, ws, history)
+    assert start is not None
+    assert store.session_windows(fresh.ref, ws, [])[0][0] is None
+
+
+@needs_weft
+def test_retire_bounds_other_members_by_their_claims_elsewhere(env, capsys, monkeypatch):
+    fresh = _member_with_an_earlier_claim_elsewhere(env, capsys)
+    seen = _spy_history(monkeypatch)
+    run_json(capsys, "retire", env["sessions"]["first"].id[:8], "--slug", "x")
+    _assert_window_starts_after_the_earlier_claim(seen, fresh)
+
+
+@needs_weft
+def test_session_end_bounds_other_members_by_their_claims_elsewhere(env, capsys, monkeypatch):
+    fresh = _member_with_an_earlier_claim_elsewhere(env, capsys)
+    seen = _spy_history(monkeypatch)
+    end_hook(capsys, monkeypatch, env["sessions"]["first"].id)
+    _assert_window_starts_after_the_earlier_claim(seen, fresh)
