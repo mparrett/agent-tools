@@ -152,7 +152,7 @@ test('an attached session gets the badge and a pane with its frontier', async ($
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ type: 'Text', text: /no recorded frontier/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /gh:o\/r#7/ })).toBeDefined()
     await ui.unmount()
   }
@@ -167,7 +167,13 @@ test('an attached session gets the badge and a pane with its frontier', async ($
   await ui.press({ key: 'how:abc123def4567890' })
   expect(await ui.find({ type: 'Text', text: /SendMessage to/ })).toBeUndefined()
 
-  // Sections start open; a header folds its rows down to a count and back.
+  // Loose ends start folded to a count; a press opens them.
+  expect((await ui.find({ key: 'loose:abc123def4567890' }))?.text).toBe('▸ loose ends (1)')
+  expect(await ui.find({ type: 'Text', text: /no recorded frontier/ })).toBeUndefined()
+  await ui.press({ key: 'loose:abc123def4567890' })
+  expect(await ui.find({ type: 'Text', text: /no recorded frontier/ })).toBeDefined()
+
+  // The other sections start open; a header folds its rows down to a count and back.
   expect(await ui.find({ type: 'Text', text: /gh:o\/r#7/ })).toBeDefined()
   await ui.press({ key: 'anchors:abc123def4567890' })
   expect(await ui.find({ type: 'Text', text: /gh:o\/r#7/ })).toBeUndefined()
@@ -184,6 +190,16 @@ test('an attached session gets the badge and a pane with its frontier', async ($
   expect(await ui.find({ type: 'Text', text: /no recorded frontier/ })).toBeUndefined()
   await ui.press({ key: 'ws:abc123def4567890' })
   expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeDefined()
+
+  // [-] folds the pane to its header and a line a workstream; [+] unfolds it.
+  await ui.press({ key: 'size' })
+  expect(await ui.find({ type: 'Text', text: /^◆ demo \[open\] next: message 5d5c9a2e/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeUndefined()
+  expect(await ui.find({ key: 'ws:abc123def4567890' })).toBeUndefined()
+  expect((await ui.find({ key: 'size' }))?.text).toBe('[+]')
+  await ui.press({ key: 'size' })
+  expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeDefined()
+  expect((await ui.find({ key: 'size' }))?.text).toBe('[-]')
   await ui.unmount()
 })
 

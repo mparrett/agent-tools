@@ -27,6 +27,6 @@ export type WorkstreamView = {
 
 declare module 'claude-code' {
   interface PluginState {
-    workstream: { view: Shaped<WorkstreamView>; flipped: Shaped<string[]> }
+    workstream: { view: Shaped<WorkstreamView>; flipped: Shaped<string[]>; minimized: boolean }
   }
 }
