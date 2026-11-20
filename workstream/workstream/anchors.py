@@ -424,10 +424,11 @@ def _merged_prs_by_head(repo: str, branch: str, ctx: _Ctx, a: Anchor) -> list[di
     list is an answer and is cached; None (gh failed) is not."""
     now = ctx.now() if callable(ctx.now) else ctx.now
     key = re.sub(r"[^\w.-]", "_", f"head__{repo}__{branch}")
-    cached = _cache_get(key, now, any_age=ctx.gh_cache_only)
+    late = _past_deadline()
+    cached = _cache_get(key, now, any_age=ctx.gh_cache_only or late)
     if cached is not None and isinstance(cached.get("rows"), list):
         return cached["rows"]
-    if ctx.gh_cache_only:
+    if ctx.gh_cache_only or late:
         return None
     rc, out = ctx.gh_runner(
         [
@@ -482,12 +483,24 @@ def _default_gh_runner(argv: list[str]) -> tuple[int, str]:
 # gh's answer when a number names an issue, not a PR (they share a number space).
 _NOT_A_PR = "Could not resolve to a PullRequest"
 
-# Set by the CLI for one invocation: the monotonic time after which gh is not
-# called. A slow network then costs at most this long, and an anchor it
-# didn't reach reads "not probed" (or its cached state, with its age), never
-# as gone.
-_gh_deadline: float | None = None
+# Set by the CLI for one invocation: how many seconds of gh it may spend,
+# counted from its first gh call (reading transcripts first must not use it
+# up). A slow network then costs at most this long, and an anchor it didn't
+# reach reads its cached state with its age, or unknown, never gone.
+_gh_budget: float | None = None
+_gh_started: float | None = None
 SETTLED_STATES = ("MERGED", "CLOSED")
+
+
+def _past_deadline() -> bool:
+    """Whether the gh budget is spent; the first call to ask starts it."""
+    global _gh_started
+    if _gh_budget is None:
+        return False
+    now = time.monotonic()
+    if _gh_started is None:
+        _gh_started = now
+    return now - _gh_started > _gh_budget
 
 
 def gh_cache_dir() -> Path:
@@ -586,7 +599,7 @@ def _probe_gh(
         if fresh or state in SETTLED_STATES or cache_only:
             _use_cached(a, cached)
             return
-    if cache_only or (_gh_deadline is not None and time.monotonic() > _gh_deadline):
+    if cache_only or _past_deadline():
         if cached is not None:
             # An open PR past the TTL: its last known state, with its age.
             _use_cached(a, cached)

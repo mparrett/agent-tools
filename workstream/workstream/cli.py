@@ -1328,7 +1328,8 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-# Seconds a command may spend asking GitHub, across every anchor it probes.
+# Seconds a command may spend asking GitHub, across every anchor it probes,
+# counted from its first gh call.
 # Past it, a PR reads from the cache (open ones with their age) or "not probed".
 PROBE_DEADLINE = 8.0
 
@@ -1349,7 +1350,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     frontier._history_cache = {}
     sessions._snapshot = {}
     anchors._git_memo = {}
-    anchors._gh_deadline = time.monotonic() + _probe_deadline()
+    anchors._gh_budget, anchors._gh_started = _probe_deadline(), None
     try:
         return args.fn(args)
     except (store.NotFound, sessions.NotFound) as e:
@@ -1365,7 +1366,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         frontier._history_cache = None
         sessions._snapshot = None
         anchors._git_memo = None
-        anchors._gh_deadline = None
+        anchors._gh_budget = anchors._gh_started = None
 
 
 if __name__ == "__main__":

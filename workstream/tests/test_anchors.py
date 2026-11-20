@@ -609,7 +609,8 @@ def test_a_network_error_does_not_ask_for_an_issue():
 
 
 def test_past_the_deadline_gh_is_not_called(tmp_path, monkeypatch):
-    monkeypatch.setattr(anchors, "_gh_deadline", 0.0)
+    monkeypatch.setattr(anchors, "_gh_budget", 0.0)
+    monkeypatch.setattr(anchors, "_gh_started", 0.0)
     gh = FakeGh(pr=PR_JSON)
     a = liveness("gh:acme/widget#34", gh_runner=gh, now=1.0)
     assert gh.calls == [] and a.liveness["not_probed"] == "probe deadline passed"
@@ -617,3 +618,24 @@ def test_past_the_deadline_gh_is_not_called(tmp_path, monkeypatch):
     _seed("acme__widget__35", 1.0, state="OPEN")
     b = liveness("gh:acme/widget#35", gh_runner=gh, now=1_000_000.0)
     assert gh.calls == [] and b.liveness["state"] == "OPEN" and b.liveness["cached"] is True
+
+
+def test_past_the_deadline_merged_prs_are_not_looked_up(monkeypatch):
+    monkeypatch.setattr(anchors, "_gh_budget", 0.0)
+    monkeypatch.setattr(anchors, "_gh_started", 0.0)
+    gh = FakeGh(pr=PR_JSON)
+    ctx = anchors._Ctx(None, gh, 1.0, [])
+    a = anchors.Anchor("branch:x@y", "branch", "x@y")
+    assert anchors._merged_prs_by_head("acme/widget", "feat/y", ctx, a) is None
+    assert gh.calls == []
+
+
+def test_the_gh_budget_starts_at_the_first_gh_call(monkeypatch):
+    # Time spent before any gh call (reading transcripts) must not use it up.
+    monkeypatch.setattr(anchors, "_gh_budget", 5.0)
+    monkeypatch.setattr(anchors, "_gh_started", None)
+    clock = iter([1000.0, 1004.0, 1006.0])
+    monkeypatch.setattr(anchors.time, "monotonic", lambda: next(clock))
+    assert anchors._past_deadline() is False  # starts the budget at 1000
+    assert anchors._past_deadline() is False
+    assert anchors._past_deadline() is True
