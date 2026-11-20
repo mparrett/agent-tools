@@ -109,13 +109,16 @@ def _ref_exists(path: str, ref: str) -> bool:
     """Whether `ref` resolves in the repo at `path`. A full name (refs/...)
     is looked up in one listing of the repo's refs, shared through the memo:
     timeline checks main and each anchor's branch, local and at origin, in
-    every repo, and one rev-parse apiece was nearly half its git calls."""
+    every repo, and one rev-parse apiece was nearly half its git calls (as
+    of 2026-11-20)."""
     memo = _git_memo
     if ref.startswith("refs/") and memo is not None:
         key = ("refs", path)
-        if key not in memo:
-            memo[key] = _git(path, "for-each-ref", "--format=%(refname)")
-        rc, refs = memo[key]
+        got = memo.get(key) or _git(path, "for-each-ref", "--format=%(refname)")
+        # As in _git: a timeout or missing git is worth asking again.
+        if got[0] not in (124, 127):
+            memo[key] = got
+        rc, refs = got
         if rc == 0:
             if not isinstance(refs, frozenset):
                 refs = frozenset(refs.splitlines())
