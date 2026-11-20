@@ -594,6 +594,20 @@ def _add_unique(seq: list, item) -> None:
         seq.append(item)
 
 
+def _repo_paths(scan: _Scan, edited_paths: Iterable[str]) -> list[str]:
+    """Paths whose repos the session acted in, in the order they are resolved:
+    edited files, then paths its commands named. Resolving them to repos reads
+    the filesystem, so this is the part that can be cached per transcript."""
+    out: list[str] = []
+    for fp in edited_paths:
+        _add_unique(out, fp)
+    for t in scan.tools:
+        if t.command:
+            for p in _command_paths(t.command, t.cwd):
+                _add_unique(out, p)
+    return out
+
+
 def _locations(
     scan: _Scan, edited_paths: Iterable[str]
 ) -> tuple[list[str], list[str], list[tuple[str, Optional[Instant], str]], dict[str, str]]:
@@ -617,13 +631,11 @@ def _locations(
         if path and isinstance(branch, str) and valid_branch(branch):
             branches.setdefault(path, branch)
 
-    for fp in edited_paths:
-        _add_unique(repos, _canonical(fp))
+    for p in _repo_paths(scan, edited_paths):
+        _add_unique(repos, _canonical(p))
     for t in scan.tools:
         result, extra = scan.results.get(t.call_id, ("", {}))
         if t.command:
-            for p in _command_paths(t.command, t.cwd):
-                _add_unique(repos, _canonical(p))
             for m in _GH_REPO_RE.finditer(t.command):
                 _add_unique(gh_repos, m.group(1))
             for m in _WT_ADD_RE.finditer(t.command):
@@ -1400,6 +1412,114 @@ def facts(sid_or_prefix: str, log=None) -> SessionFacts:
                     mains.append((f.stem, *_first_prompt_and_start(f)))
             sf.fork_siblings = _fork_groups(mains).get(ref.id, [])
     return sf
+
+
+# Bump when what _overlap_inputs stores changes shape.
+OVERLAP_CACHE_VERSION = 1
+_code_stamp: Optional[str] = None
+
+
+def _overlap_code_stamp() -> str:
+    """A hash of the code that derives the cached paths: this module and
+    claude-ls, which supplies derive_work_signals through the seam. An edit to
+    either invalidates the cache without anyone having to remember to."""
+    global _code_stamp
+    if _code_stamp is None:
+        import hashlib
+
+        h = hashlib.sha256()
+        for f in (__file__, seam._cl.__file__):
+            try:
+                h.update(Path(f).read_bytes())
+            except (OSError, TypeError):
+                h.update(b"?")
+        _code_stamp = h.hexdigest()[:16]
+    return _code_stamp
+
+
+def _overlap_cache_dir() -> Path:
+    from .anchors import gh_cache_dir
+
+    return gh_cache_dir().parent / "overlap"
+
+
+def _overlap_inputs(ref: _Ref) -> Optional[tuple[list[str], list[str]]]:
+    """(repo paths, edited paths) for one transcript, cached on its path, size
+    and mtime: a finished session's transcript never changes, so after the
+    first read this costs a stat. Repos are resolved by the caller, since a
+    path's repo depends on what exists on disk now."""
+    try:
+        st = ref.path.stat()
+    except OSError:
+        return None
+    stamp = [
+        OVERLAP_CACHE_VERSION,
+        _overlap_code_stamp(),
+        str(ref.path),
+        st.st_size,
+        st.st_mtime_ns,
+    ]
+    cache = _overlap_cache_dir() / f"{ref.kind}-{ref.id}.json"
+    try:
+        got = json.loads(cache.read_text())
+        if got.get("stamp") == stamp:
+            return list(got["repo_paths"]), list(got["edited"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    try:
+        entries = seam.load_raw_entries(str(ref.path))
+    except OSError:
+        return None  # A failed read is not an empty transcript; don't cache it.
+    scan = (
+        _scan_codex(entries, None)
+        if ref.kind == "codex"
+        else _scan_claude(entries, ref.kind == "subagent", None)
+    )
+    edited = list(seam.derive_work_signals(entries).edited_paths)
+    repo_paths = _repo_paths(scan, edited)
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"stamp": stamp, "repo_paths": repo_paths, "edited": edited}))
+        os.replace(tmp, cache)
+    except OSError:
+        pass  # A cache that can't be written costs speed, not answers.
+    return repo_paths, edited
+
+
+def overlap_facts(sids: Iterable[str]) -> list[SessionFacts]:
+    """Just the facts attribution's overlap signals read from other sessions:
+    the repos each acted in and the files it edited, as `facts` would give
+    them, with every other field empty. Ids that don't resolve are skipped.
+    The store is listed once for the lot: resolving each id on its own walks
+    every transcript directory per id."""
+    refs = _all_refs()
+    out: list[SessionFacts] = []
+    for sid in sids:
+        hits = _match(sid, refs)
+        if not hits or len({r.id for r in hits}) > 1:
+            continue
+        ref = hits[0]
+        try:
+            got = _overlap_inputs(ref)
+            if got is None:
+                continue
+            repo_paths, edited = got
+            repos: list[str] = []
+            for p in repo_paths:
+                _add_unique(repos, _canonical(p))
+        except Exception:
+            continue  # One odd transcript must not sink the whole ranking.
+        out.append(
+            SessionFacts(
+                id=ref.id,
+                kind=ref.kind,
+                path=str(ref.path),
+                repos=repos,
+                work=seam.WorkSignals(edited_paths=edited),
+            )
+        )
+    return out
 
 
 def _since_epoch(since) -> Optional[float]:

@@ -368,6 +368,13 @@ A gh answer is cached for 10 minutes, and a merged PR's for good.
 Past the deadline, or when gh fails, an open PR shows its last cached state
 with its age ("open, as of 3h ago"), and one never fetched reads `unknown`.
 
+`match` compares a session with every session attached anywhere, by the repos
+they acted in and the files they edited. Those come from each transcript and
+are cached beside the gh cache (`overlap/`), keyed on the transcript's path,
+size and mtime, so only a session that has grown since is read again. Repos
+are resolved from the cached paths on every run, so a deleted worktree drops
+out as it would from a full read.
+
 ## Known limits (v1)
 
 - Pulse claims are not read. Ownership comes from workstream membership only.
