@@ -42,6 +42,9 @@ class Found:
     session: str
     how: list[str] = field(default_factory=list)
     at: Optional[Instant] = None
+    # The latest write, where `at` is the first: a removal is weighed against
+    # the newest work on the ref, not the oldest.
+    last_at: Optional[Instant] = None
     # Set when the evidence could not become a ref (repo unknown, worktree
     # gone, a mention in a repo the session never wrote to).
     unusable: str = ""
@@ -189,6 +192,8 @@ def evidence(
         if f is None:
             f = by_ref[ref] = Found(ref, sf.ref, at=at, unusable=unusable)
             order.append(ref)
+        if at is not None and (f.last_at is None or at.utc > f.last_at.utc):
+            f.last_at = at
         if how not in f.how:
             f.how.append(how)
 
@@ -334,7 +339,7 @@ def run(
         for r in _anchor_refs(ws):
             held.setdefault(r, _label(ws))
     have = {ws.id: _anchor_refs(ws) for ws in targets}
-    removed = {ws.id: store.removed_refs(ws) for ws in targets}
+    removed = store.removed_refs_many(targets)
 
     pairs = []
     for ws in targets:
@@ -384,10 +389,16 @@ def run(
                 reason = f.unusable
             elif canon in have[ws.id]:
                 reason = "already an anchor"
-            elif canon in removed[ws.id] and (f.at is None or f.at.utc <= removed[ws.id][canon]):
+            elif canon in removed[ws.id] and (
+                f.last_at is None or f.last_at.utc <= removed[ws.id][canon]
+            ):
                 # Someone took it off after this evidence; newer work on it
-                # is a new fact and still adds it.
-                reason = f"removed {removed[ws.id][canon]:%Y-%m-%d}, after this evidence"
+                # is a new fact and still adds it. Evidence with no time
+                # can't be shown newer, so it doesn't override a removal.
+                gone = f"removed {removed[ws.id][canon]:%Y-%m-%d}"
+                reason = (
+                    f"{gone}, after this evidence" if f.last_at else f"{gone}; evidence has no time"
+                )
             elif (label, canon) in exclude:
                 reason = "declined"
             elif canon in held and held[canon] != label:
