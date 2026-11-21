@@ -26,7 +26,7 @@ _spec.loader.exec_module(cc)
 
 FAKE_CLAUDE = """#!/usr/bin/env python3
 import os, sys
-if os.environ.get("FAKE_FAIL"):
+if os.environ.get("FAKE_FAIL") or ("--all" in sys.argv and os.environ.get("FAKE_FAIL_ALL")):
     sys.exit(1)
 which = "FAKE_ALL" if "--all" in sys.argv else "FAKE_LIVE"
 print(open(os.environ[which]).read())
@@ -237,13 +237,55 @@ def test_rotated_logs_are_read_too(fake):
     assert {r["id"] for r in fake.rows()} == {"aaaa0000", "bbbb0000"}
 
 
-def test_failed_listing_warns_but_still_lists(fake, monkeypatch, capsys):
+def test_failed_listings_warn_but_still_list(fake, monkeypatch, capsys):
     fake.log(log_line(5, "settled cccc0000 (killed)"))
     fake.transcript("cccc0000", {"type": "custom-title", "customTitle": "t"})
     monkeypatch.setenv("FAKE_FAIL", "1")
     out = fake.out()
     assert "claude --bg --resume" in out
+    err = capsys.readouterr().err
+    assert "may be listed too" in err
+    assert "removed from the list is unknown" in err
+
+
+def test_failed_full_listing_leaves_removed_unknown(fake, monkeypatch, capsys):
+    """Not every session gets marked removed just because --all couldn't be read."""
+    fake.log(log_line(5, "settled cccc0000 (killed)"))
+    fake.transcript("cccc0000", {"type": "custom-title", "customTitle": "t"})
+    fake.sessions(closed_rows=[bg("cccc0000", live=False)])
+    monkeypatch.setenv("FAKE_FAIL_ALL", "1")
+    [row] = fake.rows()
+    assert row["removed"] is None
+    assert "removed from list" not in fake.out()
+
+
+def test_json_output_still_warns_on_stderr(fake, monkeypatch, capsys):
+    fake.log(log_line(5, "settled cccc0000 (killed)"))
+    fake.transcript("cccc0000", {"type": "custom-title", "customTitle": "t"})
+    monkeypatch.setenv("FAKE_FAIL", "1")
+    rows = fake.rows()  # stdout must still parse as JSON
+    assert rows[0]["id"] == "cccc0000"
     assert "may be listed too" in capsys.readouterr().err
+
+
+def test_transcript_removed_mid_run_is_skipped(fake, monkeypatch):
+    fake.transcript("cccc0000", {"type": "custom-title", "customTitle": "t"})
+    real_glob = Path.glob
+
+    def glob_then_vanish(self, pattern):
+        hits = list(real_glob(self, pattern))
+        for h in hits:
+            h.unlink()
+        return iter(hits)
+
+    monkeypatch.setattr(Path, "glob", glob_then_vanish)
+    assert cc.transcript_meta("cccc0000") is None
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "x"])
+def test_limit_must_be_positive(bad):
+    with pytest.raises(SystemExit):
+        cc.parse_args(["-n", bad])
 
 
 def test_nothing_closed(fake):

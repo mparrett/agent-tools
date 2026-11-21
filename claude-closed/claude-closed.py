@@ -119,12 +119,13 @@ def run_json(cmd):
 
 def transcript_meta(short_id):
     """sessionId, cwd and title for a session, from its transcript, or None."""
-    paths = sorted(
-        (CLAUDE_DIR / "projects").glob(f"*/{short_id}-*.jsonl"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    for path in paths:
+    found = []
+    for path in (CLAUDE_DIR / "projects").glob(f"*/{short_id}-*.jsonl"):
+        try:
+            found.append((path.stat().st_mtime, path))
+        except OSError:
+            continue  # removed since the glob matched
+    for _, path in sorted(found, reverse=True):
         meta = {"sessionId": path.stem, "cwd": None, "name": None}
         agent_name = None
         try:
@@ -171,9 +172,9 @@ def tilde(path):
 def closed_sessions(now, since):
     events = read_log_events(sorted(CLAUDE_DIR.glob("daemon.log*")))
     live = run_json(["claude", "agents", "--json"])
-    listed = run_json(["claude", "agents", "--json", "--all"]) or []
+    listed = run_json(["claude", "agents", "--json", "--all"])
     live_ids = {r["id"] for r in (live or []) if r.get("kind") == "background"}
-    by_id = {r["id"]: r for r in listed if r.get("kind") == "background"}
+    by_id = {r["id"]: r for r in (listed or []) if r.get("kind") == "background"}
 
     rows = []
     for short, evs in events.items():
@@ -199,12 +200,23 @@ def closed_sessions(now, since):
                 "why": why,
                 "idle": idle,
                 # ctrl+x twice removes it from `claude agents`; it is still resumable.
-                "removed": row is None,
+                # Unknown (None) when the full listing couldn't be read.
+                "removed": None if listed is None else row is None,
                 "_when": when,
             }
         )
     rows.sort(key=lambda r: r["_when"], reverse=True)
-    return rows, live is None
+    problems = []
+    if live is None:
+        problems.append(
+            "`claude agents --json` failed, so sessions running again may be listed too"
+        )
+    if listed is None:
+        problems.append(
+            "`claude agents --json --all` failed, so whether each session was removed "
+            "from the list is unknown"
+        )
+    return rows, problems
 
 
 def duration(text):
@@ -213,6 +225,16 @@ def duration(text):
         raise argparse.ArgumentTypeError(f"expected e.g. 30m, 6h or 3d, not {text!r}")
     n, unit = int(m[1]), m[2]
     return timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[unit]: n})
+
+
+def positive(text):
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive count, not {text!r}")
+    return n
 
 
 def parse_args(argv=None):
@@ -234,7 +256,9 @@ def parse_args(argv=None):
         help="only sessions someone stopped (ctrl+x, `claude stop`), not ones that "
         "retired, exited or crashed",
     )
-    p.add_argument("-n", "--limit", type=int, default=20, help="most rows to show (default 20)")
+    p.add_argument(
+        "-n", "--limit", type=positive, default=20, help="most rows to show (default 20)"
+    )
     p.add_argument("--json", action="store_true", help="emit the rows as JSON")
     return p.parse_args(argv)
 
@@ -242,7 +266,10 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     now = datetime.now(timezone.utc)
-    rows, live_unknown = closed_sessions(now, args.since)
+    rows, problems = closed_sessions(now, args.since)
+    # stderr, so --json output stays parseable while a script still sees the caveat.
+    for problem in problems:
+        print(f"claude-closed: {problem}", file=sys.stderr)
     if args.stopped:
         rows = [r for r in rows if r["how"] == "stopped"]
     rows = rows[: args.limit]
@@ -250,12 +277,6 @@ def main(argv=None):
     if args.json:
         print(json.dumps([{k: v for k, v in r.items() if k != "_when"} for r in rows], indent=2))
         return 0
-    if live_unknown:
-        print(
-            "claude-closed: `claude agents --json` failed, so sessions running again "
-            "may be listed too",
-            file=sys.stderr,
-        )
     if not rows:
         print("no background sessions closed in that window")
         return 0
