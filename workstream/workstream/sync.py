@@ -334,6 +334,7 @@ def run(
         for r in _anchor_refs(ws):
             held.setdefault(r, _label(ws))
     have = {ws.id: _anchor_refs(ws) for ws in targets}
+    removed = {ws.id: store.removed_refs(ws) for ws in targets}
 
     pairs = []
     for ws in targets:
@@ -383,6 +384,10 @@ def run(
                 reason = f.unusable
             elif canon in have[ws.id]:
                 reason = "already an anchor"
+            elif canon in removed[ws.id] and (f.at is None or f.at.utc <= removed[ws.id][canon]):
+                # Someone took it off after this evidence; newer work on it
+                # is a new fact and still adds it.
+                reason = f"removed {removed[ws.id][canon]:%Y-%m-%d}, after this evidence"
             elif (label, canon) in exclude:
                 reason = "declined"
             elif canon in held and held[canon] != label:

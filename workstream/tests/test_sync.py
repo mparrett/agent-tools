@@ -122,6 +122,35 @@ def test_a_declined_ref_goes_to_the_next_workstream_with_evidence(seeded):
 
 
 @needs_weft
+def test_a_removed_anchor_is_not_put_back_by_evidence_from_before(seeded, capsys):
+    ref = store._canon_ref(f"gh:{seeded['slug']}#31")
+    run_json(capsys, "sync", "sync-seam")
+    assert ref in store.get("sync-seam").refs
+    store.rm_anchor(store.get("sync-seam"), ref)
+    again = run_json(capsys, "sync", "sync-seam")
+    assert ref not in {r["ref"] for r in again["added"]}
+    (row,) = [r for r in again["skipped"] if r["ref"] == ref]
+    assert row["reason"].startswith("removed ") and row["reason"].endswith("after this evidence")
+    assert ref not in store.get("sync-seam").refs
+    # Re-adding by hand is a new binding: no longer "removed".
+    store.add_anchor(store.get("sync-seam"), ref)
+    assert ref not in store.removed_refs(store.get("sync-seam"))
+
+
+@needs_weft
+def test_evidence_newer_than_a_removal_still_adds(seeded, capsys, monkeypatch):
+    from datetime import datetime, timezone
+
+    ref = store._canon_ref(f"gh:{seeded['slug']}#31")
+    run_json(capsys, "sync", "sync-seam")
+    store.rm_anchor(store.get("sync-seam"), ref)
+    early = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(store, "removed_refs", lambda ws: {ref: early})
+    again = run_json(capsys, "sync", "sync-seam")
+    assert ref in {r["ref"] for r in again["added"]}
+
+
+@needs_weft
 def test_sync_adds_exactly_the_evidence_then_nothing(seeded, capsys):
     worker = seeded["sessions"]["worker"]
     d = run_json(capsys, "sync", "sync-seam")
