@@ -111,14 +111,15 @@ export function colorSlots(ids: string[], n: number): Map<string, number> {
 }
 
 // Where an anchor opens in a browser, for the kinds that have one: a GitHub PR,
-// issue or repo. `kind` is the frontier's liveness probe (`pr` or `issue`); without
-// it the issues URL serves both, since GitHub redirects it to a PR of that number.
+// issue or repo, as `gh:` or the CLI's equivalent `pr:`. `kind` is the frontier's
+// liveness probe (`pr` or `issue`); without it the issues URL serves both, since
+// GitHub redirects it to a PR of that number.
 export function anchorHref(ref: string, kind: string): string | undefined {
-  const m = /^gh:([\w.-]+\/[\w.-]+)(?:#(\d+))?$/.exec(ref)
+  const m = /^(gh|pr):([\w.-]+\/[\w.-]+)(?:#(\d+))?$/.exec(ref)
   if (!m) return undefined
-  const [, slug, num] = m
+  const [, scheme, slug, num] = m
   if (!num) return `https://github.com/${slug}`
-  return `https://github.com/${slug}/${kind === 'pr' ? 'pull' : 'issues'}/${num}`
+  return `https://github.com/${slug}/${kind === 'pr' || (!kind && scheme === 'pr') ? 'pull' : 'issues'}/${num}`
 }
 
 // Newest activity first: the CLI lists anchors by ref, which puts a repo's latest
@@ -127,7 +128,8 @@ export function anchorHref(ref: string, kind: string): string | undefined {
 function byNewest(anchors: Json[]): Json[] {
   const at = (o: Json) => {
     const live = obj(o.liveness)
-    return Date.parse(str(live.updated_at) || str(live.merged_at)) || 0
+    // each on its own: a malformed updated_at must not hide a good merged_at
+    return Date.parse(str(live.updated_at)) || Date.parse(str(live.merged_at)) || 0
   }
   return anchors
     .map((o, i) => ({ o, i, t: at(o) }))

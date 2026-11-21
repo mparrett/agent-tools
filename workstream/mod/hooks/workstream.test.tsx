@@ -28,6 +28,7 @@ test('a GitHub anchor links to its PR, issue or repo; other anchors have no link
   expect(anchorHref('gh:o/r#7', 'issue')).toBe('https://github.com/o/r/issues/7')
   expect(anchorHref('gh:o/r#7', '')).toBe('https://github.com/o/r/issues/7')
   expect(anchorHref('gh:o/r.js', '')).toBe('https://github.com/o/r.js')
+  expect(anchorHref('pr:o/r#7', '')).toBe('https://github.com/o/r/pull/7')
   expect(anchorHref('gh:?#7', 'pr')).toBeUndefined()
   expect(anchorHref('branch:main@/x', '')).toBeUndefined()
   expect(anchorHref('wt:/x/y', '')).toBeUndefined()
@@ -43,11 +44,12 @@ test('anchors list newest activity first, undated ones after in their own order'
         anchor('wt:/x'),
         anchor('gh:o/a#2', '2026-11-03T00:00:00Z'),
         anchor('branch:b@/x'),
+        { ref: 'gh:o/c#3', status: 'merged', liveness: { updated_at: 'not a time', merged_at: '2026-11-02T12:00:00Z' } },
         anchor('gh:o/b#9', '2026-11-02T00:00:00Z'),
       ],
     }),
   )
-  expect(f.anchors.map(a => a.ref)).toEqual(['gh:o/a#2', 'gh:o/b#9', 'gh:o/a#1', 'wt:/x', 'branch:b@/x'])
+  expect(f.anchors.map(a => a.ref)).toEqual(['gh:o/a#2', 'gh:o/c#3', 'gh:o/b#9', 'gh:o/a#1', 'wt:/x', 'branch:b@/x'])
 })
 
 test('ls JSON gives names, an unnamed one by its short id, and who owns each', () => {
