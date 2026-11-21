@@ -280,6 +280,35 @@ def test_last_activity_skips_the_fragment_a_tail_read_starts_in(fake, monkeypatc
     assert cd.ago(got, datetime.now(timezone.utc)) == "5m"
 
 
+def test_last_activity_survives_a_tail_read_that_starts_mid_character(fake, monkeypatch):
+    path = fake.transcript(
+        "aaaa",
+        {"type": "user", "timestamp": stamp(10)},
+        {"type": "tool_result", "content": "\u00e9" * 100},
+    )
+    path.write_text(path.read_text().replace("\\u00e9", "\u00e9"), encoding="utf-8")
+    # Land on the second byte of a two-byte character, with no complete line after.
+    size = path.stat().st_size
+    monkeypatch.setattr(cd, "TAIL_BYTES", size - path.read_bytes().index(b"\xc3\xa9") - 1)
+    got = cd.last_activity(session("aaaa")["sessionId"])
+    assert got is not None  # fell back to the mtime instead of raising
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        (b'{"timestamp": 1732000000}', None),
+        (b'{"timestamp": "not a date"}', None),
+        (b"[1, 2]", None),
+        (b'\xa9"}', None),
+        (b'{"timestamp": "2026-11-20T10:00:00"}', datetime(2026, 11, 20, 10, tzinfo=timezone.utc)),
+        (b'{"timestamp": "2026-11-20T10:00:00Z"}', datetime(2026, 11, 20, 10, tzinfo=timezone.utc)),
+    ],
+)
+def test_entry_time_skips_what_is_not_a_usable_timestamp(line, expected):
+    assert cd.entry_time(line) == expected
+
+
 def test_last_activity_falls_back_to_mtime(fake):
     path = fake.transcript("aaaa", {"type": "summary"})
     old = time.time() - 3 * 3600

@@ -101,6 +101,26 @@ def is_busy(row):
     return row.get("status") == "busy"
 
 
+def entry_time(line):
+    """The aware UTC timestamp of one transcript line, or None if it has none.
+
+    The tail read usually starts mid-line, sometimes mid-character, so a line
+    may be undecodable as well as unparseable; both just mean "not an entry".
+    """
+    try:
+        ts = json.loads(line).get("timestamp")
+    except (ValueError, AttributeError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        return None
+    if not isinstance(ts, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    # Mixing naive and aware datetimes fails in the comparisons downstream.
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
 def last_activity(session_id):
     """When the session last wrote to its transcript, or None if there is none.
 
@@ -111,26 +131,16 @@ def last_activity(session_id):
     newest = None
     for path in PROJECTS_DIR.glob(f"*/{session_id}.jsonl"):
         try:
+            st = path.stat()
             with open(path, "rb") as f:
-                f.seek(max(0, path.stat().st_size - TAIL_BYTES))
+                f.seek(max(0, st.st_size - TAIL_BYTES))
                 chunk = f.read()
         except OSError:
+            # Removed since the glob matched, e.g. a session cleaning up as it ends.
             continue
-        stamp = None
-        for line in reversed(chunk.splitlines()):
-            try:
-                ts = json.loads(line).get("timestamp")
-            except (json.JSONDecodeError, AttributeError):
-                # The seek usually lands mid-line; that fragment is not an entry.
-                continue
-            if ts:
-                try:
-                    stamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-                break
-        if stamp is None:
-            stamp = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        stamp = next(
+            (s for s in map(entry_time, reversed(chunk.splitlines())) if s), None
+        ) or datetime.fromtimestamp(st.st_mtime, timezone.utc)
         newest = stamp if newest is None else max(newest, stamp)
     return newest
 
