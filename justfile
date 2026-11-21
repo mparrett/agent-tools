@@ -221,6 +221,7 @@ test:
     uv run claude-ls/test_session_mates.py
     uv run claude-ps/test_claude_ps.py
     uv run claude-down/test_claude_down.py
+    uv run claude-closed/test_claude_closed.py
     uv run claude-watch/test_claude_watch.py
     uv run harness-ls/test_harness_ls.py
     uv run memory-ls/test_memory_ls.py

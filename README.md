@@ -20,6 +20,7 @@ Most tools started life in sibling repos and were collected here.
 | [`claude-ls`](claude-ls/README.md) | View, search, and resume Claude Code session logs from the CLI; `who` shows the live fleet by repo, and a SessionStart hook tells each session who else is working beside it. |
 | [`claude-ps`](claude-ps/README.md) | List running Claude processes with TTY, CWD, tmux session, and resource usage — a `ps` tuned for Claude Code. |
 | [`claude-down`](claude-down/README.md) | Stop every Claude Code background session, then the daemon, before a reboot: idle sessions first, a grace period for busy ones, and a snapshot with a `claude attach` line per session. Prints the plan, with what each busy session holds open (from `claude-ps`), unless `--go` is given. |
+| [`claude-closed`](claude-closed/README.md) | List recently closed background sessions (a ctrl+x too many in agent view, a `claude stop`, the daemon's idle timeout), newest first, with how each ended and the `claude --bg --resume` command that reopens it. Finds sessions removed from `claude agents` too. |
 | [`claude-watch`](claude-watch/README.md) | Follow one session live — its turns or `/loop` ticks, the tools it calls, and the subagents it spawns, with each subagent's tool calls inline while it runs. History shows each past turn as a header and its last message. |
 | [`preview-diff`](preview-diff/README.md) | Render a `git diff` (optionally with a PR description) to a self-contained HTML file and open it in the browser. No server, no deps. |
 | [`htmldiff`](htmldiff/README.md) | Compare two web pages as a rendered redline — changes marked up in the page itself — or as a side-by-side/unified source diff. One HTML file, no build step. Run it standalone, or `node htmldiff/cli.mjs` to type two URLs into the page and re-diff them as they change. |
@@ -56,6 +57,7 @@ The scripts are self-executing via `uv`:
 ./claude-ls/claude-ls.py last
 ./claude-ps/claude-ps.py
 ./claude-down/claude-down.py
+./claude-closed/claude-closed.py
 ./claude-watch/claude-watch.py <session-id>
 ./harness-ls/harness-ls.py
 ./memory-ls/memory-ls.py
@@ -75,6 +77,7 @@ mdserve <dir-or-file>
 claude-ls last
 claude-ps
 claude-down
+claude-closed
 claude-watch <session-id>
 claude-graph
 harness-ls
