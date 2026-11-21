@@ -94,7 +94,9 @@ def last_close(evs):
         elif event == "settled":
             m = SETTLED.search(rest)
             reason = m["reason"] if m else ""
-            how = {"killed": "stopped", "done": "exited", "crashed": "crashed"}.get(reason, reason)
+            how = {"killed": "stopped", "done": "exited", "crashed": "crashed"}.get(
+                reason, reason or "unknown"
+            )
             if retired and ts - retired[0] <= RETIRE_SETTLE_WINDOW:
                 closed = (ts, "retired", retired[1], retired[2])
             else:
@@ -306,6 +308,8 @@ document.addEventListener("click", async (e) => {
 
 def window_label(since):
     minutes = int(since.total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes}m"
     # "24h" reads better than "1d"; days only once they are the natural unit.
     if minutes >= 48 * 60 and minutes % (24 * 60) == 0:
         return f"{minutes // (24 * 60)}d"
@@ -314,16 +318,25 @@ def window_label(since):
     return f"{minutes}m"
 
 
-def render_html(rows, now, since, problems):
+def render_html(rows, now, since, problems, matched=None, closed=None, stopped_only=False):
+    """`matched` counts rows before -n cut them, `closed` before --stopped filtered them."""
     e = html.escape
+    matched = len(rows) if matched is None else matched
+    verb = "stopped" if stopped_only else "closed"
     subtitle = (
-        f"{len(rows)} background session{'s' if len(rows) != 1 else ''} closed in the last "
-        f"{window_label(since)}, newest first &middot; generated "
-        f"{e(now.astimezone().strftime('%Y-%m-%d %H:%M'))}"
+        f"{matched} background session{'s' if matched != 1 else ''} {verb} in the last "
+        f"{window_label(since)}"
     )
+    if stopped_only and closed is not None:
+        subtitle += f" ({closed} closed in all)"
+    if len(rows) < matched:
+        subtitle += f", showing the newest {len(rows)}"
+    else:
+        subtitle += ", newest first"
+    subtitle += f" &middot; generated {e(now.astimezone().strftime('%Y-%m-%d %H:%M'))}"
     notes = "".join(f'<p class="note">{e(p)}</p>' for p in problems)
     if not rows:
-        body = '<p class="empty">No background sessions closed in that window.</p>'
+        body = f'<p class="empty">No background sessions {verb} in that window.</p>'
     else:
         out = [
             "<table><thead><tr><th>#</th><th>Closed</th><th>How</th><th>Session</th>"
@@ -354,6 +367,8 @@ def duration(text):
     if not m:
         raise argparse.ArgumentTypeError(f"expected e.g. 30m, 6h or 3d, not {text!r}")
     n, unit = int(m[1]), m[2]
+    if n == 0:
+        raise argparse.ArgumentTypeError("the window must be longer than zero")
     return timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[unit]: n})
 
 
@@ -406,15 +421,18 @@ def main(argv=None):
     # stderr, so --json output stays parseable while a script still sees the caveat.
     for problem in problems:
         print(f"claude-closed: {problem}", file=sys.stderr)
+    closed = len(rows)
     if args.stopped:
         rows = [r for r in rows if r["how"] == "stopped"]
+    matched = len(rows)
     rows = rows[: args.limit]
 
     if args.json:
         print(json.dumps([{k: v for k, v in r.items() if k != "_when"} for r in rows], indent=2))
         return 0
     if args.html:
-        print(render_html(rows, now, args.since, problems), end="")
+        page = render_html(rows, now, args.since, problems, matched, closed, args.stopped)
+        print(page, end="")
         return 0
     if not rows:
         print("no background sessions closed in that window")
