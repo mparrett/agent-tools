@@ -20,6 +20,16 @@ once. `claude-down` sequences the two so the stop is graceful:
 `claude stop` keeps the conversation, so `claude attach <id>` resumes a session
 afterwards. Interactive sessions are left alone.
 
+## How long each session has been quiet
+
+Next to its state, the plan shows how long ago each session last wrote to its
+transcript (`7d`, `3h`, `20m`, `?` when no transcript is found), and lists the
+quietest first. Neither `claude agents --json` nor the daemon records activity,
+so this is read from the last timestamped entry in
+`~/.claude/projects/*/<sessionId>.jsonl`; the snapshot keeps it as
+`lastActivity`. A session idle for days is one the daemon's hourly retirement
+missed. One shown as busy whose transcript hasn't moved in hours is probably stuck.
+
 ## Pairs with claude-ps
 
 The plan lists, under each busy session, the background commands it is holding

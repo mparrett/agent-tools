@@ -14,6 +14,8 @@ import json
 import os
 import stat
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -72,12 +74,22 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_SHELLS", str(shells))
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     monkeypatch.setattr(cd, "POLL_SECONDS", 0.01)
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    monkeypatch.setattr(cd, "PROJECTS_DIR", projects)
 
     class Fake:
         snapshots = tmp_path / "snap"
 
         def set_sessions(self, rows):
             agents.write_text(json.dumps(rows))
+
+        def transcript(self, short, *entries, project="-work-repo"):
+            d = projects / project
+            d.mkdir(exist_ok=True)
+            path = d / f"{session(short)['sessionId']}.jsonl"
+            path.write_text("".join(json.dumps(e) + "\n" for e in entries))
+            return path
 
         def set_shells(self, rows):
             shells.write_text(json.dumps(rows))
@@ -239,6 +251,115 @@ def test_wait_for_idle_returns_once_sessions_settle(fake):
 def test_wait_for_idle_gives_up_after_grace(fake):
     fake.set_sessions([session("busy1", "busy")])
     assert cd.wait_for_idle(["busy1"], grace=0.05) == {"busy1"}
+
+
+def stamp(minutes_ago):
+    then = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return then.isoformat().replace("+00:00", "Z")
+
+
+def test_last_activity_is_the_last_timestamped_entry(fake):
+    fake.transcript(
+        "aaaa",
+        {"type": "user", "timestamp": stamp(90)},
+        {"type": "system", "timestamp": stamp(30)},
+        {"type": "summary"},  # no timestamp: skipped, not mistaken for the end
+    )
+    got = cd.last_activity(session("aaaa")["sessionId"])
+    assert cd.ago(got, datetime.now(timezone.utc)) == "30m"
+
+
+def test_last_activity_skips_the_fragment_a_tail_read_starts_in(fake, monkeypatch):
+    path = fake.transcript(
+        "aaaa",
+        {"type": "user", "timestamp": stamp(10), "pad": "x" * 200},
+        {"type": "user", "timestamp": stamp(5)},
+    )
+    monkeypatch.setattr(cd, "TAIL_BYTES", path.stat().st_size - 20)
+    got = cd.last_activity(session("aaaa")["sessionId"])
+    assert cd.ago(got, datetime.now(timezone.utc)) == "5m"
+
+
+def test_last_activity_survives_a_tail_read_that_starts_mid_character(fake, monkeypatch):
+    path = fake.transcript(
+        "aaaa",
+        {"type": "user", "timestamp": stamp(10)},
+        {"type": "tool_result", "content": "\u00e9" * 100},
+    )
+    path.write_text(path.read_text().replace("\\u00e9", "\u00e9"), encoding="utf-8")
+    # Land on the second byte of a two-byte character, with no complete line after.
+    size = path.stat().st_size
+    monkeypatch.setattr(cd, "TAIL_BYTES", size - path.read_bytes().index(b"\xc3\xa9") - 1)
+    got = cd.last_activity(session("aaaa")["sessionId"])
+    assert got is not None  # fell back to the mtime instead of raising
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        (b'{"timestamp": 1732000000}', None),
+        (b'{"timestamp": "not a date"}', None),
+        (b"[1, 2]", None),
+        (b'\xa9"}', None),
+        (b'{"timestamp": "2026-11-20T10:00:00"}', datetime(2026, 11, 20, 10, tzinfo=timezone.utc)),
+        (b'{"timestamp": "2026-11-20T10:00:00Z"}', datetime(2026, 11, 20, 10, tzinfo=timezone.utc)),
+    ],
+)
+def test_entry_time_skips_what_is_not_a_usable_timestamp(line, expected):
+    assert cd.entry_time(line) == expected
+
+
+def test_last_activity_falls_back_to_mtime(fake):
+    path = fake.transcript("aaaa", {"type": "summary"})
+    old = time.time() - 3 * 3600
+    os.utime(path, (old, old))
+    got = cd.last_activity(session("aaaa")["sessionId"])
+    assert cd.ago(got, datetime.now(timezone.utc)) == "3h"
+
+
+def test_last_activity_takes_the_newest_of_several_transcripts(fake):
+    fake.transcript("aaaa", {"timestamp": stamp(300)}, project="-started-here")
+    fake.transcript("aaaa", {"timestamp": stamp(15)}, project="-moved-here")
+    got = cd.last_activity(session("aaaa")["sessionId"])
+    assert cd.ago(got, datetime.now(timezone.utc)) == "15m"
+
+
+def test_last_activity_without_a_transcript_is_unknown(fake):
+    assert cd.last_activity(session("none")["sessionId"]) is None
+    assert cd.ago(None, datetime.now(timezone.utc)) == "?"
+
+
+@pytest.mark.parametrize(
+    "minutes, shown",
+    [(0, "<1m"), (59, "59m"), (119, "119m"), (120, "2h"), (47 * 60, "47h"), (72 * 60, "3d")],
+)
+def test_ago(minutes, shown):
+    now = datetime.now(timezone.utc)
+    assert cd.ago(now - timedelta(minutes=minutes, seconds=1), now) == shown
+
+
+def test_plan_shows_quiet_time_longest_first(fake, capsys):
+    fake.set_sessions([session("recent"), session("stale"), session("nolog")])
+    fake.transcript("recent", {"timestamp": stamp(5)})
+    fake.transcript("stale", {"timestamp": stamp(600)})
+    fake.run()
+    lines = [
+        ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("  ") and "idle" in ln
+    ]
+    assert [ln.split()[0] for ln in lines] == ["stale", "recent", "nolog"]
+    assert lines[0].split()[2] == "10h"
+    assert lines[2].split()[2] == "?"
+
+
+def test_snapshot_records_last_activity(fake):
+    fake.set_sessions([session("aaaa"), session("bbbb")])
+    fake.transcript("aaaa", {"timestamp": stamp(5)})
+    fake.run("--go", "--keep-daemon")
+    [js] = fake.snapshots.glob("*.json")
+    by_id = {r["id"]: r for r in json.loads(js.read_text())}
+    assert by_id["aaaa"]["lastActivity"].endswith("+00:00")
+    assert "lastActivity" not in by_id["bbbb"]
+    assert "_last" not in by_id["aaaa"]
 
 
 if __name__ == "__main__":
