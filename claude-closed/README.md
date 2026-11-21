@@ -41,7 +41,13 @@ claude-closed --since 30m      # or 6h, 3d
 claude-closed --stopped        # only the ones someone stopped
 claude-closed -n 5             # at most 5 rows (default 20)
 claude-closed --json
+claude-closed --html > closed.html && open closed.html
 ```
+
+`--html` writes one self-contained page to stdout, with no external assets. It
+is a table of the same rows, with a copy button beside each reopen command, and
+it follows the system light or dark setting. Hover over a row's age for the
+exact close time.
 
 The log is `~/.claude/daemon.log`, plus any rotated `daemon.log.*` beside it.
 History goes back only as far as the log does.
