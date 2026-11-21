@@ -37,6 +37,23 @@ open, taken from `claude-ps --shells --json`. These are usually why a "done"
 session never retired, and they are worth reading before you stop it. Without
 `claude-ps` on `PATH` the plan omits them.
 
+## Stopping one row from the plan
+
+The plan numbers its rows, and `--pick N` stops just that row:
+
+```bash
+claude-down                 # the plan, numbered; also saves the numbering
+claude-down --pick 3        # preview row 3
+claude-down --go --pick 3   # stop it (or --pick 3,5 for several)
+```
+
+Rows are ordered by quiet time, which reshuffles as sessions work, so `--pick`
+resolves numbers against the numbering the last full plan saved
+(`plan.json` in the snapshot directory), not a fresh listing. It refuses when
+that plan is more than 15 minutes old, names a row the plan doesn't have, or
+names a session that has since stopped. Like `--only`, it leaves the daemon
+running, and a preview of a pick doesn't renumber the saved plan.
+
 ## The session running it
 
 Run from inside a background session, `claude-down` skips that session, and the
@@ -49,7 +66,8 @@ stops it last, after everything else.
 claude-down                    # the plan: what would stop, and what holds the busy ones
 claude-down --go               # carry it out
 claude-down --go --grace 0     # don't wait for busy sessions
-claude-down --go --only <id>   # one session; the daemon keeps running
+claude-down --go --only <id>   # one session by id; the daemon keeps running
+claude-down --go --pick 3      # one session by its number in the last plan
 claude-down --go --keep-daemon
 ```
 

@@ -110,7 +110,8 @@ def test_plan_only_changes_nothing(fake, capsys):
     assert "2 background session(s) to stop: 1 idle, 1 busy" in out
     assert "plan only" in out
     assert fake.calls() == []
-    assert not fake.snapshots.exists()
+    # The only write is the numbering a later --pick reads.
+    assert [f.name for f in fake.snapshots.iterdir()] == ["plan.json"]
 
 
 def test_go_stops_idle_then_busy_then_daemon(fake):
@@ -343,12 +344,10 @@ def test_plan_shows_quiet_time_longest_first(fake, capsys):
     fake.transcript("recent", {"timestamp": stamp(5)})
     fake.transcript("stale", {"timestamp": stamp(600)})
     fake.run()
-    lines = [
-        ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("  ") and "idle" in ln
-    ]
-    assert [ln.split()[0] for ln in lines] == ["stale", "recent", "nolog"]
-    assert lines[0].split()[2] == "10h"
-    assert lines[2].split()[2] == "?"
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if " idle " in ln]
+    assert [ln.split()[:2] for ln in lines] == [["1.", "stale"], ["2.", "recent"], ["3.", "nolog"]]
+    assert lines[0].split()[3] == "10h"
+    assert lines[2].split()[3] == "?"
 
 
 def test_snapshot_records_last_activity(fake):
@@ -360,6 +359,86 @@ def test_snapshot_records_last_activity(fake):
     assert by_id["aaaa"]["lastActivity"].endswith("+00:00")
     assert "lastActivity" not in by_id["bbbb"]
     assert "_last" not in by_id["aaaa"]
+
+
+def test_pick_stops_the_row_the_plan_numbered(fake, capsys):
+    fake.set_sessions([session("aaaa"), session("bbbb"), session("cccc", "busy")])
+    fake.transcript("aaaa", {"timestamp": stamp(5)})
+    fake.transcript("bbbb", {"timestamp": stamp(500)})
+    fake.run()  # plan: 1. bbbb (quietest)  2. aaaa  3. cccc (busy)
+    capsys.readouterr()
+    assert fake.run("--go", "--pick", "2") == 0
+    assert fake.calls() == ["stop aaaa"]
+    assert "  2. aaaa" in capsys.readouterr().out
+
+
+def test_pick_several_rows(fake):
+    fake.set_sessions([session("aaaa"), session("bbbb"), session("cccc")])
+    fake.run()
+    fake.run("--go", "--pick", "1,3", "--grace", "0")
+    assert sorted(fake.calls()) == ["stop aaaa", "stop cccc"]
+
+
+def test_pick_numbering_survives_a_reshuffle(fake):
+    """The pick follows the saved plan, not whatever order a fresh listing has."""
+    fake.set_sessions([session("aaaa"), session("bbbb")])
+    fake.transcript("aaaa", {"timestamp": stamp(500)})
+    fake.transcript("bbbb", {"timestamp": stamp(5)})
+    fake.run()  # 1. aaaa  2. bbbb
+    fake.transcript("aaaa", {"timestamp": stamp(0)})  # aaaa wakes; a fresh plan would flip them
+    fake.run("--go", "--pick", "1")
+    assert fake.calls() == ["stop aaaa"]
+
+
+def test_pick_without_a_plan_exits(fake):
+    fake.set_sessions([session("aaaa")])
+    with pytest.raises(SystemExit, match="no saved plan"):
+        fake.run("--go", "--pick", "1")
+
+
+def test_pick_from_a_stale_plan_exits(fake, monkeypatch):
+    fake.set_sessions([session("aaaa")])
+    fake.run()
+    monkeypatch.setattr(cd, "PICK_MAX_AGE_SECONDS", -1)
+    with pytest.raises(SystemExit, match="run `claude-down` again"):
+        fake.run("--go", "--pick", "1")
+    assert fake.calls() == []
+
+
+def test_pick_out_of_range_exits(fake):
+    fake.set_sessions([session("aaaa")])
+    fake.run()
+    with pytest.raises(SystemExit, match="no row 4 \\(it has 1-1\\)"):
+        fake.run("--go", "--pick", "4")
+
+
+def test_pick_of_a_session_that_has_since_gone_exits(fake):
+    fake.set_sessions([session("aaaa"), session("bbbb")])
+    fake.run()
+    fake.set_sessions([session("bbbb")])
+    with pytest.raises(SystemExit, match=r"aaaa \(row 1\).*stopped already"):
+        fake.run("--go", "--pick", "1")
+
+
+def test_pick_does_not_renumber_the_saved_plan(fake):
+    fake.set_sessions([session("aaaa"), session("bbbb"), session("cccc")])
+    fake.run()
+    fake.run("--pick", "3")  # a preview of one pick must leave the numbering alone
+    fake.run("--go", "--pick", "2")
+    assert fake.calls() == ["stop bbbb"]
+
+
+@pytest.mark.parametrize("bad", ["0", "x", "2,,3", "-1"])
+def test_pick_rejects_what_is_not_a_row_number(fake, bad):
+    with pytest.raises(SystemExit):
+        cd.parse_args(["--pick", bad])
+
+
+def test_pick_keeps_the_daemon(fake):
+    fake.set_sessions([session("aaaa")])
+    fake.run()
+    fake.run("--go", "--pick", "1")
+    assert "daemon stop --any" not in fake.calls()
 
 
 if __name__ == "__main__":
