@@ -792,43 +792,59 @@ def add_anchor(
     _run(["ref", "add", _ws_id(ws), _canon_ref(ref), "--source", source], actor=actor)
 
 
-def ref_sources(ws: WsArg) -> dict[str, str]:
-    """How each of the workstream's refs was added: `sync` when every live
-    `ref.add` binding it was written by sync (`SYNC_SOURCE`), else the weft
-    source of the first one that was not.
+def _ref_events(wids: Iterable[str]) -> Optional[tuple[dict, dict]]:
+    """The `ref.add` events on the nodes `wids`, as {node: {event id: (ref,
+    source, at)}}, and every `ref.retract`, as {target id: at}, from one read
+    of the log; None when the log cannot be read.
 
-    No weft command returns a ref's source (its fold keeps the binding only),
-    so this reads the event log, which weft's EVENTS.md makes the contract
-    other tools read: unknown events are skipped, a partial final line is
-    dropped, and a newer schema version is refused. A ref bound to a node
-    later merged into this one is not followed and comes back without a
-    source. Empty when the log cannot be read; the caller then shows no
-    provenance, which is the same as before sync existed."""
-    wid = _ws_id(ws)
+    No weft command returns a ref's source or history (its fold keeps the
+    binding only), so this reads the event log, which weft's EVENTS.md makes
+    the contract other tools read: unknown events are skipped, a partial
+    final line is dropped, and a newer schema version is refused. A ref bound
+    to a node later merged into this one is not followed."""
     try:
         log = _run(["env"]).get("log")
         with open(log, "rb") as fh:
             data = fh.read()
     except (WeftError, OSError, TypeError):
-        return {}
+        return None
     lines = data.split(b"\n")
     lines.pop()  # after the last LF: empty, or a write still in flight
-    adds: dict[str, tuple[str, str]] = {}
-    retracted: set[str] = set()
+    wids = set(wids)
+    adds: dict[str, dict[str, tuple[str, str, str]]] = {w: {} for w in wids}
+    retracted: dict[str, str] = {}
     for raw in lines:
         try:
             ev = json.loads(raw)
         except ValueError:
-            return {}
+            return None
         if not isinstance(ev, dict) or int(ev.get("v") or 0) > LOG_VERSION:
-            return {}
+            return None
         kind = ev.get("ev")
-        if kind == "ref.add" and ev.get("node") == wid:
-            adds[ev.get("id", "")] = (ev.get("ref", ""), ev.get("source", ""))
+        if kind == "ref.add" and ev.get("node") in wids:
+            adds[ev["node"]][ev.get("id", "")] = (
+                ev.get("ref", ""),
+                ev.get("source", ""),
+                ev.get("at", ""),
+            )
         elif kind == "ref.retract":
-            retracted.add(ev.get("target", ""))
+            retracted[ev.get("target", "")] = ev.get("at", "")
+    return adds, retracted
+
+
+def ref_sources(ws: WsArg) -> dict[str, str]:
+    """How each of the workstream's refs was added: `sync` when every live
+    `ref.add` binding it was written by sync (`SYNC_SOURCE`), else the weft
+    source of the first one that was not. Empty when the log cannot be read;
+    the caller then shows no provenance, which is the same as before sync
+    existed."""
+    wid = _ws_id(ws)
+    got = _ref_events([wid])
+    if got is None:
+        return {}
+    adds, retracted = got
     by_ref: dict[str, list[str]] = {}
-    for eid, (ref, source) in adds.items():
+    for eid, (ref, source, _) in adds[wid].items():
         if eid not in retracted:
             by_ref.setdefault(ref, []).append(source)
     return {
@@ -837,6 +853,41 @@ def ref_sources(ws: WsArg) -> dict[str, str]:
         else next(x for x in srcs if x != SYNC_SOURCE)
         for ref, srcs in by_ref.items()
     }
+
+
+def removed_refs(ws: WsArg) -> dict[str, datetime]:
+    """Refs once bound to the workstream and since taken off, by canonical
+    ref, with when the last binding went (UTC). `sync` reads this so it does
+    not put back what someone removed on the strength of evidence from before
+    the removal. Empty when the log cannot be read, which is as before."""
+    wid = _ws_id(ws)
+    return removed_refs_many([wid]).get(wid, {})
+
+
+def removed_refs_many(wss: Iterable[WsArg]) -> dict[str, dict[str, datetime]]:
+    """`removed_refs` for each workstream, by id, from one read of the log."""
+    ids = [_ws_id(w) for w in wss]
+    got = _ref_events(ids)
+    if got is None:
+        return {i: {} for i in ids}
+    adds, retracted = got
+    out: dict[str, dict[str, datetime]] = {}
+    for wid in ids:
+        live: set[str] = set()
+        gone: dict[str, datetime] = {}
+        for eid, (ref, _, _) in adds[wid].items():
+            canon = _canon_ref(ref)
+            if eid not in retracted:
+                live.add(canon)
+                continue
+            try:
+                at = datetime.fromisoformat(retracted[eid]).astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            if canon not in gone or at > gone[canon]:
+                gone[canon] = at
+        out[wid] = {ref: at for ref, at in gone.items() if ref not in live}
+    return out
 
 
 def rm_anchor(ws: WsArg, ref: str, *, actor: Optional[str] = None) -> None:

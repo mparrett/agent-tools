@@ -122,6 +122,43 @@ def test_a_declined_ref_goes_to_the_next_workstream_with_evidence(seeded):
 
 
 @needs_weft
+def test_a_removed_anchor_is_not_put_back_by_evidence_from_before(seeded, capsys):
+    ref = store._canon_ref(f"gh:{seeded['slug']}#31")
+    run_json(capsys, "sync", "sync-seam")
+    assert ref in store.get("sync-seam").refs
+    store.rm_anchor(store.get("sync-seam"), ref)
+    again = run_json(capsys, "sync", "sync-seam")
+    assert ref not in {r["ref"] for r in again["added"]}
+    (row,) = [r for r in again["skipped"] if r["ref"] == ref]
+    assert row["reason"].startswith("removed ") and row["reason"].endswith("after this evidence")
+    assert ref not in store.get("sync-seam").refs
+    # Re-adding by hand is a new binding: no longer "removed".
+    store.add_anchor(store.get("sync-seam"), ref)
+    assert ref not in store.removed_refs(store.get("sync-seam"))
+
+
+@needs_weft
+def test_work_after_a_removal_still_adds_even_when_earlier_work_predates_it(
+    seeded, capsys, monkeypatch
+):
+    # #31 was created, then merged, later: a removal between the two is older
+    # than the newest work on it, so the merge puts the anchor back.
+    from workstream import sessions
+
+    worker = seeded["sessions"]["worker"]
+    ref = store._canon_ref(f"gh:{seeded['slug']}#31")
+    (f,) = [x for x in sync.evidence(sessions.facts(worker.id)) if store._canon_ref(x.ref) == ref]
+    assert f.at.utc < f.last_at.utc
+    between = f.at.utc + (f.last_at.utc - f.at.utc) / 2
+    monkeypatch.setattr(store, "removed_refs_many", lambda wss: {w.id: {ref: between} for w in wss})
+    assert ref in {r["ref"] for r in run_json(capsys, "sync", "sync-seam", "--dry-run")["added"]}
+    after = f.last_at.utc + (f.last_at.utc - f.at.utc)
+    monkeypatch.setattr(store, "removed_refs_many", lambda wss: {w.id: {ref: after} for w in wss})
+    skipped = run_json(capsys, "sync", "sync-seam", "--dry-run")["skipped"]
+    assert any(r["ref"] == ref and r["reason"].endswith("after this evidence") for r in skipped)
+
+
+@needs_weft
 def test_sync_adds_exactly_the_evidence_then_nothing(seeded, capsys):
     worker = seeded["sessions"]["worker"]
     d = run_json(capsys, "sync", "sync-seam")

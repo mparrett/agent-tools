@@ -220,7 +220,11 @@ that one session alone, whatever its role.
 Repo overlap, shared files and the launch directory rank candidates in
 `match` and never become anchors. A ref the workstream already has is
 skipped, `wt:` compared by real path. So is a ref another open workstream
-holds: the session acted on it for that work. A session attached to
+holds: the session acted on it for that work. So is a ref someone removed
+from this workstream after the evidence for it (`weft ref rm`, or a sync
+retraction), read from weft's event log: a transcript that still names an
+old PR would otherwise put it straight back. Evidence newer than the removal
+still adds it. A session attached to
 several workstreams syncs into its canonical one first. Each added anchor
 prints with the session and the writes that justified it; `--dry-run`
 writes nothing, and `--json` gives `{added, skipped, by_session, ancillary,
