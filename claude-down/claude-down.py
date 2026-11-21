@@ -43,6 +43,9 @@ PROJECTS_DIR = Path(
 )
 # Enough tail to hold several entries; a single tool result can run long.
 TAIL_BYTES = 256 * 1024
+# The plan's numbering is by quiet time, which reshuffles as sessions work, so a
+# --pick resolves against the saved plan only while it is this fresh.
+PICK_MAX_AGE_SECONDS = 15 * 60
 
 
 def run(cmd, timeout=CMD_TIMEOUT_SECONDS):
@@ -161,10 +164,11 @@ def ago(then, now):
 def describe(row, held, now):
     state = "busy" if is_busy(row) else "idle"
     quiet = ago(row.get("_last"), now)
-    line = f"  {row['id']}  {state:4} {quiet:>4}  {row.get('name') or '(unnamed)'}  [{row.get('cwd', '')}]"
+    n = f"{row['_n']:>3}." if row.get("_n") else "    "
+    line = f"{n} {row['id']}  {state:4} {quiet:>4}  {row.get('name') or '(unnamed)'}  [{row.get('cwd', '')}]"
     for cmd in held.get(row.get("sessionId"), []):
         first = cmd.splitlines()[0] if cmd else ""
-        line += f"\n                 holds: {first[:100]}"
+        line += f"\n                   holds: {first[:100]}"
     return line
 
 
@@ -179,7 +183,7 @@ def write_snapshot(rows, directory, now):
     stamp = f"{now:%Y-%m-%dT%H%M%S}"
     records = []
     for r in rows:
-        rec = {k: v for k, v in r.items() if k != "_last"}
+        rec = {k: v for k, v in r.items() if not k.startswith("_")}
         if r.get("_last"):
             rec["lastActivity"] = r["_last"].isoformat()
         records.append(rec)
@@ -194,6 +198,73 @@ def write_snapshot(rows, directory, now):
     latest.unlink(missing_ok=True)
     latest.symlink_to(md.name)
     return md
+
+
+def plan_path(directory):
+    """This caller's saved plan.
+
+    Every caller leaves itself out of its own plan, so two callers number the
+    same fleet differently; one shared file would let a plan run from another
+    session renumber the rows under a pending --pick. Keyed by Claude session,
+    or by terminal from a plain shell.
+    """
+    key = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not key:
+        try:
+            key = os.ttyname(0)
+        except OSError:
+            key = "default"
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in key.strip("/"))
+    return directory / f"plan-{safe}.json"
+
+
+def save_plan(rows, directory, now):
+    """Record the plan's numbering so a later --pick can name rows by it."""
+    directory.mkdir(parents=True, exist_ok=True)
+    plan = {
+        "at": now.isoformat(),
+        "rows": [{"n": r["_n"], "id": r["id"], "name": r.get("name")} for r in rows],
+    }
+    plan_path(directory).write_text(json.dumps(plan, indent=2) + "\n")
+
+
+def resolve_picks(picks, directory, now):
+    """Map plan numbers to session ids via the saved plan; exit on anything doubtful."""
+    path = plan_path(directory)
+    try:
+        plan = json.loads(path.read_text())
+        at = datetime.fromisoformat(plan["at"])
+        numbered = {r["n"]: r for r in plan["rows"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        sys.exit(
+            "claude-down: no saved plan to pick from here; run `claude-down` first "
+            "(plans are kept per session or terminal)"
+        )
+    age = (now - at).total_seconds()
+    if age > PICK_MAX_AGE_SECONDS:
+        sys.exit(
+            f"claude-down: the saved plan is {ago(at, now)} old and its numbering may have "
+            "shifted; run `claude-down` again"
+        )
+    unknown = [n for n in picks if n not in numbered]
+    if unknown:
+        sys.exit(
+            f"claude-down: the plan has no row {', '.join(map(str, unknown))} "
+            f"(it has 1-{len(numbered)})"
+        )
+    return {numbered[n]["id"]: n for n in picks}
+
+
+def pick_numbers(values):
+    """`--pick 3 --pick 5,7` -> [3, 5, 7]."""
+    out = []
+    for v in values:
+        for part in v.split(","):
+            part = part.strip()
+            if not part.isdigit() or int(part) < 1:
+                raise argparse.ArgumentTypeError(f"not a row number: {part!r}")
+            out.append(int(part))
+    return list(dict.fromkeys(out))
 
 
 def stop(row):
@@ -282,6 +353,14 @@ def parse_args(argv=None):
         metavar="ID",
         help="stop just this session id (repeatable); leaves the daemon running",
     )
+    p.add_argument(
+        "--pick",
+        action="append",
+        default=[],
+        metavar="N",
+        help="stop just the row numbered N in the last plan (repeatable, or N,M); "
+        "leaves the daemon running",
+    )
     p.add_argument("--keep-daemon", action="store_true", help="skip `claude daemon stop`")
     p.add_argument(
         "--include-self",
@@ -299,11 +378,19 @@ def parse_args(argv=None):
     args = p.parse_args(argv)
     if args.grace < 0:
         p.error("--grace must be >= 0")
+    try:
+        args.pick = pick_numbers(args.pick)
+    except argparse.ArgumentTypeError as e:
+        p.error(str(e))
     return args
 
 
 def main(argv=None):
     args = parse_args(argv)
+    picked = {}
+    if args.pick:
+        picked = resolve_picks(args.pick, args.snapshot_dir, datetime.now(timezone.utc))
+        args.only = [*args.only, *picked]
     rows = list_background()
     self_sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
     me = [r for r in rows if self_sid and r.get("sessionId") == self_sid]
@@ -312,7 +399,18 @@ def main(argv=None):
         rows = [r for r in rows if r["id"] in wanted]
         missing = wanted - {r["id"] for r in rows}
         if missing:
-            sys.exit(f"claude-down: no background session {', '.join(sorted(missing))}")
+            gone = [f"{i} (row {picked[i]})" if i in picked else i for i in sorted(missing)]
+            # Picked ids came from a real listing, so absence means it ended; an
+            # --only id may just be mistyped.
+            hint = "; it may have stopped already" if missing <= picked.keys() else ""
+            sys.exit(f"claude-down: no background session {', '.join(gone)}{hint}")
+        if not args.include_self:
+            mine = [r for r in rows if r in me]
+            if mine:
+                sys.exit(
+                    f"claude-down: {mine[0]['id']} is the session running this; "
+                    "add --include-self to stop it"
+                )
     targets = [r for r in rows if args.include_self or r not in me]
     stop_daemon = not (args.keep_daemon or args.only or (me and not args.include_self))
 
@@ -322,6 +420,13 @@ def main(argv=None):
     idle = quietest_first([r for r in targets if not is_busy(r)])
     busy = quietest_first([r for r in targets if is_busy(r)])
     now = datetime.now(timezone.utc)
+    if args.only:
+        # Picked rows keep the number they were picked by; --only rows go unnumbered.
+        for r in targets:
+            r["_n"] = picked.get(r["id"])
+    else:
+        for n, r in enumerate(idle + busy, 1):
+            r["_n"] = n
 
     print(f"{len(targets)} background session(s) to stop: {len(idle)} idle, {len(busy)} busy")
     print(
@@ -335,7 +440,11 @@ def main(argv=None):
         print("then: claude daemon stop --any")
 
     if not args.go:
-        print("\n(plan only; pass --go to carry it out)")
+        if not args.only:
+            save_plan(idle + busy, args.snapshot_dir, now)
+            print("\n(plan only; pass --go to carry it out, or --go --pick N to stop row N)")
+        else:
+            print("\n(plan only; pass --go to carry it out)")
         return 0
 
     if rows:
