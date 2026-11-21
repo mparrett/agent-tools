@@ -200,6 +200,24 @@ def write_snapshot(rows, directory, now):
     return md
 
 
+def plan_path(directory):
+    """This caller's saved plan.
+
+    Every caller leaves itself out of its own plan, so two callers number the
+    same fleet differently; one shared file would let a plan run from another
+    session renumber the rows under a pending --pick. Keyed by Claude session,
+    or by terminal from a plain shell.
+    """
+    key = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not key:
+        try:
+            key = os.ttyname(0)
+        except OSError:
+            key = "default"
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in key.strip("/"))
+    return directory / f"plan-{safe}.json"
+
+
 def save_plan(rows, directory, now):
     """Record the plan's numbering so a later --pick can name rows by it."""
     directory.mkdir(parents=True, exist_ok=True)
@@ -207,18 +225,21 @@ def save_plan(rows, directory, now):
         "at": now.isoformat(),
         "rows": [{"n": r["_n"], "id": r["id"], "name": r.get("name")} for r in rows],
     }
-    (directory / "plan.json").write_text(json.dumps(plan, indent=2) + "\n")
+    plan_path(directory).write_text(json.dumps(plan, indent=2) + "\n")
 
 
 def resolve_picks(picks, directory, now):
     """Map plan numbers to session ids via the saved plan; exit on anything doubtful."""
-    path = directory / "plan.json"
+    path = plan_path(directory)
     try:
         plan = json.loads(path.read_text())
         at = datetime.fromisoformat(plan["at"])
         numbered = {r["n"]: r for r in plan["rows"]}
     except (OSError, ValueError, KeyError, TypeError):
-        sys.exit("claude-down: no saved plan to pick from; run `claude-down` first")
+        sys.exit(
+            "claude-down: no saved plan to pick from here; run `claude-down` first "
+            "(plans are kept per session or terminal)"
+        )
     age = (now - at).total_seconds()
     if age > PICK_MAX_AGE_SECONDS:
         sys.exit(
@@ -379,9 +400,17 @@ def main(argv=None):
         missing = wanted - {r["id"] for r in rows}
         if missing:
             gone = [f"{i} (row {picked[i]})" if i in picked else i for i in sorted(missing)]
-            sys.exit(
-                f"claude-down: no background session {', '.join(gone)}; it may have stopped already"
-            )
+            # Picked ids came from a real listing, so absence means it ended; an
+            # --only id may just be mistyped.
+            hint = "; it may have stopped already" if missing <= picked.keys() else ""
+            sys.exit(f"claude-down: no background session {', '.join(gone)}{hint}")
+        if not args.include_self:
+            mine = [r for r in rows if r in me]
+            if mine:
+                sys.exit(
+                    f"claude-down: {mine[0]['id']} is the session running this; "
+                    "add --include-self to stop it"
+                )
     targets = [r for r in rows if args.include_self or r not in me]
     stop_daemon = not (args.keep_daemon or args.only or (me and not args.include_self))
 

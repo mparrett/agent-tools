@@ -48,11 +48,13 @@ claude-down --go --pick 3   # stop it (or --pick 3,5 for several)
 ```
 
 Rows are ordered by quiet time, which reshuffles as sessions work, so `--pick`
-resolves numbers against the numbering the last full plan saved
-(`plan.json` in the snapshot directory), not a fresh listing. It refuses when
-that plan is more than 15 minutes old, names a row the plan doesn't have, or
-names a session that has since stopped. Like `--only`, it leaves the daemon
-running, and a preview of a pick doesn't renumber the saved plan.
+resolves numbers against the numbering your last full plan saved, not a fresh
+listing. Plans are kept per caller (`plan-<session or terminal>.json` in the
+snapshot directory), so a plan run from another session can't renumber yours.
+A pick refuses when the plan is more than 15 minutes old, when it names a row the
+plan doesn't have or a session that has since stopped, and when it names the
+session running it, unless `--include-self` is given. Like `--only`, it leaves the
+daemon running, and previewing a pick doesn't renumber the saved plan.
 
 ## The session running it
 

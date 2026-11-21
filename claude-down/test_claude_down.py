@@ -72,7 +72,9 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_LOG", str(log))
     monkeypatch.setenv("FAKE_AGENTS", str(agents))
     monkeypatch.setenv("FAKE_SHELLS", str(shells))
-    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    # A caller id that matches no fixture session, so plan files are named
+    # predictably and nothing is mistaken for the session running the test.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "test-caller")
     monkeypatch.setattr(cd, "POLL_SECONDS", 0.01)
     projects = tmp_path / "projects"
     projects.mkdir()
@@ -111,7 +113,7 @@ def test_plan_only_changes_nothing(fake, capsys):
     assert "plan only" in out
     assert fake.calls() == []
     # The only write is the numbering a later --pick reads.
-    assert [f.name for f in fake.snapshots.iterdir()] == ["plan.json"]
+    assert [f.name for f in fake.snapshots.iterdir()] == ["plan-test-caller.json"]
 
 
 def test_go_stops_idle_then_busy_then_daemon(fake):
@@ -426,6 +428,39 @@ def test_pick_does_not_renumber_the_saved_plan(fake):
     fake.run("--pick", "3")  # a preview of one pick must leave the numbering alone
     fake.run("--go", "--pick", "2")
     assert fake.calls() == ["stop bbbb"]
+
+
+def test_another_callers_plan_does_not_renumber_mine(fake, monkeypatch):
+    fake.set_sessions([session("aaaa"), session("bbbb"), session("cccc")])
+    fake.run()  # mine: 1. aaaa  2. bbbb  3. cccc
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session("aaaa")["sessionId"])
+    fake.run()  # aaaa's own plan leaves aaaa out: 1. bbbb  2. cccc
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "test-caller")
+    fake.run("--go", "--pick", "2")
+    assert fake.calls() == ["stop bbbb"]
+
+
+def test_plan_path_falls_back_to_the_terminal(fake, monkeypatch, tmp_path):
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    monkeypatch.setattr(os, "ttyname", lambda fd: "/dev/ttys004")
+    assert cd.plan_path(tmp_path).name == "plan-dev_ttys004.json"
+
+
+def test_picking_the_running_session_needs_include_self(fake, monkeypatch):
+    fake.set_sessions([session("aaaa"), session("self")])
+    fake.run()  # planned from elsewhere, so "self" has a number
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session("self")["sessionId"])
+    monkeypatch.setattr(cd, "plan_path", lambda d: d / "plan-test-caller.json")
+    with pytest.raises(SystemExit, match="self is the session running this"):
+        fake.run("--go", "--pick", "2")
+    assert fake.calls() == []
+
+
+def test_only_with_a_typo_does_not_claim_the_session_stopped(fake):
+    fake.set_sessions([session("aaaa")])
+    with pytest.raises(SystemExit) as e:
+        fake.run("--go", "--only", "aaab")
+    assert "stopped already" not in str(e.value)
 
 
 @pytest.mark.parametrize("bad", ["0", "x", "2,,3", "-1"])
