@@ -70,7 +70,10 @@ export function frontierView(json: string): FrontierView {
         }
       : null,
     looseEnds: arr(d.loose_ends).map(str),
-    anchors: arr(d.anchors).map(a => ({ ref: str(obj(a).ref), status: str(obj(a).status) })),
+    anchors: byNewest(arr(d.anchors).map(obj)).map(o => {
+      const href = anchorHref(str(o.ref), str(obj(o.liveness).kind))
+      return { ref: str(o.ref), status: str(o.status), ...(href ? { href } : {}) }
+    }),
     sessions: arr(d.sessions).map(s => {
       const o = obj(s)
       return { id: str(o.id).slice(0, 8), role: str(o.role), live: o.live === true }
@@ -105,4 +108,31 @@ export function colorSlots(ids: string[], n: number): Map<string, number> {
     slots.set(id, slot)
   }
   return slots
+}
+
+// Where an anchor opens in a browser, for the kinds that have one: a GitHub PR,
+// issue or repo, as `gh:` or the CLI's equivalent `pr:`. `kind` is the frontier's
+// liveness probe (`pr` or `issue`); without it the issues URL serves both, since
+// GitHub redirects it to a PR of that number.
+export function anchorHref(ref: string, kind: string): string | undefined {
+  const m = /^(gh|pr):([\w.-]+\/[\w.-]+)(?:#(\d+))?$/.exec(ref)
+  if (!m) return undefined
+  const [, scheme, slug, num] = m
+  if (!num) return `https://github.com/${slug}`
+  return `https://github.com/${slug}/${kind === 'pr' || (!kind && scheme === 'pr') ? 'pull' : 'issues'}/${num}`
+}
+
+// Newest activity first: the CLI lists anchors by ref, which puts a repo's latest
+// PR at the bottom. A GitHub anchor's liveness carries its last update; one with
+// no date (a branch, a worktree) keeps its place after the dated ones.
+function byNewest(anchors: Json[]): Json[] {
+  const at = (o: Json) => {
+    const live = obj(o.liveness)
+    // each on its own: a malformed updated_at must not hide a good merged_at
+    return Date.parse(str(live.updated_at)) || Date.parse(str(live.merged_at)) || 0
+  }
+  return anchors
+    .map((o, i) => ({ o, i, t: at(o) }))
+    .sort((a, b) => (a.t && b.t ? b.t - a.t : a.t ? -1 : b.t ? 1 : a.i - b.i))
+    .map(x => x.o)
 }

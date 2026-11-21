@@ -1,14 +1,14 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { asOfLabel, attachments, badgeMode, colorSlots, badgeText, frontierView, touchesWorkstream } from './model'
+import { anchorHref, asOfLabel, attachments, badgeMode, colorSlots, badgeText, frontierView, touchesWorkstream } from './model'
 
 // Trimmed from a real `workstream frontier --json`: only the fields the pane reads.
 const FRONTIER = JSON.stringify({
   workstream: { id: 'abc123def4567890', name: 'demo', title: 'A demo', state: 'open' },
   as_of: '2026-11-11T00:48:09Z (16:48 -08:00)',
   loose_ends: ['5d5c9a2e (canonical) has no recorded frontier'],
-  anchors: [{ ref: 'gh:o/r#7', status: 'open' }],
+  anchors: [{ ref: 'gh:o/r#7', status: 'open', liveness: { kind: 'pr' } }],
   sessions: [{ id: '5d5c9a2e-6027-4916-bd97-eebadc8905d2', role: 'canonical', live: true }],
   recommendation: { action: 'fresh', why: ['canonical session 5d5c9a2e is live'] },
   options: {
@@ -22,6 +22,35 @@ const FRONTIER = JSON.stringify({
 const LS = JSON.stringify([{ id: 'abc123def4567890', name: 'demo' }, { id: 'ffff0000eeee1111', name: null }])
 
 const SID = '5d5c9a2e-6027-4916-bd97-eebadc8905d2'
+
+test('a GitHub anchor links to its PR, issue or repo; other anchors have no link', () => {
+  expect(anchorHref('gh:o/r#7', 'pr')).toBe('https://github.com/o/r/pull/7')
+  expect(anchorHref('gh:o/r#7', 'issue')).toBe('https://github.com/o/r/issues/7')
+  expect(anchorHref('gh:o/r#7', '')).toBe('https://github.com/o/r/issues/7')
+  expect(anchorHref('gh:o/r.js', '')).toBe('https://github.com/o/r.js')
+  expect(anchorHref('pr:o/r#7', '')).toBe('https://github.com/o/r/pull/7')
+  expect(anchorHref('gh:?#7', 'pr')).toBeUndefined()
+  expect(anchorHref('branch:main@/x', '')).toBeUndefined()
+  expect(anchorHref('wt:/x/y', '')).toBeUndefined()
+})
+
+test('anchors list newest activity first, undated ones after in their own order', () => {
+  const anchor = (ref: string, updated?: string) => ({ ref, status: 'open', liveness: updated ? { updated_at: updated } : {} })
+  const f = frontierView(
+    JSON.stringify({
+      ...JSON.parse(FRONTIER),
+      anchors: [
+        anchor('gh:o/a#1', '2026-11-01T00:00:00Z'),
+        anchor('wt:/x'),
+        anchor('gh:o/a#2', '2026-11-03T00:00:00Z'),
+        anchor('branch:b@/x'),
+        { ref: 'gh:o/c#3', status: 'merged', liveness: { updated_at: 'not a time', merged_at: '2026-11-02T12:00:00Z' } },
+        anchor('gh:o/b#9', '2026-11-02T00:00:00Z'),
+      ],
+    }),
+  )
+  expect(f.anchors.map(a => a.ref)).toEqual(['gh:o/a#2', 'gh:o/c#3', 'gh:o/b#9', 'gh:o/a#1', 'wt:/x', 'branch:b@/x'])
+})
 
 test('ls JSON gives names, an unnamed one by its short id, and who owns each', () => {
   expect(attachments(LS)).toEqual([
@@ -164,6 +193,7 @@ test('an attached session gets the badge and a pane with its frontier', async ($
   await ui.press({ key: 'how:abc123def4567890' })
   expect(await ui.find({ type: 'Text', text: /SendMessage to/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /last prompt 3m ago/ })).toBeDefined()
+  expect((await ui.find({ type: 'Link', text: 'gh:o/r#7' }))?.props.href).toBe('https://github.com/o/r/pull/7')
   await ui.press({ key: 'how:abc123def4567890' })
   expect(await ui.find({ type: 'Text', text: /SendMessage to/ })).toBeUndefined()
 
