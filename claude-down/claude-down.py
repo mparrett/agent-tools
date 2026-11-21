@@ -49,17 +49,25 @@ def run(cmd, timeout=CMD_TIMEOUT_SECONDS):
     return p.stdout, None
 
 
-def list_background():
+def fetch_background():
+    """Background sessions from `claude agents --json`; return (rows, error)."""
     out, err = run(["claude", "agents", "--json"])
     if out is None:
-        sys.exit(f"claude-down: claude agents --json failed: {err}")
+        return None, f"claude agents --json failed: {err}"
     try:
         rows = json.loads(out)
     except json.JSONDecodeError as e:
-        sys.exit(f"claude-down: bad JSON from claude agents: {e}")
+        return None, f"bad JSON from claude agents: {e}"
     # The listing includes interactive sessions too; `claude stop` only manages
     # background ones, and an interactive one belongs to whoever is at its terminal.
-    return [r for r in rows if r.get("kind") == "background"]
+    return [r for r in rows if r.get("kind") == "background"], None
+
+
+def list_background():
+    rows, err = fetch_background()
+    if rows is None:
+        sys.exit(f"claude-down: {err}")
+    return rows
 
 
 def holders_by_session():
@@ -121,15 +129,59 @@ def stop(row):
 
 
 def wait_for_idle(ids, grace):
-    """Poll until none of `ids` is busy or `grace` seconds pass; return the still-busy ids."""
+    """Poll until none of `ids` is busy or `grace` seconds pass; return the still-busy ids.
+
+    A failed poll ends the wait rather than the run: by now some sessions are
+    stopped, and exiting here would leave the rest, and the daemon, running.
+    """
     deadline = time.monotonic() + grace
     busy = set(ids)
     while busy and time.monotonic() < deadline:
         time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
-        current = {r["id"]: r for r in list_background()}
+        rows, err = fetch_background()
+        if rows is None:
+            print(f"  ! {err}; stopping without waiting further", file=sys.stderr)
+            break
+        current = {r["id"]: r for r in rows}
         # A session that vanished meanwhile settled on its own.
         busy = {i for i in busy if i in current and is_busy(current[i])}
     return busy
+
+
+def hand_off(commands):
+    """Run `commands` in a detached shell that outlives this session.
+
+    Stopping this session, or the daemon, kills the process running claude-down
+    along with anything still attached to it, so the last steps have to belong
+    to a process in its own session.
+    """
+    subprocess.Popen(
+        ["sh", "-c", "; ".join(commands)],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def refresh(targets, me, include_new):
+    """Re-read statuses just before stopping.
+
+    The plan's listing is seconds old by then, and a session idle in it may have
+    started a turn (a /loop tick, a monitor wakeup) that a no-grace stop would
+    cut off. Sessions that have exited drop out; with include_new, sessions that
+    appeared since the plan join.
+    """
+    rows, err = fetch_background()
+    if rows is None:
+        print(f"  ! {err}; using the plan's listing", file=sys.stderr)
+        return targets
+    known = {r["id"] for r in targets}
+    me_ids = {r["id"] for r in me}
+    fresh = [r for r in rows if r["id"] in known]
+    if include_new:
+        fresh += [r for r in rows if r["id"] not in known and r["id"] not in me_ids]
+    return fresh
 
 
 def parse_args(argv=None):
@@ -157,7 +209,7 @@ def parse_args(argv=None):
     p.add_argument(
         "--include-self",
         action="store_true",
-        help="also stop the session running this (it goes last, with the daemon)",
+        help="also stop the session running this, last, from a detached shell",
     )
     p.add_argument(
         "--snapshot-dir",
@@ -207,28 +259,31 @@ def main(argv=None):
         md = write_snapshot(rows, args.snapshot_dir, datetime.now())
         print(f"\nsnapshot: {md}")
 
-    # This session, when included, goes after everything else: stopping it ends
-    # the run, so anything scheduled after it would never happen.
-    last = [r for r in targets if r in me]
+    others = refresh([r for r in targets if r not in me], me, include_new=not args.only)
     failed = 0
-    for r in idle:
-        if r not in last:
+    for r in others:
+        if not is_busy(r):
             failed += not stop(r)
-    pending = [r for r in busy if r not in last]
+    pending = [r for r in others if is_busy(r)]
     if pending and args.grace:
         print(f"waiting up to {args.grace}s for {len(pending)} busy session(s) to settle")
         wait_for_idle([r["id"] for r in pending], args.grace)
     for r in pending:
         failed += not stop(r)
 
+    final = [f"claude stop {r['id']}" for r in targets if r in me]
     if stop_daemon:
+        final.append("claude daemon stop --any")
+    if any(r in me for r in targets):
+        # Either step ends this session, so neither can run in it.
+        hand_off(final)
+        print(f"handed off to a detached shell: {'; '.join(final)}")
+    elif stop_daemon:
         print("stopping the daemon")
         _, err = run(["claude", "daemon", "stop", "--any"])
         if err:
             print(f"  ! claude daemon stop: {err}", file=sys.stderr)
             failed += 1
-    for r in last:
-        failed += not stop(r)
     return 1 if failed else 0
 
 

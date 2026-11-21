@@ -126,11 +126,48 @@ def test_own_session_is_skipped_and_daemon_kept(fake, monkeypatch, capsys):
     assert "skipping this session (self)" in capsys.readouterr().out
 
 
-def test_include_self_stops_it_after_the_daemon(fake, monkeypatch):
+def test_include_self_hands_its_own_stop_and_the_daemon_to_a_detached_shell(fake, monkeypatch):
     fake.set_sessions([session("self"), session("othr")])
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session("self")["sessionId"])
+    handed = []
+    monkeypatch.setattr(cd, "hand_off", handed.append)
     fake.run("--go", "--grace", "0", "--include-self")
-    assert fake.calls() == ["stop othr", "daemon stop --any", "stop self"]
+    # Stopping this session or the daemon would kill the run mid-call, so
+    # neither happens in-process.
+    assert fake.calls() == ["stop othr"]
+    assert handed == [["claude stop self", "claude daemon stop --any"]]
+
+
+def test_session_that_turned_busy_after_the_plan_gets_the_grace(fake, monkeypatch):
+    fake.set_sessions([session("aaaa")])
+    listings = iter([[session("aaaa")], [session("aaaa", "busy")], [session("aaaa")]])
+    monkeypatch.setattr(cd, "fetch_background", lambda: (next(listings), None))
+    waited = []
+    real_wait = cd.wait_for_idle
+    monkeypatch.setattr(cd, "wait_for_idle", lambda ids, g: waited.append(ids) or real_wait(ids, g))
+    fake.run("--go", "--keep-daemon")
+    assert waited == [["aaaa"]]
+    assert fake.calls() == ["stop aaaa"]
+
+
+def test_sessions_that_appeared_after_the_plan_are_stopped(fake, monkeypatch):
+    listings = iter([[session("aaaa")], [session("aaaa"), session("newb")]])
+    monkeypatch.setattr(cd, "fetch_background", lambda: (next(listings), None))
+    fake.run("--go", "--keep-daemon")
+    assert fake.calls() == ["stop aaaa", "stop newb"]
+
+
+def test_failed_poll_during_grace_still_stops_the_rest(fake, monkeypatch):
+    listings = iter(
+        [
+            ([session("idle1"), session("busy1", "busy")], None),
+            ([session("idle1"), session("busy1", "busy")], None),
+            (None, "claude agents --json failed: timed out"),
+        ]
+    )
+    monkeypatch.setattr(cd, "fetch_background", lambda: next(listings))
+    assert fake.run("--go", "--grace", "30") == 0
+    assert fake.calls() == ["stop idle1", "stop busy1", "daemon stop --any"]
 
 
 def test_only_stops_the_named_session_and_keeps_daemon(fake):
