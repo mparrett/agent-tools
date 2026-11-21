@@ -297,6 +297,88 @@ def test_missing_log_is_not_fatal(fake):
     assert fake.rows() == []
 
 
+def test_html_page_lists_rows_with_copyable_commands(fake):
+    fake.log(log_line(5, "settled cccc0000 (killed)"), log_line(40, "settled aaaa0000 (crashed)"))
+    fake.transcript("cccc0000", {"type": "custom-title", "customTitle": "my <b>task</b> & more"})
+    fake.sessions(closed_rows=[bg("aaaa0000", live=False)])
+    page = fake.out("--html")
+    assert page.startswith("<!doctype html>")
+    assert "2 background sessions closed in the last 24h" in page
+    assert f'data-cmd="claude --bg --resume {sid("cccc0000")}"' in page
+    assert page.index("cccc0000") < page.index("aaaa0000")  # newest first
+    assert 'class="how how-crashed"' in page
+    assert "removed from list" in page  # cccc0000 has only a transcript
+    # Names come from transcripts; they must not become markup.
+    assert "my &lt;b&gt;task&lt;/b&gt; &amp; more" in page
+    assert "<b>task</b>" not in page
+
+
+def test_html_page_with_nothing_closed(fake):
+    page = fake.out("--html", "--since", "30m")
+    assert "No background sessions closed in that window." in page
+    assert "0 background sessions closed in the last 30m" in page
+
+
+def test_html_page_shows_listing_problems(fake, monkeypatch):
+    fake.log(log_line(5, "settled cccc0000 (killed)"))
+    fake.transcript("cccc0000", {"type": "custom-title", "customTitle": "t"})
+    monkeypatch.setenv("FAKE_FAIL", "1")
+    assert '<p class="note">`claude agents --json` failed' in fake.out("--html")
+
+
+def three_closes(fake):
+    fake.log(
+        log_line(30, "settled aaaa0000 (killed)"),
+        log_line(20, "settled bbbb0000 (done)"),
+        log_line(10, "settled cccc0000 (killed)"),
+    )
+    fake.sessions(closed_rows=[bg(s, live=False) for s in ("aaaa0000", "bbbb0000", "cccc0000")])
+
+
+def test_html_subtitle_counts_what_matched_not_what_the_limit_kept(fake):
+    three_closes(fake)
+    page = fake.out("--html", "-n", "2")
+    assert "3 background sessions closed in the last 24h, showing the newest 2" in page
+
+
+def test_html_subtitle_names_the_stopped_filter(fake):
+    three_closes(fake)
+    page = fake.out("--html", "--stopped")
+    assert "2 background sessions stopped in the last 24h (3 closed in all)" in page
+
+
+def test_html_empty_state_names_the_stopped_filter(fake):
+    fake.log(log_line(10, "settled bbbb0000 (done)"))
+    fake.sessions(closed_rows=[bg("bbbb0000", live=False)])
+    assert "No background sessions stopped in that window." in fake.out("--html", "--stopped")
+
+
+def test_settle_without_a_reason_reads_as_unknown(fake):
+    fake.log(log_line(5, "settled aaaa0000"))
+    fake.sessions(closed_rows=[bg("aaaa0000", live=False)])
+    assert fake.rows()[0]["how"] == "unknown"
+    assert 'class="how how-unknown">unknown<' in fake.out("--html")
+
+
+def test_json_and_html_are_exclusive():
+    with pytest.raises(SystemExit):
+        cc.parse_args(["--json", "--html"])
+
+
+@pytest.mark.parametrize(
+    "since, label",
+    [
+        (timedelta(minutes=30), "30m"),
+        (timedelta(minutes=90), "90m"),
+        (timedelta(hours=6), "6h"),
+        (timedelta(days=1), "24h"),
+        (timedelta(days=3), "3d"),
+    ],
+)
+def test_window_label(since, label):
+    assert cc.window_label(since) == label
+
+
 @pytest.mark.parametrize(
     "text, expected",
     [("30m", timedelta(minutes=30)), ("6h", timedelta(hours=6)), ("3d", timedelta(days=3))],
@@ -305,7 +387,7 @@ def test_duration(text, expected):
     assert cc.duration(text) == expected
 
 
-@pytest.mark.parametrize("bad", ["6", "h", "1w", "-1h"])
+@pytest.mark.parametrize("bad", ["6", "h", "1w", "-1h", "0m", "0h"])
 def test_duration_rejects(bad):
     with pytest.raises(Exception):
         cc.duration(bad)

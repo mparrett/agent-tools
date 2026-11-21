@@ -24,6 +24,7 @@ background under the same id.
 """
 
 import argparse
+import html
 import json
 import os
 import re
@@ -93,7 +94,9 @@ def last_close(evs):
         elif event == "settled":
             m = SETTLED.search(rest)
             reason = m["reason"] if m else ""
-            how = {"killed": "stopped", "done": "exited", "crashed": "crashed"}.get(reason, reason)
+            how = {"killed": "stopped", "done": "exited", "crashed": "crashed"}.get(
+                reason, reason or "unknown"
+            )
             if retired and ts - retired[0] <= RETIRE_SETTLE_WINDOW:
                 closed = (ts, "retired", retired[1], retired[2])
             else:
@@ -219,11 +222,153 @@ def closed_sessions(now, since):
     return rows, problems
 
 
+PAGE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Closed sessions</title>
+<style>
+:root {
+  --bg: #fbfbfa; --fg: #1d1d1b; --muted: #6b6b66; --line: #e6e5e1; --code: #f1f0ec;
+  --stopped: #b3471d; --retired: #4a6a8a; --exited: #3d7a4f; --crashed: #a3263a;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #18181a; --fg: #e8e7e3; --muted: #9a9993; --line: #2c2c2f; --code: #232326;
+    --stopped: #f0875a; --retired: #8fb0d3; --exited: #79c38f; --crashed: #f07a8c;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 32px 16px; background: var(--bg); color: var(--fg);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+main { max-width: 1100px; margin: 0 auto; }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+.sub { color: var(--muted); margin: 0 0 20px; }
+.note { border-left: 3px solid var(--stopped); padding: 6px 10px; margin: 0 0 16px; color: var(--muted); }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 0 10px 8px; }
+td { padding: 10px; border-top: 1px solid var(--line); vertical-align: top; }
+td.n, td.ago { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.name { font-weight: 500; }
+.dir { color: var(--muted); font-size: 12px; }
+.how { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.how small { font-weight: 400; color: var(--muted); }
+.how-stopped { color: var(--stopped); } .how-retired { color: var(--retired); }
+.how-exited { color: var(--exited); } .how-crashed { color: var(--crashed); }
+.tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; margin-left: 6px; }
+.cmd { display: flex; gap: 6px; align-items: center; }
+code {
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code);
+  padding: 3px 6px; border-radius: 4px; overflow-wrap: anywhere; user-select: all;
+}
+button {
+  font: inherit; font-size: 12px; color: var(--fg); background: transparent; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 4px; padding: 2px 8px; white-space: nowrap;
+}
+button:hover { border-color: var(--muted); }
+.empty { color: var(--muted); padding: 24px 0; }
+@media (max-width: 720px) {
+  thead { display: none; }
+  tr { display: block; border-top: 1px solid var(--line); padding: 10px 0; }
+  td { display: block; border: 0; padding: 2px 0; }
+  td.n { display: none; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1>Closed sessions</h1>
+<p class="sub">{subtitle}</p>
+{notes}
+{body}
+</main>
+<script>
+// Clipboard API needs a secure context, which a file:// page may not be; fall
+// back to selecting the text so a manual copy still works.
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-cmd]");
+  if (!b) return;
+  try {
+    await navigator.clipboard.writeText(b.dataset.cmd);
+    b.textContent = "copied";
+  } catch {
+    getSelection().selectAllChildren(b.previousElementSibling);
+    b.textContent = "selected";
+  }
+  setTimeout(() => (b.textContent = "copy"), 1200);
+});
+</script>
+</body>
+</html>
+"""
+
+
+def window_label(since):
+    minutes = int(since.total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    # "24h" reads better than "1d"; days only once they are the natural unit.
+    if minutes >= 48 * 60 and minutes % (24 * 60) == 0:
+        return f"{minutes // (24 * 60)}d"
+    if minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    return f"{minutes}m"
+
+
+def render_html(rows, now, since, problems, matched=None, closed=None, stopped_only=False):
+    """`matched` counts rows before -n cut them, `closed` before --stopped filtered them."""
+    e = html.escape
+    matched = len(rows) if matched is None else matched
+    verb = "stopped" if stopped_only else "closed"
+    subtitle = (
+        f"{matched} background session{'s' if matched != 1 else ''} {verb} in the last "
+        f"{window_label(since)}"
+    )
+    if stopped_only and closed is not None:
+        subtitle += f" ({closed} closed in all)"
+    if len(rows) < matched:
+        subtitle += f", showing the newest {len(rows)}"
+    else:
+        subtitle += ", newest first"
+    subtitle += f" &middot; generated {e(now.astimezone().strftime('%Y-%m-%d %H:%M'))}"
+    notes = "".join(f'<p class="note">{e(p)}</p>' for p in problems)
+    if not rows:
+        body = f'<p class="empty">No background sessions {verb} in that window.</p>'
+    else:
+        out = [
+            "<table><thead><tr><th>#</th><th>Closed</th><th>How</th><th>Session</th>"
+            "<th>Reopen</th></tr></thead><tbody>"
+        ]
+        for n, r in enumerate(rows, 1):
+            cmd = f"claude --bg --resume {r['sessionId']}"
+            idle = f" <small>{e(r['idle'])}</small>" if r["idle"] else ""
+            tag = '<span class="tag">removed from list</span>' if r["removed"] else ""
+            closed_at = r["_when"].astimezone().strftime("%Y-%m-%d %H:%M")
+            out.append(
+                f'<tr><td class="n">{n}</td>'
+                f'<td class="ago" title="{e(closed_at)}">{e(ago(r["_when"], now))} ago</td>'
+                f'<td class="how how-{e(r["how"])}">{e(r["how"])}{idle}</td>'
+                f'<td><span class="name">{e(r["name"] or "(unnamed)")}</span>{tag}'
+                f'<div class="dir">{e(tilde(r["cwd"]))}</div></td>'
+                f'<td><div class="cmd"><code>{e(cmd)}</code>'
+                f'<button type="button" data-cmd="{e(cmd)}">copy</button></div></td></tr>'
+            )
+        out.append("</tbody></table>")
+        body = "".join(out)
+    # str.replace rather than str.format: the CSS and script are full of braces.
+    return PAGE.replace("{subtitle}", subtitle).replace("{notes}", notes).replace("{body}", body)
+
+
 def duration(text):
     m = DURATION.match(text)
     if not m:
         raise argparse.ArgumentTypeError(f"expected e.g. 30m, 6h or 3d, not {text!r}")
     n, unit = int(m[1]), m[2]
+    if n == 0:
+        raise argparse.ArgumentTypeError("the window must be longer than zero")
     return timedelta(**{{"m": "minutes", "h": "hours", "d": "days"}[unit]: n})
 
 
@@ -259,7 +404,13 @@ def parse_args(argv=None):
     p.add_argument(
         "-n", "--limit", type=positive, default=20, help="most rows to show (default 20)"
     )
-    p.add_argument("--json", action="store_true", help="emit the rows as JSON")
+    fmt = p.add_mutually_exclusive_group()
+    fmt.add_argument("--json", action="store_true", help="emit the rows as JSON")
+    fmt.add_argument(
+        "--html",
+        action="store_true",
+        help="emit a self-contained HTML page (redirect it to a file and open it)",
+    )
     return p.parse_args(argv)
 
 
@@ -270,12 +421,18 @@ def main(argv=None):
     # stderr, so --json output stays parseable while a script still sees the caveat.
     for problem in problems:
         print(f"claude-closed: {problem}", file=sys.stderr)
+    closed = len(rows)
     if args.stopped:
         rows = [r for r in rows if r["how"] == "stopped"]
+    matched = len(rows)
     rows = rows[: args.limit]
 
     if args.json:
         print(json.dumps([{k: v for k, v in r.items() if k != "_when"} for r in rows], indent=2))
+        return 0
+    if args.html:
+        page = render_html(rows, now, args.since, problems, matched, closed, args.stopped)
+        print(page, end="")
         return 0
     if not rows:
         print("no background sessions closed in that window")
