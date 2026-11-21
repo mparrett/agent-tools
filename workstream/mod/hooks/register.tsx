@@ -19,7 +19,7 @@ const FRONTIER_EVERY_MS = 5 * 60_000
 
 const INITIAL: WorkstreamView = { attached: null, frontiers: [], error: null, isLoading: false }
 // Change the tag when WorkstreamView's fields change: a value outlives a reload.
-const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-3' })
+const view = atom({ plugin: 'workstream', key: 'view' } as const, INITIAL, { shape: 'view-4' })
 // The pane's foldable parts of each workstream, and whether each starts open:
 // the sections do, save loose ends, a list that only grows and is read on
 // purpose; the agent-facing instructions behind `how` do not.
@@ -201,7 +201,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Link } = $.ui.resolve(e)
     const v = await read($, view)
     const flips = await read($, flipped)
     const isMin = await read($, minimized)
@@ -369,7 +369,7 @@ export const register: Register = (on, options) => {
                         <Text>
                           {'  '}
                           <Text dimColor>{a.status.padEnd(9)}</Text>
-                          {a.ref}
+                          {a.href ? <Link href={a.href} label={a.ref} /> : a.ref}
                         </Text>
                       )),
                     )}

@@ -8,7 +8,7 @@ export type FrontierView = {
   state: string
   next: { action: string; session: string; why: string; how: string; facts: string[] } | null
   looseEnds: string[]
-  anchors: { ref: string; status: string }[]
+  anchors: { ref: string; status: string; href?: string }[]
   sessions: { id: string; role: string; live: boolean }[]
   prose: { path: string; exists: boolean } | null
   asOf: string | null
