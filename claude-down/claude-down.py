@@ -29,13 +29,20 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 POLL_SECONDS = 5
 # `claude daemon stop` waits on its workers; past this the daemon is wedged and
 # the operator needs to know rather than watch a silent prompt.
 CMD_TIMEOUT_SECONDS = 120
+# Transcripts are filed under the directory a session started in, which need not
+# be its cwd now, so the lookup globs every project. Override for tests.
+PROJECTS_DIR = Path(
+    os.environ.get("CLAUDE_DOWN_PROJECTS_DIR") or Path.home() / ".claude" / "projects"
+)
+# Enough tail to hold several entries; a single tool result can run long.
+TAIL_BYTES = 256 * 1024
 
 
 def run(cmd, timeout=CMD_TIMEOUT_SECONDS):
@@ -94,19 +101,79 @@ def is_busy(row):
     return row.get("status") == "busy"
 
 
-def describe(row, held):
+def last_activity(session_id):
+    """When the session last wrote to its transcript, or None if there is none.
+
+    Neither `claude agents --json` nor the daemon's roster records activity, but
+    every turn appends timestamped entries to the transcript. The last entry's
+    timestamp is used rather than the file's mtime, which a copy or touch moves.
+    """
+    newest = None
+    for path in PROJECTS_DIR.glob(f"*/{session_id}.jsonl"):
+        try:
+            with open(path, "rb") as f:
+                f.seek(max(0, path.stat().st_size - TAIL_BYTES))
+                chunk = f.read()
+        except OSError:
+            continue
+        stamp = None
+        for line in reversed(chunk.splitlines()):
+            try:
+                ts = json.loads(line).get("timestamp")
+            except (json.JSONDecodeError, AttributeError):
+                # The seek usually lands mid-line; that fragment is not an entry.
+                continue
+            if ts:
+                try:
+                    stamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                break
+        if stamp is None:
+            stamp = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+        newest = stamp if newest is None else max(newest, stamp)
+    return newest
+
+
+def ago(then, now):
+    if then is None:
+        return "?"
+    minutes = int((now - then).total_seconds() // 60)
+    if minutes < 1:
+        return "<1m"
+    if minutes < 120:
+        return f"{minutes}m"
+    if minutes < 48 * 60:
+        return f"{minutes // 60}h"
+    return f"{minutes // (24 * 60)}d"
+
+
+def describe(row, held, now):
     state = "busy" if is_busy(row) else "idle"
-    line = f"  {row['id']}  {state:4}  {row.get('name') or '(unnamed)'}  [{row.get('cwd', '')}]"
+    quiet = ago(row.get("_last"), now)
+    line = f"  {row['id']}  {state:4} {quiet:>4}  {row.get('name') or '(unnamed)'}  [{row.get('cwd', '')}]"
     for cmd in held.get(row.get("sessionId"), []):
         first = cmd.splitlines()[0] if cmd else ""
-        line += f"\n            holds: {first[:100]}"
+        line += f"\n                 holds: {first[:100]}"
     return line
+
+
+def quietest_first(rows):
+    """Longest since last activity first; sessions with no transcript go last."""
+    oldest = datetime.max.replace(tzinfo=timezone.utc)
+    return sorted(rows, key=lambda r: r.get("_last") or oldest)
 
 
 def write_snapshot(rows, directory, now):
     directory.mkdir(parents=True, exist_ok=True)
     stamp = f"{now:%Y-%m-%dT%H%M%S}"
-    (directory / f"{stamp}.json").write_text(json.dumps(rows, indent=2) + "\n")
+    records = []
+    for r in rows:
+        rec = {k: v for k, v in r.items() if k != "_last"}
+        if r.get("_last"):
+            rec["lastActivity"] = r["_last"].isoformat()
+        records.append(rec)
+    (directory / f"{stamp}.json").write_text(json.dumps(records, indent=2) + "\n")
     lines = [f"# Background sessions stopped — {now:%Y-%m-%d %H:%M}", ""]
     for r in rows:
         lines.append(f"- **{r.get('name') or '(unnamed)'}** — `{r.get('cwd', '')}`")
@@ -240,12 +307,18 @@ def main(argv=None):
     stop_daemon = not (args.keep_daemon or args.only or (me and not args.include_self))
 
     held = holders_by_session()
-    idle = [r for r in targets if not is_busy(r)]
-    busy = [r for r in targets if is_busy(r)]
+    for r in targets:
+        r["_last"] = last_activity(r.get("sessionId", ""))
+    idle = quietest_first([r for r in targets if not is_busy(r)])
+    busy = quietest_first([r for r in targets if is_busy(r)])
+    now = datetime.now(timezone.utc)
 
     print(f"{len(targets)} background session(s) to stop: {len(idle)} idle, {len(busy)} busy")
+    print(
+        "  (the time after each state is how long since the session last wrote to its transcript)"
+    )
     for r in idle + busy:
-        print(describe(r, held))
+        print(describe(r, held, now))
     if me and me[0] in rows and not args.include_self:
         print(f"skipping this session ({me[0]['id']}), and the daemon stop that would end it")
     if stop_daemon:
