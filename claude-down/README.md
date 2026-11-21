@@ -76,3 +76,6 @@ claude-down --go --keep-daemon
 Snapshots go to `~/.local/state/claude-down/` (`latest.md` links to the newest),
 or to `$CLAUDE_DOWN_DIR`, or to `--snapshot-dir`. Exit status is 1 if any stop
 failed. The remaining stops still run.
+
+To find a session stopped by mistake, here or with ctrl+x in agent view, and
+reopen it: [`claude-closed`](../claude-closed/README.md).
