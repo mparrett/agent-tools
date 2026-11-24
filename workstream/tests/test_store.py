@@ -625,6 +625,18 @@ def test_reads_skip_the_session_lookup(tmp_path, monkeypatch, verb):
     assert store._run([verb])["actor"] == ""
 
 
+@pytest.mark.parametrize("flag", ["--mine", "--ready"])
+def test_ls_filtered_by_claims_still_names_the_session(tmp_path, monkeypatch, flag):
+    """weft resolves the actor for these filters; without it, an agent's
+    `ls --mine` would answer for the human's git email."""
+    _fake_weft(tmp_path, monkeypatch, 'printf \'{"nodes": [], "actor": "%s"}\' "$WEFT_ACTOR"')
+    monkeypatch.setattr(seam, "live_registry", lambda *a, **k: [{"pid": 1, "sessionId": SID}])
+    monkeypatch.delenv("WEFT_ACTOR", raising=False)
+    monkeypatch.delenv("CLAUDE_PID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
+    assert store._run(["ls", flag])["actor"] == f"agent:claude:{SID}"
+
+
 # --- join: attach through one `weft apply` -----------------------------------
 
 

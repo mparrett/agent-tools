@@ -567,6 +567,12 @@ def test_peer_cache_rescans_a_transcript_rewritten_in_place(store):
     at = datetime(2026, 10, 25, 15, 0)
     path = store.transcript(SID_C, [peer_record(SID_C, at, "one", "lead")])
     assert _bodies(store.load(registry=[]), path) == ["one"]
+    # Same inode, same length, a newline at the cached offset: only the
+    # bytes before it tell the rewrite from an untouched file.
+    with open(path, "r+") as fh:
+        fh.truncate(0)
+    store.transcript(SID_C, [peer_record(SID_C, at, "two", "lead")])
+    assert _bodies(store.load(registry=[]), path) == ["two"]
     # Same inode, shorter: the cached offset is past the end.
     with open(path, "r+") as fh:
         fh.truncate(0)

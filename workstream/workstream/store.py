@@ -276,12 +276,19 @@ def _session_for_actor(env_sid: Optional[str]) -> Optional[str]:
     return sid
 
 
-# weft verbs that never write, so never record an actor. Resolving the session
-# walks the process table, and it was over half of each badge poll
-# (`ls --session`), which the workstream mod runs every minute in every pane.
-# An allowlist rather than a list of writes: a verb missing here only costs
-# speed, while a write missing from the other kind would lose attribution.
+# weft calls whose answer doesn't depend on who asks, so need no WEFT_ACTOR.
+# Resolving the session walks the process table, and it was over half of each
+# badge poll (`ls --session`), which the workstream mod runs every minute in
+# every pane. An allowlist rather than a list of writes: a call missing here
+# only costs speed, while a write missing from the other kind would lose
+# attribution. `ls --mine` and `--ready` filter by the actor's claims, so they
+# still resolve it; `env` reports the actor, but store reads only its log path.
 _READ_VERBS = frozenset({"ls", "show", "export", "env"})
+_ACTOR_FLAGS = frozenset({"--mine", "--ready"})
+
+
+def _needs_actor(args: list[str]) -> bool:
+    return args[0] not in _READ_VERBS or not _ACTOR_FLAGS.isdisjoint(args)
 
 
 def _run(
@@ -296,7 +303,7 @@ def _run(
     env = dict(os.environ)
     if actor:
         env["WEFT_ACTOR"] = actor
-    elif "WEFT_ACTOR" not in env and args[0] not in _READ_VERBS:
+    elif "WEFT_ACTOR" not in env and _needs_actor(args):
         # Present but empty is a choice too: weft then uses its own default.
         default = _default_actor()
         if default:

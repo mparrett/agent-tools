@@ -63,7 +63,9 @@ _SUBAGENT_ID_RE = re.compile(r"a[0-9a-f]{16}")
 
 
 # Bump when what _peer_raw keeps, or the cache file's shape, changes.
-PEER_CACHE_VERSION = 1
+PEER_CACHE_VERSION = 2
+# Enough to span the last line or two before a cached offset.
+_TAIL_BYTES = 4096
 
 
 def _peer_cache_file(path: Path) -> Path:
@@ -77,14 +79,23 @@ def _peer_cache_file(path: Path) -> Path:
     return gh_cache_dir().parent / "peers" / f"{key}.json"
 
 
-def _ends_line(path: Path, offset: int) -> bool:
-    """Whether the byte before `offset` is a newline, as it was when cached."""
+def _tail_hash(path: Path, offset: int) -> Optional[str]:
+    """A hash of the bytes just before `offset`, which an append never touches.
+    A cached offset is reused only while they still match: an inode and size
+    check passes a transcript rewritten in place, and a newline at the offset
+    proves nothing, since every JSONL line ends in one."""
+    import hashlib
+
+    start = max(0, offset - _TAIL_BYTES)
     try:
         with open(path, "rb") as fh:
-            fh.seek(offset - 1)
-            return fh.read(1) == b"\n"
+            fh.seek(start)
+            data = fh.read(offset - start)
     except OSError:
-        return False
+        return None
+    if len(data) != offset - start:
+        return None
+    return hashlib.sha1(data).hexdigest()
 
 
 def _peer_raw(raw: bytes) -> Optional[list]:
@@ -685,18 +696,17 @@ class HookLog:
                 and got.get("ino") == st.st_ino
                 and 0 <= got.get("offset", -1) <= st.st_size
             ):
-                raws, start = list(got["records"]), int(got["offset"])
-                hit = start == 0 or _ends_line(path, start)
-                if not hit:  # rewritten in place, not appended to
-                    raws, start = [], 0
+                hit = got.get("tail") == _tail_hash(path, int(got["offset"]))
+                if hit:  # else rewritten in place, not appended to
+                    raws, start = list(got["records"]), int(got["offset"])
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             pass
         found, tail, complete = self._scan_raw(path, start)
         if not hit or complete != start:
             raws.extend(found)
+            tmp = cache_path.with_suffix(f".{os.getpid()}.tmp")
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = cache_path.with_suffix(f".{os.getpid()}.tmp")
                 tmp.write_text(
                     json.dumps(
                         {
@@ -704,13 +714,15 @@ class HookLog:
                             "path": str(path),
                             "ino": st.st_ino,
                             "offset": complete,
+                            "tail": _tail_hash(path, complete),
                             "records": raws,
                         }
                     )
                 )
                 os.replace(tmp, cache_path)
             except OSError:
-                pass  # A cache that can't be written costs speed, not answers.
+                # A cache that can't be written costs speed, not answers.
+                tmp.unlink(missing_ok=True)
         # A line still being written is read every time and never cached.
         return [r for r in (self._peer_instant(*raw) for raw in raws + tail) if r is not None]
 
