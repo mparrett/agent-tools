@@ -62,6 +62,64 @@ _PEER_MARKER = b'"kind":"peer"'
 _SUBAGENT_ID_RE = re.compile(r"a[0-9a-f]{16}")
 
 
+# Bump when what _peer_raw keeps, or the cache file's shape, changes.
+PEER_CACHE_VERSION = 2
+# Enough to span the last line or two before a cached offset.
+_TAIL_BYTES = 4096
+
+
+def _peer_cache_file(path: Path) -> Path:
+    """Beside the gh and overlap caches. Named by a hash of the path: two
+    project directories can hold transcripts with the same session id."""
+    import hashlib
+
+    from .anchors import gh_cache_dir
+
+    key = hashlib.sha1(str(path).encode()).hexdigest()[:20]
+    return gh_cache_dir().parent / "peers" / f"{key}.json"
+
+
+def _tail_hash(path: Path, offset: int) -> Optional[str]:
+    """A hash of the bytes just before `offset`, which an append never touches.
+    A cached offset is reused only while they still match: an inode and size
+    check passes a transcript rewritten in place, and a newline at the offset
+    proves nothing, since every JSONL line ends in one."""
+    import hashlib
+
+    start = max(0, offset - _TAIL_BYTES)
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            data = fh.read(offset - start)
+    except OSError:
+        return None
+    if len(data) != offset - start:
+        return None
+    return hashlib.sha1(data).hexdigest()
+
+
+def _peer_raw(raw: bytes) -> Optional[list]:
+    """[timestamp, recipient sid, origin] if `raw` is an incoming peer message."""
+    try:
+        rec = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(rec, dict):
+        return None
+    origin = rec.get("origin")
+    if (
+        rec.get("type") != "user"
+        or not rec.get("isMeta")
+        or not isinstance(origin, dict)
+        or origin.get("kind") != "peer"
+    ):
+        return None
+    ts = rec.get("timestamp", "")
+    if not isinstance(ts, str):
+        return None
+    return [ts, rec.get("sessionId") or "", origin]
+
+
 @dataclass
 class HookEvent:
     at_local: datetime
@@ -615,45 +673,92 @@ class HookLog:
         return out
 
     def _scan_peers(self, path: Path) -> list[tuple[Instant, str, dict]]:
+        """Every peer record in one transcript, through an on-disk cache.
+
+        Transcripts only grow, so the cache keeps the records up to the last
+        complete line and the next call scans only the bytes after it. Without
+        it every frontier re-read every transcript touched in the window, which
+        was the largest single cost of a build and most of its filesystem load.
+        The cache holds raw timestamps: an Instant's offset comes from this
+        log's timeline, which a later log may infer differently."""
+        cache_path = _peer_cache_file(path)
+        try:
+            st = path.stat()
+        except OSError:
+            return []
+        raws: list = []
+        start = 0
+        hit = False
+        try:
+            got = json.loads(cache_path.read_text())
+            if (
+                got.get("version") == PEER_CACHE_VERSION
+                and got.get("ino") == st.st_ino
+                and 0 <= got.get("offset", -1) <= st.st_size
+            ):
+                hit = got.get("tail") == _tail_hash(path, int(got["offset"]))
+                if hit:  # else rewritten in place, not appended to
+                    raws, start = list(got["records"]), int(got["offset"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        found, tail, complete = self._scan_raw(path, start)
+        if not hit or complete != start:
+            raws.extend(found)
+            tmp = cache_path.with_suffix(f".{os.getpid()}.tmp")
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp.write_text(
+                    json.dumps(
+                        {
+                            "version": PEER_CACHE_VERSION,
+                            "path": str(path),
+                            "ino": st.st_ino,
+                            "offset": complete,
+                            "tail": _tail_hash(path, complete),
+                            "records": raws,
+                        }
+                    )
+                )
+                os.replace(tmp, cache_path)
+            except OSError:
+                # A cache that can't be written costs speed, not answers.
+                tmp.unlink(missing_ok=True)
+        # A line still being written is read every time and never cached.
+        return [r for r in (self._peer_instant(*raw) for raw in raws + tail) if r is not None]
+
+    def _scan_raw(self, path: Path, start: int) -> tuple[list, list, int]:
+        """(records on complete lines, records on an unterminated last line,
+        offset just past the last complete line), scanning from `start`, which
+        must sit at a line boundary."""
         # mmap + find rather than reading lines: the window's transcripts run
         # to gigabytes and a few hundred lines in them matter. Claude Code
         # writes compact JSON, so the marker has no space after the colon.
-        found = []
+        found: list = []
+        tail: list = []
+        complete = start
         try:
             with open(path, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as m:
-                i = m.find(_PEER_MARKER)
+                complete = max(start, m.rfind(b"\n", start) + 1)
+                i = m.find(_PEER_MARKER, start)
                 while i >= 0:
-                    start = m.rfind(b"\n", 0, i) + 1
+                    line_start = m.rfind(b"\n", start, i) + 1
+                    line_start = max(line_start, start)
                     end = m.find(b"\n", i)
                     end = len(m) if end < 0 else end
-                    rec = self._peer_record(m[start:end])
-                    if rec is not None:
-                        found.append(rec)
+                    raw = _peer_raw(m[line_start:end])
+                    if raw is not None:
+                        (found if end < complete else tail).append(raw)
                     i = m.find(_PEER_MARKER, end)
         except (OSError, ValueError):
             # ValueError: mmap of an empty file.
             pass
-        return found
+        return found, tail, complete
 
-    def _peer_record(self, raw: bytes) -> Optional[tuple[Instant, str, dict]]:
-        try:
-            rec = json.loads(raw)
-        except ValueError:
+    def _peer_instant(self, ts: str, sid: str, origin: dict) -> Optional[tuple[Instant, str, dict]]:
+        at = seam.parse_ts(ts)
+        if at is None or at.tzinfo is None:
             return None
-        if not isinstance(rec, dict):
-            return None
-        origin = rec.get("origin")
-        if (
-            rec.get("type") != "user"
-            or not rec.get("isMeta")
-            or not isinstance(origin, dict)
-            or origin.get("kind") != "peer"
-        ):
-            return None
-        ts = seam.parse_ts(rec.get("timestamp", ""))
-        if ts is None or ts.tzinfo is None:
-            return None
-        return Instant(ts, self.timeline.offset_at_utc(ts)), rec.get("sessionId") or "", origin
+        return Instant(at, self.timeline.offset_at_utc(at)), sid, origin
 
     def _resolve_by_registry(self, to: str, at: Instant) -> tuple[Optional[str], Optional[str]]:
         reg = self._registry()

@@ -518,6 +518,73 @@ def test_peer_scan_reads_each_top_level_transcript_once(store, monkeypatch):
     assert sorted(scanned) == sorted({f"{SID_A}.jsonl", f"{SID_C}.jsonl"})
 
 
+def _bodies(log, path):
+    return [origin["body"] for _, _, origin in log._scan_peers(path)]
+
+
+def _spy_scans(log, monkeypatch):
+    starts = []
+    real = log._scan_raw
+    monkeypatch.setattr(log, "_scan_raw", lambda p, start: starts.append(start) or real(p, start))
+    return starts
+
+
+def test_peer_cache_scans_only_appended_bytes_in_a_later_run(store, monkeypatch):
+    at = datetime(2026, 10, 25, 15, 0)
+    path = store.transcript(SID_C, [peer_record(SID_C, at, "one", "lead")])
+    first = store.load(registry=[])
+    assert _bodies(first, path) == ["one"]
+    size = path.stat().st_size
+
+    store.transcript(SID_C, [peer_record(SID_C, at + H, "two", "lead")])
+    later = store.load(registry=[])
+    starts = _spy_scans(later, monkeypatch)
+    assert _bodies(later, path) == ["one", "two"]
+    assert starts == [size]
+    # Nothing appended since: the next run scans nothing new and keeps both.
+    again = store.load(registry=[])
+    starts = _spy_scans(again, monkeypatch)
+    assert _bodies(again, path) == ["one", "two"]
+    assert starts == [path.stat().st_size]
+
+
+def test_peer_cache_never_keeps_a_line_still_being_written(store):
+    at = datetime(2026, 10, 25, 15, 0)
+    path = store.transcript(SID_C, [peer_record(SID_C, at, "one", "lead")])
+    partial = json.dumps(
+        {"sessionId": SID_C, **peer_record(SID_C, at, "two", "lead")}, separators=(",", ":")
+    )
+    with open(path, "a") as fh:
+        fh.write(partial)  # no newline yet
+    assert _bodies(store.load(registry=[]), path) == ["one", "two"]
+    with open(path, "a") as fh:
+        fh.write("\n")
+    # Read once from the cache would make it twice; it must stay one.
+    assert _bodies(store.load(registry=[]), path) == ["one", "two"]
+
+
+def test_peer_cache_rescans_a_transcript_rewritten_in_place(store):
+    at = datetime(2026, 10, 25, 15, 0)
+    path = store.transcript(SID_C, [peer_record(SID_C, at, "one", "lead")])
+    assert _bodies(store.load(registry=[]), path) == ["one"]
+    # Same inode, same length, a newline at the cached offset: only the
+    # bytes before it tell the rewrite from an untouched file.
+    with open(path, "r+") as fh:
+        fh.truncate(0)
+    store.transcript(SID_C, [peer_record(SID_C, at, "two", "lead")])
+    assert _bodies(store.load(registry=[]), path) == ["two"]
+    # Same inode, shorter: the cached offset is past the end.
+    with open(path, "r+") as fh:
+        fh.truncate(0)
+    store.transcript(SID_C, [peer_record(SID_C, at, "x", "lead")])
+    assert _bodies(store.load(registry=[]), path) == ["x"]
+    # Same inode, longer, the old offset no longer at a line boundary.
+    with open(path, "r+") as fh:
+        fh.truncate(0)
+    store.transcript(SID_C, [peer_record(SID_C, at, "a much longer body than before", "lead")])
+    assert _bodies(store.load(registry=[]), path) == ["a much longer body than before"]
+
+
 def test_pairing_finds_a_transcript_by_session_id_when_path_is_stale(store):
     t0 = datetime(2026, 10, 25, 9, 0)
     lines = store.start(SID_A, t0, -5 * H)

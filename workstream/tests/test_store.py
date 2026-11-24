@@ -607,7 +607,34 @@ def test_actor_defaults_to_the_calling_session(
         else:
             monkeypatch.setenv(var, value)
     monkeypatch.delenv("CLAUDE_PID", raising=False)
-    assert store._run(["ls"])["actor"] == expected
+    assert store._run(["done", "n1"])["actor"] == expected
+
+
+@pytest.mark.parametrize("verb", sorted(store._READ_VERBS))
+def test_reads_skip_the_session_lookup(tmp_path, monkeypatch, verb):
+    """A read records no actor, so it must not pay for the process-table walk
+    that finds one: the workstream mod polls `ls` every minute per pane."""
+    _fake_weft(tmp_path, monkeypatch, 'printf \'{"nodes": [], "actor": "%s"}\' "$WEFT_ACTOR"')
+
+    def boom(*a, **k):
+        raise AssertionError("live registry read for a read-only verb")
+
+    monkeypatch.setattr(seam, "live_registry", boom)
+    monkeypatch.delenv("WEFT_ACTOR", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
+    assert store._run([verb])["actor"] == ""
+
+
+@pytest.mark.parametrize("flag", ["--mine", "--ready"])
+def test_ls_filtered_by_claims_still_names_the_session(tmp_path, monkeypatch, flag):
+    """weft resolves the actor for these filters; without it, an agent's
+    `ls --mine` would answer for the human's git email."""
+    _fake_weft(tmp_path, monkeypatch, 'printf \'{"nodes": [], "actor": "%s"}\' "$WEFT_ACTOR"')
+    monkeypatch.setattr(seam, "live_registry", lambda *a, **k: [{"pid": 1, "sessionId": SID}])
+    monkeypatch.delenv("WEFT_ACTOR", raising=False)
+    monkeypatch.delenv("CLAUDE_PID", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
+    assert store._run(["ls", flag])["actor"] == f"agent:claude:{SID}"
 
 
 # --- join: attach through one `weft apply` -----------------------------------
