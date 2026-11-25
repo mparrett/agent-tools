@@ -441,24 +441,26 @@ test('the band steps aside while the pane is drawn inline listing the workstream
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.settle()
-  const band = async () => {
-    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    const shown = (await ui.find({ type: 'Text', text: 'demo' })) !== undefined
-    await ui.unmount()
-    return shown
-  }
+  // One band, mounted throughout: it has to redraw itself as the pane moves.
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const band = async () => (await ui.find({ type: 'Text', text: 'demo' })) !== undefined
   // docked, the band shows as before
   const docked = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await clock.settle()
   expect(await band()).toBe(true)
   await docked.unmount()
   // inline and listing, the pane says it already
-  await $.ui.mount({ ...PANE, props: { ...PANE.props, placement: 'inline' }, surface: 'terminal' })
+  const inline = await $.ui.mount({ ...PANE, props: { ...PANE.props, placement: 'inline' }, surface: 'terminal' })
   await clock.settle()
   expect(await band()).toBe(false)
-  // left waiting undrawn, it names nothing, so the band is back
+  // left waiting undrawn it names nothing, and no close says so: the next
+  // badge refresh rewrites the view and the band comes back
   isDrawn = false
+  await clock.advance(60_000)
+  await clock.settle()
   expect(await band()).toBe(true)
+  await inline.unmount()
+  await ui.unmount()
 })
 
 test('the default leaves the band to others', async ($, on) => {

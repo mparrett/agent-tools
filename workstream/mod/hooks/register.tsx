@@ -117,7 +117,8 @@ async function setSeat($: EngineInterface, now: Seat): Promise<void> {
   seat = now
   await showBadge($, await read($, view))
   // The band redraws on a write to the view it reads, made once this render is done.
-  if (mode === 'band') $.clock.after(0, () => void update($, view, v => ({ ...v })))
+  // A failed redraw only leaves the band as it was until the next refresh rewrites the view.
+  if (mode === 'band') $.clock.after(0, () => void update($, view, v => ({ ...v })).catch(() => undefined))
 }
 
 // One refresh at a time: a timer firing while a slow frontier runs would
@@ -144,6 +145,8 @@ function kick($: EngineInterface, withFrontier: boolean): Promise<void> {
 
 export const register: Register = (on, options) => {
   mode = badgeMode(options.badge)
+  // A reload drops the panes' renders; the next one says where the pane is.
+  seat = null
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: COMMAND, description: 'Open the workstream pane or bring it forward; /workstream close closes it' })
