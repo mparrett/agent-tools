@@ -204,7 +204,8 @@ h1.title {
 
 # Two palettes, dark (the original) and a warm light one. `auto` follows the OS;
 # an explicit choice sets data-theme on <html>. Text colors clear WCAG AA (4.5:1)
-# on --bg and --surface in both, as of 2026-11-24.
+# on --bg and --surface in both, and --amber-d (the user-turn rule and chip accents)
+# clears the 3:1 for non-text UI; the pipeline tests check both.
 PALETTES = {
     "dark": {
         "bg": "#14110d",
@@ -215,7 +216,7 @@ PALETTES = {
         "ink-soft": "#cbc2b2",
         "muted": "#938876",
         "amber": "#e0a54e",
-        "amber-d": "#7a5f2f",
+        "amber-d": "#826532",
         "cyan": "#63b6c2",
         "green": "#83b06a",
         "red": "#d67f6f",
@@ -234,7 +235,7 @@ PALETTES = {
         "ink-soft": "#463d31",
         "muted": "#6f6553",
         "amber": "#9a5c12",
-        "amber-d": "#d2b07a",
+        "amber-d": "#a87a38",
         "cyan": "#1d6f7c",
         "green": "#46702f",
         "red": "#a8402f",
@@ -271,7 +272,11 @@ THEME_JS = """
 (function () {
   var MODES = ['auto', 'light', 'dark'], root = document.documentElement, btn = document.getElementById('theme');
   function mode(){ return root.dataset.theme || 'auto'; }
-  function paint(){ btn.textContent = mode(); }
+  // Auto shows what it resolves to, or one step of the cycle would look like a no-op
+  // (auto and the matching explicit mode draw the same page).
+  var dark = window.matchMedia('(prefers-color-scheme: dark)');
+  function paint(){ var m = mode(); btn.textContent = m === 'auto' ? 'auto · ' + (dark.matches ? 'dark' : 'light') : m; }
+  if (dark.addEventListener) dark.addEventListener('change', paint);
   function cycle(){
     var next = MODES[(MODES.indexOf(mode()) + 1) % MODES.length];
     if (next === 'auto') delete root.dataset.theme; else root.dataset.theme = next;

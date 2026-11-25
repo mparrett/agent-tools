@@ -632,3 +632,18 @@ def test_theme_toggle_and_both_palettes_ship_with_every_deck(tmp_path):
     for name in ("dark", "light"):
         assert f"color-scheme: {name};" in html and PALETTES[name]["bg"] in html
     assert "@media (prefers-color-scheme: light)" in html
+
+    def contrast(a, b):
+        def lum(h):
+            c = [int(h[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+            c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+            return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+        hi, lo = sorted([lum(a), lum(b)], reverse=True)
+        return (hi + 0.05) / (lo + 0.05)
+
+    for pal in PALETTES.values():  # text at AA, the accent rule at the non-text minimum
+        for back in ("bg", "surface"):
+            for ink in ("ink", "ink-soft", "muted", "amber", "cyan", "green", "red", "magenta"):
+                assert contrast(pal[ink], pal[back]) >= 4.5, (ink, back)
+            assert contrast(pal["amber-d"], pal[back]) >= 3, back
