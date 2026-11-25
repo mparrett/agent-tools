@@ -20,6 +20,7 @@ claude-reel <id> --reel                            # dump the reel (pivot JSONL)
 claude-reel <id> --subagents brief                 # agent chips expand to the agent's run
 claude-reel <id> --context none                    # hide injected context
 claude-reel <id> --no-credits                      # skip the closing credits card
+claude-reel <id> --live --open                     # follow a running session as it grows
 ```
 
 With the project installed, `uv run claude-reel …` works via the `[project.scripts]`
@@ -30,6 +31,14 @@ In the deck: `←`/`→` (or `j`/`k`, space) to move, `e` to expand every chip o
 `/` finds text across every slide, folded chips included; Enter or `n` jumps to the next
 matching slide, Shift+Enter or `N` back. The URL tracks the slide (`deck.html#s42`), so a
 link opens on that slide.
+
+**Live.** `--live` serves the deck from `127.0.0.1` instead of writing a file, and
+pushes slides as the transcript grows: the turn in progress grows in place, a new turn
+appends a slide. The page follows the tail while you are on the last slide and leaves
+you alone anywhere else. It prints a URL carrying a random token, and the server
+refuses requests without it. The port is any free one unless `--port` says otherwise,
+so several sessions can be followed at once. No credits card, since its lineage scan
+would run on every change. Ctrl+C stops it.
 
 **Context.** What the harness injected into the model's requests (system prompt, token
 budget, environment updates, reminders, task notifications) shows as muted `ctx` chips
@@ -73,6 +82,8 @@ transcript.jsonl ──[extract]──▶ reel (beats) ──[curate]──▶ d
 - `markdown.py` — a small, escape-first Markdown → HTML renderer (untrusted transcript
   text can't inject markup).
 - `render_html.py` — slides → a single self-contained HTML deck (no CDN, inline CSS/JS).
+- `live.py` — `--live`: a stdlib HTTP server that polls the transcript, rebuilds on change,
+  and streams the slides that changed over server-sent events.
 - `credits.py` — the closing card: subagents from the session's own pool, family and
   compactions from `claude-ls lineage --json` (a subprocess, so no import of claude-ls).
 - `cli.py` — entry point.
