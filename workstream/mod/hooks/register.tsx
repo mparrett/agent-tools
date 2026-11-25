@@ -32,7 +32,7 @@ const WS_COLORS = ['claude', 'suggestion', 'merged', 'planMode', 'ide', 'remembe
 // changes with FOLDS' defaults, since a flip stored against an old default
 // would now mean the opposite.
 const flipped = atom({ plugin: 'workstream', key: 'flipped' } as const, [] as string[], { shape: 'flipped-2' })
-// The pane folded to its header and a line a workstream, by its [-] button.
+// The pane folded to its header and a line a workstream, by its [hide] button.
 const minimized = atom({ plugin: 'workstream', key: 'minimized' } as const, false)
 // Minimized, a line each for this many workstreams, then a count of the rest;
 // a count of one would take the row its line needs, so one more is drawn instead.
@@ -287,13 +287,14 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
-    // [-] and refresh lead the row, as the HUD's [-] does: at the right they sat
+    // [hide] and refresh lead the row, where the HUD's [-] sits: at the right they sat
     // under the pane's own close mark, where a press meant for one landed on the other.
+    // A word, not [-], so the press reads as what it does.
     const header = (
       <Box flexDirection="row">
         <Box flexShrink={0} marginRight={1}>
           <Button plain key="size" label={isMin ? 'Restore' : 'Minimize'} onPress={() => update($, minimized, m => !m)}>
-            <Text dimColor>{isMin ? '[+]' : '[-]'}</Text>
+            <Text dimColor>{isMin ? '[show]' : '[hide]'}</Text>
           </Button>
         </Box>
         <Box flexShrink={0} marginRight={1}>
