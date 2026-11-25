@@ -131,6 +131,21 @@ h1.title {
 .reply .rstat:empty { display: none; }
 .reply .rstat.err { color: var(--red); }
 .reply.off { color: var(--muted); font-family: var(--mono); font-size: 0.74rem; justify-content: center; }
+/* Key hints: on "?" each control shows its keys beside it, and a card lists the keys
+   with no control. Everything fades on its own; the "?" is the only hint at rest. */
+.nav.help { font-family: var(--mono); font-size: 0.95rem; color: var(--muted); opacity: 0.6; }
+.nav.help:hover { opacity: 1; color: var(--amber); }
+.kb { position: fixed; z-index: 7; pointer-events: none; transform: translateX(-50%); white-space: nowrap; font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.04em; color: var(--ink); background: var(--surface2); border: 1px solid var(--amber-d); border-radius: 5px; padding: 2px 6px; box-shadow: 0 4px 12px var(--shadow); }
+.keys { position: fixed; z-index: 7; right: 22px; bottom: 76px; display: none; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 8px 24px var(--shadow); font-family: var(--mono); font-size: 0.74rem; color: var(--ink-soft); }
+.keys.on { display: block; }
+.keys table { border-collapse: collapse; }
+.keys td { padding: 2px 0; }
+.keys td:first-child { color: var(--amber); padding-right: 14px; white-space: nowrap; }
+.kb, .keys { transition: opacity 0.35s ease; }
+.kb.fade, .keys.fade { opacity: 0; }
+@media (prefers-reduced-motion: reduce) { .kb, .keys { transition: none; } }
+/* A phone has no keyboard to hint at, and the rail needs the room. */
+@media (pointer: coarse) and (max-width: 600px) { .nav.help { display: none; } }
 .nav { width: 44px; height: 44px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; line-height: 1; color: var(--amber); background: var(--surface); border: 1px solid var(--line); border-radius: 11px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .nav:hover { background: var(--surface2); }
 .nav:active { transform: scale(0.93); }
@@ -290,6 +305,61 @@ THEME_JS = """
     e.preventDefault(); cycle();
   });
   paint();
+})();
+"""
+
+# "?" (or the rail's ? button) shows each control's keys beside it and a card of the
+# keys that have no control, then fades them. Any other key or click dismisses early,
+# and still does what it does.
+HINTS_JS = """
+(function () {
+  var help = document.getElementById('help'), card = document.getElementById('keys');
+  var ROWS = [
+    ['$ · 0', 'end / top of this slide'],
+    ['g · Home', 'first slide (the agenda)'],
+    ['e', 'open or fold every chip on the slide'],
+    ['/', 'find; Enter or n next, N previous'],
+    ['Esc', 'close find']
+  ];
+  if (document.getElementById('reply')) ROWS.push(['Enter', 'send the reply · Shift+Enter new line']);
+  card.innerHTML = '<table>' + ROWS.map(function (r){ return '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>'; }).join('') + '</table>';
+  var badges = [], timer = null, SHOW_MS = 4000;
+  function shown(){ return card.classList.contains('on'); }
+  function clear(){
+    clearTimeout(timer); timer = null;
+    badges.forEach(function (b){ b.remove(); }); badges = [];
+    card.classList.remove('on', 'fade');
+  }
+  function fade(){
+    badges.forEach(function (b){ b.classList.add('fade'); }); card.classList.add('fade');
+    timer = setTimeout(clear, 400);
+  }
+  function show(){
+    clear();
+    document.querySelectorAll('[data-keys]').forEach(function (el){
+      var r = el.getBoundingClientRect();
+      if (!r.width) return;  // hidden, e.g. a control a phone layout drops
+      var b = document.createElement('span');
+      b.className = 'kb'; b.textContent = el.dataset.keys;
+      document.body.appendChild(b);
+      // Controls in the top bar get their badge below; the rail's, above.
+      var below = r.top < window.innerHeight / 2;
+      b.style.left = (r.left + r.width / 2) + 'px';
+      b.style.top = (below ? r.bottom + 6 : r.top - b.offsetHeight - 6) + 'px';
+      badges.push(b);
+    });
+    card.classList.add('on');
+    timer = setTimeout(fade, SHOW_MS);
+  }
+  function toggle(){ if (shown()) clear(); else show(); }
+  help.addEventListener('click', function (e){ e.stopPropagation(); toggle(); });
+  document.addEventListener('keydown', function (e){
+    if (e.target.closest && e.target.closest('input, textarea, #reply')) return;
+    if (e.key === '?') { e.preventDefault(); toggle(); return; }
+    if (shown()) clear();
+  });
+  document.addEventListener('click', function (){ if (shown()) clear(); });
+  window.addEventListener('resize', function (){ if (shown()) clear(); });
 })();
 """
 
@@ -954,7 +1024,7 @@ def render(
         else ""
     )
     scripts = (
-        f"<script>{JS}</script><script>{THEME_JS}</script>"
+        f"<script>{JS}</script><script>{THEME_JS}</script><script>{HINTS_JS}</script>"
         + (f"<script>{LIVE_JS}</script>" if live else "")
         + (f"<script>{REPLY_JS}</script>" if live and live_send else "")
     )
@@ -972,21 +1042,23 @@ def render(
   <div class="topbar">
     <div class="brand"><span class="disc">◉</span><span class="name">claude<b>·</b>reel</span><span class="tag">recap</span>{badge}</div>
     <div class="session" id="sess">{session_meta}</div>
-    <div><button class="theme" id="theme" title="Theme: auto, light, dark (t)">auto</button><span class="counter"><b id="cur">00</b> / <span id="tot">{counter_total:02d}</span></span></div>
+    <div><button class="theme" id="theme" data-keys="t" title="Theme: auto, light, dark (t)">auto</button><span class="counter"><b id="cur">00</b> / <span id="tot">{counter_total:02d}</span></span></div>
   </div>
   <div class="reel" id="reel">
     {"".join(slides_html)}
   </div>
   {reply}
   <div class="rail">
-    <button class="dens" id="dens" title="Chip density: rows, inline, compact (c, C back)"><span class="dens-k">chips: </span><span id="densv">rows</span></button>
-    <button class="nav" id="prev" aria-label="Previous slide" title="Previous (← k h [)">‹</button>
+    <button class="dens" id="dens" data-keys="c · C" title="Chip density: rows, inline, compact (c, C back)"><span class="dens-k">chips: </span><span id="densv">rows</span></button>
+    <button class="nav" id="prev" data-keys="← k h [" aria-label="Previous slide" title="Previous (← k h [)">‹</button>
     <div class="track"><div class="fill" id="fill"></div></div>
     <span class="pos" id="pos">00 / {counter_total:02d}</span>
-    <button class="nav" id="next" aria-label="Next slide" title="Next (→ j l ])">›</button>
-    <button class="nav" id="last" aria-label="Last slide" title="Last (End G); $ scrolls to the slide's end">»</button>
+    <button class="nav" id="next" data-keys="→ j l ]" aria-label="Next slide" title="Next (→ j l ])">›</button>
+    <button class="nav" id="last" data-keys="G End" aria-label="Last slide" title="Last (End G); $ scrolls to the slide's end">»</button>
+    <button class="nav help" id="help" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
   </div>
 </div>
+<div class="keys" id="keys" role="dialog" aria-label="Keyboard shortcuts"></div>
 <div class="find" id="find"><span>/</span><input id="fq" type="search" placeholder="find in session" aria-label="Find in session"><span id="fc"></span></div>
 {scripts}
 </body></html>"""

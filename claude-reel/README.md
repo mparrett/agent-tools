@@ -32,7 +32,8 @@ the last slide, `$` to the end of the current slide and `0` back to its top, `e`
 `c` (or the `chips:` button) cycles how chips show, `C` backwards: rows, one per line; inline, side by
 side with a short argument; compact, labels only. Clicking a chip in a denser strip
 unfolds that strip one level, down to rows, where a click opens the chip. The choice is
-remembered in the browser. `t` (or the button in the top bar) cycles the theme: auto
+remembered in the browser. `?` (or the rail's `?` button) shows each control's keys beside it, and a card of the
+keys that have no control, for a few seconds. `t` (or the button in the top bar) cycles the theme: auto
 (follows the OS), light, dark; also remembered. `/` finds text across every slide,
 folded chips included; Enter or `n` jumps to the next
 matching slide, Shift+Enter or `N` back. The URL tracks the slide (`deck.html#s42`), so a
