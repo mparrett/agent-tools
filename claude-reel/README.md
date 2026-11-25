@@ -58,6 +58,11 @@ to check the session with `claude attach <id>`. Other sessions get a line saying
 no bar, and `--no-reply` turns it off. `attach` is a terminal UI rather than an API, so a
 Claude Code update can break this; `send.py` says how it works.
 
+**Run chips** open as a terminal: the whole command at a `$` prompt, shell-colored
+(commands, flags, strings, variables, operators; a heredoc's body stays plain), then its
+output, in red if the command failed. The coloring is done when the deck is built, so the
+page ships no highlighter.
+
 **Context.** What the harness injected into the model's requests (system prompt, token
 budget, environment updates, reminders, task notifications) shows as muted `ctx` chips
 where it happened. A repeat of identical text is one line pointing back to the slide that

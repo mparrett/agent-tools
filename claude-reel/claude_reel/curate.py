@@ -50,6 +50,9 @@ def _tool_element(call, result):
         "result": None,
         "is_error": False,
     }
+    if call.get("name") == "Bash":
+        # The chip's arg is the command's clipped first line; its body shows it all.
+        el["command"] = (call.get("input") or {}).get("command") or None
     if result:
         el["result"] = result.get("text", "")
         el["is_error"] = result.get("is_error", False)

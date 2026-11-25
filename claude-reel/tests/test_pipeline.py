@@ -672,3 +672,27 @@ def test_question_mark_shows_key_hints_for_every_control(tmp_path):
     for el in ('id="theme"', 'id="dens"', 'id="prev"', 'id="next"', 'id="last"'):
         tag = html[html.rfind("<", 0, html.index(el)) : html.index(">", html.index(el))]
         assert "data-keys=" in tag, el
+
+
+def test_a_run_chip_reads_as_a_terminal_with_its_whole_command(tmp_path):
+    html = render(curate(extract(_transcript(tmp_path))))
+    assert '<div class="chip-body term">' in html
+    assert '<span class="t-ps">$ </span><span class="t-prog">pytest</span>' in html
+
+
+def test_terminal_colors_clear_aa_on_the_terminal_background():
+    import re
+
+    from claude_reel.render_html import CSS
+
+    def lum(h):
+        c = [int(h[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+        c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+    bg = re.search(r"--t-bg:(#[0-9a-f]{6})", CSS).group(1)
+    rules = re.findall(r"^\.term \.t-[a-z.]+ \{ color: (#[0-9a-f]{6})", CSS, re.M)
+    assert len(rules) >= 10
+    for fg in rules:
+        hi, lo = sorted([lum(fg), lum(bg)], reverse=True)
+        assert (hi + 0.05) / (lo + 0.05) >= 4.5, fg

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .extract import split_pastes
 from .markdown import render_markdown
+from .term import highlight
 
 CSS = """
 :root {
@@ -102,6 +103,22 @@ h1.title {
 .chip .arg { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip .meta { color: var(--muted); margin-left: auto; padding-left: 12px; white-space: nowrap; }
 .chip .meta.repeat { color: var(--amber); }
+/* Run chips read as a terminal in either theme: one dark palette, its colors at
+   WCAG AA on --t-bg (checked by the pipeline tests). */
+.chip-body.term { --t-bg:#0f0d0a; background: var(--t-bg); color: #d9d2c3; }
+.term .t-cmd { color: #d9d2c3; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px dashed #3a3226; }
+.term .t-ps { color: #8cc56e; user-select: none; }
+.term .t-out { color: #bdb4a3; }
+.term .t-out.err { color: #ec9a87; }
+.term .t-out.none { color: #8f8574; font-style: italic; }
+.term .t-prog { color: #f0c06a; font-weight: 600; }
+.term .t-flag { color: #74c7d2; }
+.term .t-str { color: #a3d17f; }
+.term .t-var { color: #d99ccb; }
+.term .t-op { color: #ec9a87; }
+.term .t-kw { color: #d99ccb; font-weight: 600; }
+.term .t-comment { color: #8f8574; font-style: italic; }
+.term .t-here { color: #c9c0ae; }
 .chip-body { border-top: 1px solid var(--line); padding: 12px 14px; background: var(--bg); font-family: var(--mono); font-size: 0.8rem; color: var(--ink-soft); white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow: auto; }
 .code { font-family: var(--mono); font-size: 0.8rem; line-height: 1.65; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 13px 15px; overflow-x: auto; white-space: pre; color: var(--ink-soft); }
 .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
@@ -737,6 +754,7 @@ def _chip_html(el, open_by_default: bool, slide_no: int = 0) -> str:
         body = el.get("result") or "(no recorded output)"
 
     body = body if len(body) <= 1600 else body[:1600] + "\n… [clipped]"
+    command = el.get("command") if el["type"] == "tool" else None
     ck_cls = label if label in ("run", "read", "think", "agent") else ""
     metaparts = []
     if count > 1:
@@ -755,9 +773,23 @@ def _chip_html(el, open_by_default: bool, slide_no: int = 0) -> str:
         + (
             _subagent_body(el["subagent"], el.get("result"))
             if el.get("subagent")
+            else _term_body(command, body, err, el.get("result"))
+            if command
             else f'<div class="chip-body">{_esc(body)}</div>'
         )
         + "</details>"
+    )
+
+
+def _term_body(command: str, body: str, err: bool, result) -> str:
+    """A run chip's body as a terminal: the whole command at a prompt, then what it
+    printed."""
+    if len(command) > 3000:
+        command = command[:3000] + "\n# … [clipped]"
+    out_cls = "t-out err" if err else ("t-out" if result else "t-out none")
+    return (
+        f'<div class="chip-body term"><div class="t-cmd"><span class="t-ps">$ </span>'
+        f'{highlight(command)}</div><div class="{out_cls}">{_esc(body)}</div></div>'
     )
 
 
