@@ -12,7 +12,9 @@ import re
 _TOKEN = re.compile(
     r"""
     (?P<str>\$?'[^']*'?|"(?:\\.|[^"\\])*"?)
+   |(?P<arith>\$\(\((?:[^()]|\([^()]*\))*\)\))
    |(?P<var>\$\{[^}\n]*\}?|\$\(|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@#?$!*-])
+   |(?P<herestr><<<)
    |(?P<here><<-?)
    |(?P<op>&&|\|\||[|;&]|[0-9]?>>?(?:&[0-9-])?|&>|<|[()`])
    |(?P<ws>[ \t]+|\n)
@@ -76,6 +78,11 @@ def highlight(cmd: str) -> str:
         if kind == "here":
             want_delim = True
             out.append(_span("op", text))
+        elif kind == "herestr":
+            out.append(_span("op", text))  # <<< feeds a word to stdin; no body follows
+        elif kind == "arith":
+            out.append(_span("var", text))  # $(( … )): a << in here is a shift
+            expect_cmd = False
         elif kind == "op":
             out.append(_span("op", text))
             if text in ("&&", "||", "|", ";", "&", "(", "`"):

@@ -213,6 +213,9 @@ def curate(reel: dict, density: str = "jazz") -> dict:
                 and cur[-1].get("type") == "tool"
                 and cur[-1]["label"] == el["label"]
                 and cur[-1]["arg"] == el["arg"]
+                # A run chip's arg is the command's clipped first line; two different
+                # scripts can share it, and the chip shows one command with its output.
+                and cur[-1].get("command") == el.get("command")
                 and not (el.get("subagent") or cur[-1].get("subagent"))
             ):
                 prev = cur[-1]

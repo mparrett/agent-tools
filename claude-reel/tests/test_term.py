@@ -28,6 +28,8 @@ def _classes(h: str) -> list[tuple[str, str]]:
         "echo 'unterminated",
         'echo "a \\" b" \\\n  --next-line',
         'a=$(( 1 + 2 )); [ -n "$a" ] && echo `whoami` &> /dev/null',
+        'grep x <<< "$v"\nls -la',
+        "echo $((1<<2)) $(( (3+4) * 2 ))\nls",
         "",
     ],
 )
@@ -59,3 +61,11 @@ def test_keywords_and_the_command_after_them():
 def test_a_hash_inside_a_word_is_not_a_comment():
     got = _classes(highlight("curl https://x.test/#frag"))
     assert not any(c == "comment" for c, _ in got)
+
+
+def test_a_here_string_and_a_shift_are_not_heredocs():
+    for cmd in ('grep x <<< "$v"\nls -la', "echo $((1<<2))\nls -la"):
+        got = _classes(highlight(cmd))
+        assert not any(c == "here" for c, _ in got), cmd
+        assert ("prog", "ls") in got and ("flag", "-la") in got, cmd
+    assert ("var", "$((1<<2))") in _classes(highlight("echo $((1<<2))"))

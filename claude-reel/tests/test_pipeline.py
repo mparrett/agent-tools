@@ -696,3 +696,51 @@ def test_terminal_colors_clear_aa_on_the_terminal_background():
     for fg in rules:
         hi, lo = sorted([lum(fg), lum(bg)], reverse=True)
         assert (hi + 0.05) / (lo + 0.05) >= 4.5, fg
+
+
+def test_runs_sharing_a_first_line_stay_separate_chips(tmp_path):
+    # Two different heredoc scripts start with the same line; folding them would show
+    # the first script above the second one's output.
+    lines = []
+    for i, (script, out) in enumerate((("print(1)", "1"), ("raise SystemExit(1)", "boom"))):
+        cmd = f"python3 - <<'EOF'\n{script}\nEOF"
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": f"2026-01-01T00:00:0{i}Z",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"r{i}",
+                            "name": "Bash",
+                            "input": {"command": cmd},
+                        }
+                    ]
+                },
+            }
+        )
+        lines.append(
+            {
+                "type": "user",
+                "timestamp": f"2026-01-01T00:00:0{i}Z",
+                "message": {
+                    "content": [{"type": "tool_result", "tool_use_id": f"r{i}", "content": out}]
+                },
+            }
+        )
+    src = tmp_path / "s.jsonl"
+    src.write_text(
+        "\n".join(
+            json.dumps(x)
+            for x in [
+                {"type": "user", "timestamp": "2026-01-01T00:00:00Z", "message": {"content": "go"}},
+                *lines,
+            ]
+        )
+    )
+    tools = [
+        e for s in curate(extract(src))["slides"] for e in s["elements"] if e.get("type") == "tool"
+    ]
+    assert [t["count"] for t in tools] == [1, 1]
+    assert ["print(1)" in t["command"] for t in tools] == [True, False]
