@@ -50,15 +50,32 @@ def _dump_reel(reel, out_path):
         sys.stdout.write(text)
 
 
+def _reply_target(path):
+    """(sender, note): how to deliver a reply to this session, or why there is none."""
+    from . import send
+
+    agent = send.find_agent(path.stem)
+    if agent is None:
+        return None, "Replies need a running background session (claude --bg); this one isn't."
+    if agent.get("kind") != send.ATTACHABLE:
+        return None, (
+            f"Replies need a background session (claude --bg); this one is {agent.get('kind')}."
+        )
+    return (lambda text: send.deliver(agent["id"], text, transcript=path)), None
+
+
 def _live(path, build_deck, args) -> int:
     from . import live
 
+    sender, note = _reply_target(path) if not args.no_reply else (None, None)
+
     def ready(url):
         print(f"claude-reel: live at {url}  (Ctrl+C to stop)", flush=True)
+        print(f"claude-reel: {'replies on' if sender else note or 'replies off'}", flush=True)
         if args.open:
             webbrowser.open(url)
 
-    live.serve(path, build_deck, port=args.port, on_ready=ready)
+    live.serve(path, build_deck, port=args.port, on_ready=ready, sender=sender, reply_note=note)
     return 0
 
 
@@ -108,6 +125,11 @@ def main(argv=None) -> int:
         " (no credits card; Ctrl+C stops)",
     )
     p.add_argument("--port", type=int, default=0, help="--live port (default: any free one)")
+    p.add_argument(
+        "--no-reply",
+        action="store_true",
+        help="--live without the reply bar (read-only, even for a background session)",
+    )
     p.add_argument("--version", action="version", version=f"claude-reel {__version__}")
     args = p.parse_args(argv)
 

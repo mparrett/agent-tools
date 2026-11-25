@@ -124,6 +124,15 @@ h1.title {
 /* A progress bar + prev/next scales to any slide count (dots-per-slide don't) and gives
    real tap targets on touch. Horizontal swipe still pages via the reel's scroll-snap. */
 .rail { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 10px max(16px, env(safe-area-inset-left)) calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: rgba(20,17,13,0.72); }
+.reply { flex: 0 0 auto; display: flex; gap: 10px; align-items: flex-end; max-width: 730px; width: 100%; margin: 0 auto; padding: 10px 30px 12px; box-sizing: border-box; }
+.reply textarea { flex: 1 1 auto; resize: none; min-height: 40px; max-height: 30vh; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px; font: inherit; font-size: 0.98rem; line-height: 1.4; }
+.reply textarea:focus { outline: 1px solid var(--amber); }
+.reply button { flex: 0 0 auto; height: 40px; padding: 0 16px; font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--amber); background: var(--surface); border: 1px solid var(--amber-d); border-radius: 9px; cursor: pointer; }
+.reply button:disabled { opacity: 0.4; cursor: default; }
+.reply .rstat { flex: 0 0 auto; align-self: center; font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
+.reply .rstat:empty { display: none; }
+.reply .rstat.err { color: var(--red); }
+.reply.off { color: var(--muted); font-family: var(--mono); font-size: 0.74rem; justify-content: center; }
 .nav { width: 44px; height: 44px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; line-height: 1; color: var(--amber); background: var(--surface); border: 1px solid var(--line); border-radius: 11px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .nav:hover { background: var(--surface2); }
 .nav:active { transform: scale(0.93); }
@@ -267,6 +276,7 @@ JS = """
 
   document.addEventListener('keydown', function (e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target.closest && e.target.closest('#reply, textarea')) return;  // in the reply bar
     if (e.key === '/') { e.preventDefault(); find.classList.add('on'); fq.focus(); fq.select(); return; }
     if (e.key === 'n' && query) { e.preventDefault(); step(1); return; }
     if (e.key === 'N' && query) { e.preventDefault(); step(-1); return; }
@@ -327,6 +337,37 @@ LIVE_JS = """
     badge.className = 'live on'; badge.textContent = 'live';
   };
   es.onerror = function (){ badge.className = 'live off'; badge.textContent = 'reconnecting'; };
+})();
+"""
+
+# The reply bar: Enter sends, Shift+Enter is a new line. The server types the text
+# into the session's terminal, so it arrives as the human's own message.
+REPLY_JS = """
+(function () {
+  var form = document.getElementById('reply'), box = document.getElementById('rtext');
+  var btn = form.querySelector('button'), stat = document.getElementById('rstat');
+  function grow(){ box.style.height = 'auto'; box.style.height = box.scrollHeight + 'px'; }
+  function say(t, err){ stat.textContent = t; stat.className = 'rstat' + (err ? ' err' : ''); }
+  box.addEventListener('input', grow);
+  box.addEventListener('keydown', function (e){
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
+  });
+  form.addEventListener('submit', function (e){
+    e.preventDefault();
+    var text = box.value.trim();
+    if (!text || btn.disabled) return;
+    btn.disabled = true; say('sending…');
+    fetch(form.dataset.send, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text }) })
+      .then(function (r){ return r.json().then(function (j){ return { ok: r.ok, j: j }; }); })
+      .then(function (x){
+        if (!x.ok) throw new Error(x.j.error || 'send failed');
+        box.value = ''; grow(); say('sent');
+        window.reelNav.go(window.reelNav.last());
+        setTimeout(function (){ if (stat.textContent === 'sent') say(''); }, 2500);
+      })
+      .catch(function (err){ say(String(err.message || err), true); })
+      .then(function (){ btn.disabled = false; });
+  });
 })();
 """
 
@@ -678,9 +719,29 @@ def render_parts(deck: dict) -> tuple[list, str]:
     return slides_html, session_meta
 
 
-def render(deck: dict, live_events: str | None = None) -> str:
+def _reply_html(live_send, reply_note) -> str:
+    if live_send:
+        return (
+            f'<form class="reply" id="reply" data-send="{_esc(live_send)}">'
+            '<textarea id="rtext" rows="1" aria-label="Reply to Claude"'
+            ' placeholder="Reply to Claude · Enter sends, Shift+Enter for a new line"></textarea>'
+            '<span class="rstat" id="rstat" role="status"></span>'
+            "<button>send</button></form>"
+        )
+    if reply_note:
+        return f'<div class="reply off">{_esc(reply_note)}</div>'
+    return ""
+
+
+def render(
+    deck: dict,
+    live_events: str | None = None,
+    live_send: str | None = None,
+    reply_note: str | None = None,
+) -> str:
     """The whole deck. With `live_events` (the live server's stream URL, relative to
-    the page), the page subscribes to it and applies the slides it sends."""
+    the page), the page subscribes to it and applies the slides it sends. With
+    `live_send` too, a reply bar posts there; `reply_note` says why there is none."""
     meta = deck["meta"]
     slides_html, session_meta = render_parts(deck)
     counter_total = len(slides_html) - 1  # excludes the agenda
@@ -690,7 +751,12 @@ def render(deck: dict, live_events: str | None = None) -> str:
         if live
         else ""
     )
-    scripts = f"<script>{JS}</script>" + (f"<script>{LIVE_JS}</script>" if live else "")
+    scripts = (
+        f"<script>{JS}</script>"
+        + (f"<script>{LIVE_JS}</script>" if live else "")
+        + (f"<script>{REPLY_JS}</script>" if live and live_send else "")
+    )
+    reply = _reply_html(live_send, reply_note) if live else ""
 
     return f"""<!doctype html>
 <html lang="en"><head>
@@ -708,6 +774,7 @@ def render(deck: dict, live_events: str | None = None) -> str:
   <div class="reel" id="reel">
     {"".join(slides_html)}
   </div>
+  {reply}
   <div class="rail">
     <button class="nav" id="prev" aria-label="Previous slide" title="Previous (←)">‹</button>
     <div class="track"><div class="fill" id="fill"></div></div>
