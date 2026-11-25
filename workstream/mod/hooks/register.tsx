@@ -85,9 +85,30 @@ async function refresh($: EngineInterface, withFrontier: boolean): Promise<void>
     error,
     isLoading: false,
   }))
-  // The engine draws every plugin status line as a pinned warning (⚠, yellow);
-  // the band is the opt-in for a quieter badge. The band redraws on the write above.
-  $.ui.status(mode === 'status' ? badgeText(next.attached, next.error) : undefined)
+  await showBadge($, next)
+}
+
+// Where the pane is drawn now: set by its render, cleared when it closes.
+let seat: 'dock' | 'inline' | 'widget' | null = null
+
+// The engine draws every plugin status line as a pinned warning (⚠, yellow);
+// the band is the opt-in for a quieter badge. The band redraws on its own.
+// Inline (a narrow terminal seats the pane above the prompt) a pane listing
+// the workstreams names each a line or two up, so the badge would only repeat
+// it on a row of its own. Only while it is drawn and listing them: one still
+// reading the store, showing an error, or left waiting undrawn names nothing.
+// No event says a pane stopped being drawn, so that is asked here each time;
+// the badge timer brings the badge back within a minute.
+async function showBadge($: EngineInterface, v: WorkstreamView): Promise<void> {
+  if (mode !== 'status') return $.ui.status(undefined)
+  const pane = seat === 'inline' && v.frontiers.length > 0 && !v.error ? (await $.ui.panes()).find(p => p.id === PANE) : undefined
+  $.ui.status(pane?.isPlaced && pane.isShown ? undefined : badgeText(v.attached, v.error))
+}
+
+async function setSeat($: EngineInterface, now: typeof seat): Promise<void> {
+  if (now === seat) return
+  seat = now
+  await showBadge($, await read($, view))
 }
 
 // One refresh at a time: a timer firing while a slow frontier runs would
@@ -200,7 +221,17 @@ export const register: Register = (on, options) => {
     )
   })
 
+  // A pane closed by hand, by `/workstream close`, or with its plugin: the badge comes back.
+  on('ui.close', async ($, e, next) => {
+    const done = await next(e)
+    if (e.id === PANE) await setSeat($, null)
+    return done
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    // Any seat the engine adds later counts as `dock`, as its docs ask.
+    const p = e.props.placement
+    void setSeat($, p === 'inline' || p === 'widget' ? p : 'dock')
     const { Box, Text, Button, Link } = $.ui.resolve(e)
     const v = await read($, view)
     const flips = await read($, flipped)
@@ -230,16 +261,19 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    // [-] and refresh lead the row, as the HUD's [-] does: at the right they sat
+    // under the pane's own close mark, where a press meant for one landed on the other.
     const header = (
-      <Box flexDirection="row" justifyContent="space-between">
-        <Text dimColor>{v.isLoading ? 'refreshing…' : asOfLabel(v.frontiers[0]?.asOf ?? null)}</Text>
-        <Box flexDirection="row">
-          <Button key="refresh" label="refresh" onPress={() => kick($, true)} />
-          <Text> </Text>
+      <Box flexDirection="row">
+        <Box flexShrink={0} marginRight={1}>
           <Button plain key="size" label={isMin ? 'Restore' : 'Minimize'} onPress={() => update($, minimized, m => !m)}>
             <Text dimColor>{isMin ? '[+]' : '[-]'}</Text>
           </Button>
         </Box>
+        <Box flexShrink={0} marginRight={1}>
+          <Button key="refresh" label="refresh" onPress={() => kick($, true)} />
+        </Box>
+        <Text dimColor>{v.isLoading ? 'refreshing…' : asOfLabel(v.frontiers[0]?.asOf ?? null)}</Text>
       </Box>
     )
     if (v.error) {
