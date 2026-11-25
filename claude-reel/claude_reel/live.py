@@ -13,6 +13,7 @@ and its pages count as same-origin with this server.
 
 import json
 import secrets
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,23 +45,43 @@ class Builder:
         # Recent builds' slides by version, so a stream can diff against the build
         # its page was rendered from (or the last it saw, after a reconnect).
         self._history: dict = {}
+        self.error = None
 
     def stamp(self):
         st = self.path.stat()
         return (st.st_size, st.st_mtime_ns)
 
     def current(self):
-        """(version, deck, slides_html, session_html) for the file as it is now."""
+        """(version, deck, slides_html, session_html) for the file as it is now.
+
+        A failed build keeps the last good one: live mode is the one place the
+        pipeline sees half-written turns, and a transcript can move or vanish. The
+        next poll retries. With no good build yet, the error propagates.
+        """
         with self._lock:
-            key = self.stamp()
-            if key != self._key:
+            try:
+                key = self.stamp()
+                if key == self._key:
+                    return self._built
                 deck = self.build_deck()
                 slides, session = render_parts(deck)
-                version = f"{key[0]}-{key[1]}"
-                self._key, self._built = key, (version, deck, slides, session)
-                self._history[version] = slides
-                while len(self._history) > HISTORY:
-                    self._history.pop(next(iter(self._history)))
+            except Exception as e:
+                if self._built is None:
+                    raise
+                if repr(e) != self.error:
+                    print(
+                        f"claude-reel: rebuild failed, showing the last good one: {e!r}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                self.error = repr(e)
+                return self._built
+            self.error = None
+            version = f"{key[0]}-{key[1]}"
+            self._key, self._built = key, (version, deck, slides, session)
+            self._history[version] = slides
+            while len(self._history) > HISTORY:
+                self._history.pop(next(iter(self._history)))
             return self._built
 
     def slides_at(self, version):
@@ -75,8 +96,11 @@ def diff(old: list, new: list) -> list:
 
 
 def _allowed_host(host: str, port: int) -> bool:
-    name, _, p = (host or "").rpartition(":")
-    if p != str(port):
+    """Loopback or *.localhost, on this port or none (a local proxy drops it)."""
+    name, sep, p = (host or "").rpartition(":")
+    if not sep or not p.isdigit():
+        name = host or ""
+    elif p != str(port):
         return False
     return name in ("127.0.0.1", "localhost") or name.endswith(".localhost")
 
@@ -101,11 +125,17 @@ def make_handler(builder: Builder, token: str, port_ref: list):
             if url.path == "/":
                 return self._page()
             if url.path == "/events":
-                return self._events(parse_qs(url.query).get("v", [""])[0])
+                # EventSource reconnects to the same URL, so `v` is the page's first
+                # build; Last-Event-ID is the last one this browser applied.
+                since = self.headers.get("Last-Event-ID") or parse_qs(url.query).get("v", [""])[0]
+                return self._events(since)
             return self._deny(404, "not found\n")
 
         def _page(self):
-            version, deck, _, _ = builder.current()
+            try:
+                version, deck, _, _ = builder.current()
+            except Exception as e:  # no good build yet: say so rather than hang up
+                return self._deny(500, f"claude-reel: can't build the deck: {e!r}\n")
             body = render(deck, live_events=f"events?t={token}&v={version}").encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -119,9 +149,9 @@ def make_handler(builder: Builder, token: str, port_ref: list):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            # Diff against the build the page came from, so a change landing between
-            # the page load and this connection still arrives. Aged out, or unknown:
-            # resend everything.
+            # Diff against the build the browser holds, so a change landing between
+            # the page load (or a dropped connection) and this one still arrives.
+            # Aged out, or unknown: resend everything.
             sent = builder.slides_at(since) or []
             sent_version, last_write = None, time.monotonic()
             try:
@@ -134,7 +164,7 @@ def make_handler(builder: Builder, token: str, port_ref: list):
                             "count": len(slides),
                             "session": session,
                         }
-                        self.wfile.write(f"data: {json.dumps(msg)}\n\n".encode())
+                        self.wfile.write(f"id: {version}\ndata: {json.dumps(msg)}\n\n".encode())
                         self.wfile.flush()
                         sent, sent_version, last_write = slides, version, time.monotonic()
                     elif time.monotonic() - last_write > HEARTBEAT_SECONDS:

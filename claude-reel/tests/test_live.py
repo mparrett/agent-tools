@@ -53,6 +53,8 @@ def _events(resp):
     """Yield each SSE data payload as it arrives."""
     while True:
         line = resp.fp.readline().decode()
+        if line.startswith("id: "):
+            resp._last_id = line[4:].strip()
         if line.startswith("data: "):
             yield json.loads(line[6:])
 
@@ -64,6 +66,9 @@ def test_token_and_host_gate_every_route(server):
     assert _get(port, "/events?t=nope")[0] == 403
     assert _get(port, "/?t=tok", host=f"evil.example:{port}")[0] == 403
     assert _get(port, "/?t=tok", host=f"reel.localhost:{port}")[0] == 200
+    assert _get(port, "/?t=tok", host="reel.localhost")[0] == 200  # via a local proxy
+    assert _get(port, "/?t=tok", host="evil.example")[0] == 403
+    assert _get(port, "/?t=tok", host="127.0.0.1:1")[0] == 403
     assert _get(port, "/nope?t=tok")[0] == 404
 
 
@@ -100,3 +105,41 @@ def test_unknown_version_resends_everything(server):
 def test_diff():
     assert live.diff(["a", "b"], ["a", "B", "c"]) == [{"i": 1, "html": "B"}, {"i": 2, "html": "c"}]
     assert live.diff(["a"], ["a"]) == []
+
+
+def test_reconnect_resumes_from_last_event_id(server):
+    f, port = server
+    _, resp = _get(port, "/events?t=tok&v=gone")
+    next(_events(resp))
+    with f.open("a") as fh:
+        fh.write(_line("second answer", 1))
+    # A reconnect carries the original `v` but the last applied build's id.
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.request(
+        "GET",
+        "/events?t=tok&v=gone",
+        headers={"Host": f"127.0.0.1:{port}", "Last-Event-ID": resp._last_id},
+    )
+    assert [x["i"] for x in next(_events(c.getresponse()))["changed"]] == [1]
+
+
+def test_a_failed_rebuild_keeps_the_last_good_deck(tmp_path, capsys):
+    f = tmp_path / "s.jsonl"
+    f.write_text("x")
+    calls = []
+
+    def build():
+        calls.append(1)
+        if len(calls) > 1:
+            raise ValueError("half-written turn")
+        return curate(extract(f))
+
+    b = live.Builder(f, build)
+    good = b.current()
+    f.write_text("xy")
+    assert b.current() is good and "half-written" in b.error
+    assert "rebuild failed" in capsys.readouterr().err
+    f.unlink()  # moved or deleted
+    assert b.current() is good
+    with pytest.raises(FileNotFoundError):  # no good build to fall back on
+        live.Builder(tmp_path / "t.jsonl", build).current()
