@@ -20,7 +20,7 @@ claude-reel <id> --reel                            # dump the reel (pivot JSONL)
 claude-reel <id> --subagents brief                 # agent chips expand to the agent's run
 claude-reel <id> --context none                    # hide injected context
 claude-reel <id> --no-credits                      # skip the closing credits card
-claude-reel <id> --live --open                     # follow a running session as it grows
+claude-reel <id> --live --open                     # follow a running session; reply if it's --bg
 ```
 
 With the project installed, `uv run claude-reel …` works via the `[project.scripts]`
@@ -39,6 +39,13 @@ you alone anywhere else. It prints a URL carrying a random token, and the server
 refuses requests without it. The port is any free one unless `--port` says otherwise,
 so several sessions can be followed at once. No credits card, since its lineage scan
 would run on every change. Ctrl+C stops it.
+
+**Replying.** For a background session (`claude --bg`, listed by `claude agents`), the
+live page has a reply bar: Enter sends, Shift+Enter starts a new line. The server types
+the text into the session through `claude attach`, so Claude Code records it as yours,
+typed, and queues it if a turn is running. Other sessions get a line saying why there is
+no bar, and `--no-reply` turns it off. `attach` is a terminal UI rather than an API, so a
+Claude Code update can break this; `send.py` says how it works.
 
 **Context.** What the harness injected into the model's requests (system prompt, token
 budget, environment updates, reminders, task notifications) shows as muted `ctx` chips
@@ -84,6 +91,7 @@ transcript.jsonl ──[extract]──▶ reel (beats) ──[curate]──▶ d
 - `render_html.py` — slides → a single self-contained HTML deck (no CDN, inline CSS/JS).
 - `live.py` — `--live`: a stdlib HTTP server that polls the transcript, rebuilds on change,
   and streams the slides that changed over server-sent events.
+- `send.py` — the reply bar's delivery: `claude attach` driven under a pty.
 - `credits.py` — the closing card: subagents from the session's own pool, family and
   compactions from `claude-ls lineage --json` (a subprocess, so no import of claude-ls).
 - `cli.py` — entry point.

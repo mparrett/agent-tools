@@ -2,7 +2,8 @@
 
 A stdlib HTTP server on 127.0.0.1. `GET /` is the deck; `GET /events` is a
 server-sent-event stream that sends the slides which changed since the last
-build. The transcript is polled rather than watched: stdlib has no file watcher,
+build; `POST /send` types a reply into the session (see send.py), when it is a
+background session. The transcript is polled rather than watched: stdlib has no file watcher,
 and one stat a second is nothing.
 
 Every request must carry the token the server printed. The page shows a session's
@@ -21,6 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .render_html import render, render_parts
+from .send import SendError
 
 POLL_SECONDS = 1.0
 # An SSE comment line, so a client that went away is noticed on the next write.
@@ -105,7 +107,14 @@ def _allowed_host(host: str, port: int) -> bool:
     return name in ("127.0.0.1", "localhost") or name.endswith(".localhost")
 
 
-def make_handler(builder: Builder, token: str, port_ref: list):
+# A reply is a message, not a document; this is generous and stops a runaway body.
+MAX_REPLY_BYTES = 64 * 1024
+
+
+def make_handler(builder: Builder, token: str, port_ref: list, sender=None, reply_note=None):
+    """`sender(text)` delivers a reply (raising send.SendError when it can't);
+    without one there is no reply bar, and `reply_note` says why."""
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # the terminal is the user's, not an access log
             pass
@@ -131,12 +140,59 @@ def make_handler(builder: Builder, token: str, port_ref: list):
                 return self._events(since)
             return self._deny(404, "not found\n")
 
+        def _json(self, code, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            url = urlsplit(self.path)
+            host = self.headers.get("Host", "")
+            if not _allowed_host(host, port_ref[0]):
+                return self._json(403, {"error": "bad host"})
+            if not secrets.compare_digest(parse_qs(url.query).get("t", [""])[0], token):
+                return self._json(403, {"error": "missing or wrong token"})
+            if url.path != "/send":
+                return self._json(404, {"error": "not found"})
+            # This route types into an agent with a shell, so it is held tighter than
+            # the reads: the request must come from this page's own origin, and a JSON
+            # body means a cross-site form can't send it without a CORS preflight,
+            # which nothing here answers.
+            if self.headers.get("Origin") != f"http://{host}":
+                return self._json(403, {"error": "bad origin"})
+            if not self.headers.get("Content-Type", "").startswith("application/json"):
+                return self._json(415, {"error": "send JSON"})
+            if sender is None:
+                return self._json(409, {"error": reply_note or "replies are off"})
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > MAX_REPLY_BYTES:
+                return self._json(413, {"error": "reply too long"})
+            try:
+                text = json.loads(self.rfile.read(n) or b"{}").get("text", "")
+            except (json.JSONDecodeError, AttributeError):
+                return self._json(400, {"error": "bad JSON"})
+            if not isinstance(text, str) or not text.strip():
+                return self._json(400, {"error": "nothing to send"})
+            try:
+                sender(text)
+            except SendError as e:
+                return self._json(502, {"error": str(e)})
+            return self._json(200, {"ok": True})
+
         def _page(self):
             try:
                 version, deck, _, _ = builder.current()
             except Exception as e:  # no good build yet: say so rather than hang up
                 return self._deny(500, f"claude-reel: can't build the deck: {e!r}\n")
-            body = render(deck, live_events=f"events?t={token}&v={version}").encode()
+            body = render(
+                deck,
+                live_events=f"events?t={token}&v={version}",
+                live_send=f"send?t={token}" if sender else None,
+                reply_note=reply_note,
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -178,12 +234,14 @@ def make_handler(builder: Builder, token: str, port_ref: list):
     return Handler
 
 
-def serve(path: Path, build_deck, port: int = 0, on_ready=None):
+def serve(path: Path, build_deck, port: int = 0, on_ready=None, sender=None, reply_note=None):
     """Serve until interrupted. `on_ready(url)` runs once the port is bound."""
     token = secrets.token_urlsafe(16)
     builder = Builder(path, build_deck)
     port_ref = [port]
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(builder, token, port_ref))
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", port), make_handler(builder, token, port_ref, sender, reply_note)
+    )
     server.daemon_threads = True
     port_ref[0] = server.server_address[1]
     url = f"http://127.0.0.1:{port_ref[0]}/?t={token}"
