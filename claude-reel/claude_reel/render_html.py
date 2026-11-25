@@ -8,6 +8,7 @@ renderer; tool output is escaped.
 import html
 from pathlib import Path
 
+from .extract import split_pastes
 from .markdown import render_markdown
 
 CSS = """
@@ -72,6 +73,10 @@ h1.title {
 .say--user { border-left: 2px solid var(--amber-d); padding: 3px 0 3px 16px; }
 .say--user .who { color: var(--amber); }
 .say--user .body { color: var(--ink-soft); font-style: italic; }
+.say .paste { margin: 0 0 12px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; font-style: normal; }
+.say .paste > summary { cursor: pointer; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; color: var(--muted); }
+.say .paste[open] > summary { margin-bottom: 8px; }
+.say .paste-body { margin: 0 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 0.8rem; color: var(--ink-soft); }
 .say--claude .who { color: var(--muted); }
 .say .body { font-size: 1.02rem; overflow-wrap: anywhere; }
 .say .body > :first-child { margin-top: 0; }
@@ -392,6 +397,26 @@ def _chip_html(el, open_by_default: bool, slide_no: int = 0) -> str:
     )
 
 
+def _user_body(text: str) -> str:
+    out = []
+    for is_paste, part in split_pastes(text):
+        if not is_paste:
+            out.append(render_markdown(part))
+            continue
+        # Pastes are mostly terminal output and logs, whose line breaks carry meaning
+        # that Markdown would fold into one paragraph.
+        # Only blank lines are trimmed: a paste's first-line indent is part of it.
+        part = part.strip("\n")
+        if not part.strip():
+            continue
+        n = len(part.splitlines())
+        out.append(
+            f'<details class="paste"><summary>pasted · {n} line{"s" if n != 1 else ""}</summary>'
+            f'<pre class="paste-body">{_esc(part)}</pre></details>'
+        )
+    return "".join(out)
+
+
 def _slide_html(slide, total_beats, open_chips: bool) -> str:
     beatno = slide["index"] + 1
     when = _fmt_ts(slide["ts_range"][0])
@@ -416,9 +441,10 @@ def _slide_html(slide, total_beats, open_chips: bool) -> str:
         flush_chips()
         who = "you" if el["type"] == "user" else "claude"
         cls = "say--user" if el["type"] == "user" else "say--claude"
+        body = _user_body(el["text"]) if el["type"] == "user" else render_markdown(el["text"])
         parts.append(
             f'<div class="say {cls}"><span class="who">{who}</span>'
-            f'<div class="body">{render_markdown(el["text"])}</div></div>'
+            f'<div class="body">{body}</div></div>'
         )
     flush_chips()
 

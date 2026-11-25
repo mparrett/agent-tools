@@ -286,6 +286,62 @@ def test_injected_user_turns_show_as_context(tmp_path):
     assert (beats[1]["label"], beats[1]["arg"]) == ("reminder", "mind the gap")
 
 
+def test_compaction_summary_is_context_not_your_turn(tmp_path):
+    summary = (
+        "This session is being continued from a previous conversation.\n\n"
+        "<system-reminder>\n<tools-used-before-summary>Bash</tools-used-before-summary>\n"
+        "</system-reminder>\nSummary: we built the widget."
+    )
+    f = _write(
+        tmp_path,
+        [
+            _u("Build the widget", "2026-07-05T10:00:00Z"),
+            {**_u(summary, "2026-07-05T11:00:00Z"), "isCompactSummary": True},
+            _u("Now test it", "2026-07-05T11:01:00Z"),
+        ],
+    )
+    beats = extract(f)["beats"]
+    assert [b["text"] for b in beats if b["kind"] == "user_say"] == [
+        "Build the widget",
+        "Now test it",
+    ]
+    assert [b["label"] for b in beats if b["kind"] == "context"] == ["compaction"]
+    assert not [b for b in extract(f, context=False)["beats"] if b["kind"] != "user_say"]
+
+
+def test_paste_folds_inside_your_turn(tmp_path):
+    f = _write(
+        tmp_path,
+        [
+            _u(
+                '<pasted_content id="ab12">\nTraceback line one\nline two\n</pasted_content id="ab12">\n'
+                "why does this fail?",
+                "2026-07-05T10:00:00Z",
+            ),
+            _u('<pasted_content id="cd34">\nonly a paste, cut off', "2026-07-05T10:05:00Z"),
+        ],
+    )
+    deck = curate(extract(f))
+    assert [s["title"] for s in deck["slides"]] == ["why does this fail?", "only a paste, cut off"]
+    html = render(deck)
+    assert "pasted_content" not in html
+    assert html.count('<details class="paste">') == 2
+    assert "pasted · 2 lines" in html and "pasted · 1 line<" in html
+
+
+def test_paste_needs_the_real_wrapper_and_keeps_its_indent():
+    from claude_reel.extract import split_pastes
+    from claude_reel.render_html import _user_body
+
+    typed = "why does `<pasted_content>` leak?"
+    assert split_pastes(typed) == [(False, typed)]
+    html = _user_body(
+        '<pasted_content id="x">\n    def f():\n        return 1\n</pasted_content id="x">'
+    )
+    assert '<pre class="paste-body">    def f():' in html
+    assert _user_body('see <pasted_content id="y">\n</pasted_content id="y">').count("details") == 0
+
+
 def test_repeated_context_points_back_and_budget_collapses(tmp_path):
     deck = curate(extract(_context_transcript(tmp_path)))
     s0, s1 = deck["slides"]

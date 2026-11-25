@@ -35,7 +35,9 @@ link opens on that slide.
 budget, environment updates, reminders, task notifications) shows as muted `ctx` chips
 where it happened. A repeat of identical text is one line pointing back to the slide that
 carries it ("unchanged since beat 12"); the budget is one chip per slide. Parts of a
-request that merely copy a message already in the transcript are skipped.
+request that merely copy a message already in the transcript are skipped. A compaction's
+summary of the earlier conversation is a `compaction` chip, not a turn of yours. Text you
+pasted folds into a `pasted · N lines` block inside your message, line breaks kept.
 
 **Credits.** The last slide is a closing card. *Featuring* lists the subagents, grouped
 by type and by what they were asked (a slash command by its name), each linking to the

@@ -9,6 +9,8 @@ the rule-based one.
 
 import re
 
+from .extract import PASTE_RE
+
 _TEST_RE = re.compile(r"(\d+)\s+passed")
 _FAIL_RE = re.compile(r"(\d+)\s+failed")
 
@@ -187,7 +189,10 @@ def curate(reel: dict, density: str = "jazz") -> dict:
             # first ask); it rides into the slide this prompt opens.
             if any(e["type"] != "context" for e in cur):
                 flush()
-            title = _title_from_text(b["text"])
+            # Title from what was typed; a message that is only a paste titles from it.
+            title = _title_from_text(PASTE_RE.sub("", b["text"])) or _title_from_text(
+                PASTE_RE.sub(r"\1", b["text"])
+            )
             cur.append({"type": "user", "ts": b.get("ts"), "text": b["text"]})
         elif kind == "assistant_say":
             if not title:  # a leading assistant turn (before any user prompt)
