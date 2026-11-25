@@ -231,15 +231,15 @@ test('an attached session gets the badge and a pane with its frontier', async ($
   await ui.press({ key: 'ws:abc123def4567890' })
   expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeDefined()
 
-  // [-] folds the pane to its header and a line a workstream; [+] unfolds it.
+  // [hide] folds the pane to its header and a line a workstream; [show] unfolds it.
   await ui.press({ key: 'size' })
   expect(await ui.find({ type: 'Text', text: /^◆ demo \[open\] next: message 5d5c9a2e/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeUndefined()
   expect(await ui.find({ key: 'ws:abc123def4567890' })).toBeUndefined()
-  expect((await ui.find({ key: 'size' }))?.text).toBe('[+]')
+  expect((await ui.find({ key: 'size' }))?.text).toBe('[show]')
   await ui.press({ key: 'size' })
   expect(await ui.find({ type: 'Text', text: /A demo/ })).toBeDefined()
-  expect((await ui.find({ key: 'size' }))?.text).toBe('[-]')
+  expect((await ui.find({ key: 'size' }))?.text).toBe('[hide]')
   await ui.unmount()
 })
 
@@ -277,7 +277,7 @@ test('drawn inline the pane stands in for the badge; docked or closed the badge 
   const inline = await $.ui.mount({ ...PANE, props: { ...PANE.props, placement: 'inline' }, surface: 'terminal' })
   await clock.settle()
   expect(statuses.at(-1)).toBeUndefined()
-  // [-] then refresh lead the header row, clear of the pane's close mark at the right.
+  // [hide] then refresh lead the header row, clear of the pane's close mark at the right.
   const row = rowOf((await inline.drawn()) as Node, 'size')
   expect(row).toBeDefined()
   expect(holds(kids(row!)[0]!, 'size')).toBe(true)
