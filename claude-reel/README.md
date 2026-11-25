@@ -26,9 +26,10 @@ claude-reel <id> --live --open                     # follow a running session; r
 With the project installed, `uv run claude-reel …` works via the `[project.scripts]`
 entry; `python -m claude_reel …` also works.
 
-In the deck: `←`/`→` (or `j`/`k`, space) to move, `»` or End for the last slide, `e` to expand every chip on a slide,
+In the deck: `←`/`→` (or `j`/`k`, `l`/`h`, `]`/`[`, space) to move, `»`, End or `G` for
+the last slide, `$` to the end of the current slide and `0` back to its top, `e` to expand every chip on a slide,
 `g` for the agenda. Chips are folded by default (`--density firehose` opens them).
-`c` (or the `chips:` button) cycles how chips show: rows, one per line; inline, side by
+`c` (or the `chips:` button) cycles how chips show, `C` backwards: rows, one per line; inline, side by
 side with a short argument; compact, labels only. Clicking a chip in a denser strip
 unfolds that strip one level, down to rows, where a click opens the chip. The choice is
 remembered in the browser. `t` (or the button in the top bar) cycles the theme: auto

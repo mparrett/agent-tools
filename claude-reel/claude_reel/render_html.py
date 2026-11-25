@@ -395,12 +395,18 @@ JS = """
     if (e.key === 'n' && query) { e.preventDefault(); step(1); return; }
     if (e.key === 'N' && query) { e.preventDefault(); step(-1); return; }
     if (e.key === 'Escape') { closeFind(); return; }
-    if (e.key === 'ArrowRight' || e.key === 'j' || e.key === 'PageDown') { e.preventDefault(); go(idx + 1); }
-    else if (e.key === 'ArrowLeft' || e.key === 'k' || e.key === 'PageUp') { e.preventDefault(); go(idx - 1); }
+    if (e.key === 'ArrowRight' || e.key === 'j' || e.key === 'l' || e.key === ']' || e.key === 'PageDown') { e.preventDefault(); go(idx + 1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'k' || e.key === 'h' || e.key === '[' || e.key === 'PageUp') { e.preventDefault(); go(idx - 1); }
     else if (e.key === ' ') { e.preventDefault(); go(idx + (e.shiftKey ? -1 : 1)); }
     else if (e.key === 'g' || e.key === 'Home') { e.preventDefault(); go(0); }
-    else if (e.key === 'End') { e.preventDefault(); go(last); }
-    else if (e.key === 'c') { cycleDensity(); }
+    // G and C need Shift: with Caps Lock on, a plain g or c arrives as G or C, and
+    // would do the opposite of what was meant.
+    else if ((e.key === 'G' && e.shiftKey) || e.key === 'End') { e.preventDefault(); go(last); }
+    // Within the slide: $ to its end (in --live, the newest output), 0 back to the top.
+    else if (e.key === '$') { e.preventDefault(); scrollSlide(true); }
+    else if (e.key === '0') { e.preventDefault(); scrollSlide(false); }
+    else if (e.key === 'c') { cycleDensity(1); }
+    else if (e.key === 'C' && e.shiftKey) { cycleDensity(-1); }
     else if (e.key === 'e') {
       var d = slides[idx].querySelectorAll('details');
       var anyClosed = Array.prototype.some.call(d, function (x){ return !x.open; });
@@ -442,13 +448,17 @@ JS = """
     var st = el.classList && el.classList.contains('strip') ? el : el.closest && el.closest('.strip');
     if (st && stripLevel(st) > to) { st.dataset.unfold = to; applyStrip(st); }
   }
-  function cycleDensity(){
-    level = (level + 1) % LEVELS.length;
+  function scrollSlide(toEnd){
+    var s = slides[idx];
+    s.scrollTo({ top: toEnd ? s.scrollHeight : 0, behavior: reduce ? 'auto' : 'smooth' });
+  }
+  function cycleDensity(dir){
+    level = (level + (dir || 1) + LEVELS.length) % LEVELS.length;
     try { localStorage.setItem('claude-reel.chips', LEVELS[level]); } catch (e) {}
     reel.querySelectorAll('.strip').forEach(function (st){ delete st.dataset.unfold; });
     applyAll();
   }
-  densBtn.addEventListener('click', cycleDensity);
+  densBtn.addEventListener('click', function (){ cycleDensity(1); });
   // A click on a chip in a dense strip steps that strip one level less dense,
   // rather than opening a body the strip can't show yet.
   reel.addEventListener('click', function (e){
@@ -969,12 +979,12 @@ def render(
   </div>
   {reply}
   <div class="rail">
-    <button class="dens" id="dens" title="Chip density: rows, inline, compact (c)"><span class="dens-k">chips: </span><span id="densv">rows</span></button>
-    <button class="nav" id="prev" aria-label="Previous slide" title="Previous (←)">‹</button>
+    <button class="dens" id="dens" title="Chip density: rows, inline, compact (c, C back)"><span class="dens-k">chips: </span><span id="densv">rows</span></button>
+    <button class="nav" id="prev" aria-label="Previous slide" title="Previous (← k h [)">‹</button>
     <div class="track"><div class="fill" id="fill"></div></div>
     <span class="pos" id="pos">00 / {counter_total:02d}</span>
-    <button class="nav" id="next" aria-label="Next slide" title="Next (→)">›</button>
-    <button class="nav" id="last" aria-label="Last slide" title="Last (End)">»</button>
+    <button class="nav" id="next" aria-label="Next slide" title="Next (→ j l ])">›</button>
+    <button class="nav" id="last" aria-label="Last slide" title="Last (End G); $ scrolls to the slide's end">»</button>
   </div>
 </div>
 <div class="find" id="find"><span>/</span><input id="fq" type="search" placeholder="find in session" aria-label="Find in session"><span id="fc"></span></div>
