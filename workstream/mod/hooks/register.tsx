@@ -385,8 +385,9 @@ export const register: Register = (on, options) => {
               </Button>
               {shut ? null : (
                 // Indented under the name, past the caret, so a block reads as
-                // belonging to its header.
-                <Box flexDirection="column" paddingLeft={2}>
+                // belonging to its header; a column of margin at the right, so `▸ how`
+                // and long lines stop short of the pane's edge.
+                <Box flexDirection="column" paddingLeft={2} paddingRight={1}>
                   <Text>{f.title}</Text>
                   {f.next && (
                     // The text wraps in a column of its own; `how` keeps its
