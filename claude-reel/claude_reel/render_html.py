@@ -13,10 +13,6 @@ from .markdown import render_markdown
 
 CSS = """
 :root {
-  --bg:#14110d; --surface:#201b15; --surface2:#282017; --line:#322a20;
-  --ink:#ece5d8; --ink-soft:#cbc2b2; --muted:#938876;
-  --amber:#e0a54e; --amber-d:#7a5f2f; --cyan:#63b6c2;
-  --green:#83b06a; --red:#d67f6f; --magenta:#c78fb6;
   --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
@@ -25,8 +21,8 @@ CSS = """
 html, body { height: 100%; margin: 0; }
 body {
   background:
-    radial-gradient(1200px 600px at 78% -10%, #1d1811 0%, rgba(29,24,17,0) 60%),
-    radial-gradient(900px 500px at 0% 110%, #1a1610 0%, rgba(26,22,16,0) 55%),
+    radial-gradient(1200px 600px at 78% -10%, var(--glow1) 0%, transparent 60%),
+    radial-gradient(900px 500px at 0% 110%, var(--glow2) 0%, transparent 55%),
     var(--bg);
   color: var(--ink); font-family: var(--sans); -webkit-font-smoothing: antialiased; line-height: 1.6;
 }
@@ -34,7 +30,7 @@ body {
 .topbar {
   flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 16px;
   padding: 13px 22px; border-bottom: 1px solid var(--line);
-  background: rgba(20,17,13,0.72); backdrop-filter: blur(6px);
+  background: var(--bar); backdrop-filter: blur(6px);
 }
 .brand { display: flex; align-items: baseline; gap: 9px; font-family: var(--mono); }
 .brand .disc { color: var(--amber); font-size: 0.9rem; }
@@ -44,6 +40,8 @@ body {
 .session { display: flex; gap: 18px; font-family: var(--mono); font-size: 0.76rem; color: var(--muted); }
 .session .t { color: var(--cyan); }
 @media (max-width: 760px){ .session { display: none; } }
+.theme { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; color: var(--muted); background: none; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; margin-right: 12px; cursor: pointer; }
+.theme:hover { color: var(--amber); }
 .counter { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .counter b { color: var(--amber); }
 .reel {
@@ -123,7 +121,7 @@ h1.title {
 .kicker { color: var(--muted); font-style: italic; font-family: var(--serif); font-size: 1.02rem; margin-top: 22px; }
 /* A progress bar + prev/next scales to any slide count (dots-per-slide don't) and gives
    real tap targets on touch. Horizontal swipe still pages via the reel's scroll-snap. */
-.rail { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 10px max(16px, env(safe-area-inset-left)) calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: rgba(20,17,13,0.72); }
+.rail { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 10px max(16px, env(safe-area-inset-left)) calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--bar); }
 .reply { flex: 0 0 auto; display: flex; gap: 10px; align-items: flex-end; max-width: 730px; width: 100%; margin: 0 auto; padding: 10px 30px 12px; box-sizing: border-box; }
 .reply textarea { flex: 1 1 auto; resize: none; min-height: 40px; max-height: 30vh; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 9px; padding: 9px 12px; font: inherit; font-size: 0.98rem; line-height: 1.4; }
 .reply textarea:focus { outline: 1px solid var(--amber); }
@@ -177,7 +175,7 @@ h1.title {
 .sub-body .cmd { display: flex; gap: 8px; align-items: center; }
 .sub-body .cmd code { flex: 1 1 auto; font-family: var(--mono); font-size: 0.76rem; color: var(--cyan); background: var(--surface2); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; overflow-x: auto; white-space: nowrap; }
 .copy { font-family: var(--mono); font-size: 0.7rem; color: var(--amber); background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 4px 9px; cursor: pointer; }
-.find { position: fixed; top: 58px; right: 22px; z-index: 5; display: none; align-items: center; gap: 8px; padding: 7px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); font-family: var(--mono); font-size: 0.78rem; color: var(--muted); }
+.find { position: fixed; top: 58px; right: 22px; z-index: 5; display: none; align-items: center; gap: 8px; padding: 7px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 8px 24px var(--shadow); font-family: var(--mono); font-size: 0.78rem; color: var(--muted); }
 .find.on { display: flex; }
 .find input { width: min(260px, 50vw); background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: inherit; }
 .find input:focus { outline: 1px solid var(--amber); }
@@ -202,6 +200,92 @@ h1.title {
 .live.on { color: var(--amber); border-color: var(--amber-d); }
 .live.on::before { content: '● '; }
 .hit > summary, .hit.say, .hit .row { box-shadow: inset 2px 0 0 var(--amber); background: var(--surface2); }
+"""
+
+# Two palettes, dark (the original) and a warm light one. `auto` follows the OS;
+# an explicit choice sets data-theme on <html>. Text colors clear WCAG AA (4.5:1)
+# on --bg and --surface in both, as of 2026-11-24.
+PALETTES = {
+    "dark": {
+        "bg": "#14110d",
+        "surface": "#201b15",
+        "surface2": "#282017",
+        "line": "#322a20",
+        "ink": "#ece5d8",
+        "ink-soft": "#cbc2b2",
+        "muted": "#938876",
+        "amber": "#e0a54e",
+        "amber-d": "#7a5f2f",
+        "cyan": "#63b6c2",
+        "green": "#83b06a",
+        "red": "#d67f6f",
+        "magenta": "#c78fb6",
+        "glow1": "#1d1811",
+        "glow2": "#1a1610",
+        "bar": "rgba(20,17,13,0.72)",
+        "shadow": "rgba(0,0,0,0.4)",
+    },
+    "light": {
+        "bg": "#f5efe3",
+        "surface": "#fffaf0",
+        "surface2": "#ece3d2",
+        "line": "#d9cdb8",
+        "ink": "#26201a",
+        "ink-soft": "#463d31",
+        "muted": "#6f6553",
+        "amber": "#9a5c12",
+        "amber-d": "#d2b07a",
+        "cyan": "#1d6f7c",
+        "green": "#46702f",
+        "red": "#a8402f",
+        "magenta": "#87476f",
+        "glow1": "#fbf3e2",
+        "glow2": "#efe6d4",
+        "bar": "rgba(245,239,227,0.82)",
+        "shadow": "rgba(60,45,20,0.18)",
+    },
+}
+
+
+def _palette(name: str) -> str:
+    vars_ = "".join(f"--{k}:{v};" for k, v in PALETTES[name].items())
+    return f"{vars_} color-scheme: {name};"
+
+
+THEME_CSS = (
+    f":root, :root[data-theme='dark'] {{ {_palette('dark')} }}\n"
+    f":root[data-theme='light'] {{ {_palette('light')} }}\n"
+    "@media (prefers-color-scheme: light) {"
+    f" :root:not([data-theme='dark']) {{ {_palette('light')} }} }}\n"
+)
+
+# Runs in <head>, before the first paint, so a remembered theme doesn't flash.
+THEME_HEAD_JS = (
+    "try{var t=localStorage.getItem('claude-reel.theme');"
+    "if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch(e){}"
+)
+
+# `t` or the top bar's button cycles auto -> light -> dark. Its own listener, so it
+# stays out of the deck's key handler.
+THEME_JS = """
+(function () {
+  var MODES = ['auto', 'light', 'dark'], root = document.documentElement, btn = document.getElementById('theme');
+  function mode(){ return root.dataset.theme || 'auto'; }
+  function paint(){ btn.textContent = mode(); }
+  function cycle(){
+    var next = MODES[(MODES.indexOf(mode()) + 1) % MODES.length];
+    if (next === 'auto') delete root.dataset.theme; else root.dataset.theme = next;
+    try { if (next === 'auto') localStorage.removeItem('claude-reel.theme'); else localStorage.setItem('claude-reel.theme', next); } catch (e) {}
+    paint();
+  }
+  btn.addEventListener('click', cycle);
+  document.addEventListener('keydown', function (e){
+    if (e.key !== 't' || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target.closest && e.target.closest('input, textarea, #reply')) return;
+    e.preventDefault(); cycle();
+  });
+  paint();
+})();
 """
 
 JS = """
@@ -855,7 +939,7 @@ def render(
         else ""
     )
     scripts = (
-        f"<script>{JS}</script>"
+        f"<script>{JS}</script><script>{THEME_JS}</script>"
         + (f"<script>{LIVE_JS}</script>" if live else "")
         + (f"<script>{REPLY_JS}</script>" if live and live_send else "")
     )
@@ -866,13 +950,14 @@ def render(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>claude-reel — {_esc(meta.get("project") or "recap")}</title>
-<style>{CSS}</style>
+<script>{THEME_HEAD_JS}</script>
+<style>{THEME_CSS}{CSS}</style>
 </head><body>
 <div class="app">
   <div class="topbar">
     <div class="brand"><span class="disc">◉</span><span class="name">claude<b>·</b>reel</span><span class="tag">recap</span>{badge}</div>
     <div class="session" id="sess">{session_meta}</div>
-    <div class="counter"><b id="cur">00</b> / <span id="tot">{counter_total:02d}</span></div>
+    <div><button class="theme" id="theme" title="Theme: auto, light, dark (t)">auto</button><span class="counter"><b id="cur">00</b> / <span id="tot">{counter_total:02d}</span></span></div>
   </div>
   <div class="reel" id="reel">
     {"".join(slides_html)}

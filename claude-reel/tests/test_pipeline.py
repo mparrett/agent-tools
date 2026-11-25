@@ -619,3 +619,16 @@ def test_chip_density_toggle_ships_with_every_deck(tmp_path):
         "claude-reel.chips",
     ):
         assert hook in html
+
+
+def test_theme_toggle_and_both_palettes_ship_with_every_deck(tmp_path):
+    from claude_reel.render_html import PALETTES
+
+    html = render(curate(extract(_transcript(tmp_path))))
+    assert 'id="theme"' in html and "claude-reel.theme" in html
+    # The head script runs before the stylesheet, so a saved theme doesn't flash.
+    assert html.index("claude-reel.theme") < html.index("<style>")
+    assert PALETTES["dark"].keys() == PALETTES["light"].keys()
+    for name in ("dark", "light"):
+        assert f"color-scheme: {name};" in html and PALETTES[name]["bg"] in html
+    assert "@media (prefers-color-scheme: light)" in html
