@@ -649,7 +649,18 @@ def test_theme_toggle_and_both_palettes_ship_with_every_deck(tmp_path):
             assert contrast(pal["amber-d"], pal[back]) >= 3, back
 
 
-def test_extra_navigation_keys_are_bound(tmp_path):
+def test_extra_navigation_keys_do_what_they_say(tmp_path):
     html = render(curate(extract(_transcript(tmp_path))))
-    for key in ("'l'", "']'", "'h'", "'['", "'G'", "'$'", "'0'", "'C'"):
-        assert f"e.key === {key}" in html, key
+    lines = html.splitlines()
+    for key, action in (
+        ("'l'", "go(idx + 1)"),
+        ("']'", "go(idx + 1)"),
+        ("'h'", "go(idx - 1)"),
+        ("'['", "go(idx - 1)"),
+        ("'G' && e.shiftKey", "go(last)"),
+        ("'$'", "scrollSlide(true)"),
+        ("'0'", "scrollSlide(false)"),
+        ("'C' && e.shiftKey", "cycleDensity(-1)"),
+    ):
+        bound = [ln for ln in lines if f"e.key === {key}" in ln]
+        assert bound and action in bound[0], (key, action)

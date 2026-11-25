@@ -399,12 +399,14 @@ JS = """
     else if (e.key === 'ArrowLeft' || e.key === 'k' || e.key === 'h' || e.key === '[' || e.key === 'PageUp') { e.preventDefault(); go(idx - 1); }
     else if (e.key === ' ') { e.preventDefault(); go(idx + (e.shiftKey ? -1 : 1)); }
     else if (e.key === 'g' || e.key === 'Home') { e.preventDefault(); go(0); }
-    else if (e.key === 'G' || e.key === 'End') { e.preventDefault(); go(last); }
+    // G and C need Shift: with Caps Lock on, a plain g or c arrives as G or C, and
+    // would do the opposite of what was meant.
+    else if ((e.key === 'G' && e.shiftKey) || e.key === 'End') { e.preventDefault(); go(last); }
     // Within the slide: $ to its end (in --live, the newest output), 0 back to the top.
     else if (e.key === '$') { e.preventDefault(); scrollSlide(true); }
     else if (e.key === '0') { e.preventDefault(); scrollSlide(false); }
     else if (e.key === 'c') { cycleDensity(1); }
-    else if (e.key === 'C') { cycleDensity(-1); }
+    else if (e.key === 'C' && e.shiftKey) { cycleDensity(-1); }
     else if (e.key === 'e') {
       var d = slides[idx].querySelectorAll('details');
       var anyClosed = Array.prototype.some.call(d, function (x){ return !x.open; });
