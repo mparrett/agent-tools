@@ -606,3 +606,16 @@ def test_rail_has_a_jump_to_the_last_slide(tmp_path):
     html = render(curate(extract(_transcript(tmp_path))))
     assert 'id="last" aria-label="Last slide"' in html
     assert "lastBtn.addEventListener('click', function(){ go(last); })" in html
+
+
+def test_chip_density_toggle_ships_with_every_deck(tmp_path):
+    html = render(curate(extract(_transcript(tmp_path))))
+    assert 'id="dens"' in html and '<span id="densv">rows</span>' in html
+    for hook in (
+        ".strip.dense-inline",
+        ".strip.dense-compact",
+        "function cycleDensity",
+        "function unfoldStrip",
+        "claude-reel.chips",
+    ):
+        assert hook in html
