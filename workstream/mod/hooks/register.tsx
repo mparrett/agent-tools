@@ -293,7 +293,7 @@ export const register: Register = (on, options) => {
     const header = (
       <Box flexDirection="row">
         <Box flexShrink={0} marginRight={1}>
-          <Button plain key="size" label={isMin ? 'Restore' : 'Minimize'} onPress={() => update($, minimized, m => !m)}>
+          <Button plain key="size" label={isMin ? 'Show' : 'Hide'} onPress={() => update($, minimized, m => !m)}>
             <Text dimColor>{isMin ? '[show]' : '[hide]'}</Text>
           </Button>
         </Box>
