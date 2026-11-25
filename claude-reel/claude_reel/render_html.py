@@ -267,7 +267,10 @@ JS = """
     slides[i].querySelectorAll('.chip, .say').forEach(function (el){
       if (el.textContent.toLowerCase().indexOf(query) < 0) return;
       el.classList.add('hit');
-      if (el.tagName === 'DETAILS') { unfoldStrip(el, 0); el.open = true; }
+      // Any chip, not only one with a body: a flat chip's text is its argument,
+      // which a dense strip hides or clips.
+      if (el.classList.contains('chip')) unfoldStrip(el, 0);
+      if (el.tagName === 'DETAILS') el.open = true;
       first = first || el;
     });
     if (first) first.scrollIntoView({ block: 'center' });
@@ -309,7 +312,14 @@ JS = """
     else if (e.key === 'g' || e.key === 'Home') { e.preventDefault(); go(0); }
     else if (e.key === 'End') { e.preventDefault(); go(last); }
     else if (e.key === 'c') { cycleDensity(); }
-    else if (e.key === 'e') { slides[idx].querySelectorAll('.strip').forEach(function (st){ unfoldStrip(st, 0); }); var d = slides[idx].querySelectorAll('details'); var anyClosed = Array.prototype.some.call(d, function (x){ return !x.open; }); d.forEach(function (x){ x.open = anyClosed; }); }
+    else if (e.key === 'e') {
+      var d = slides[idx].querySelectorAll('details');
+      var anyClosed = Array.prototype.some.call(d, function (x){ return !x.open; });
+      // Opening everything needs rows; folding it back returns the strips to the
+      // reader's density.
+      slides[idx].querySelectorAll('.strip').forEach(function (st){ if (anyClosed) unfoldStrip(st, 0); else { delete st.dataset.unfold; applyStrip(st); } });
+      d.forEach(function (x){ x.open = anyClosed; });
+    }
   });
   window.addEventListener('resize', function () { reel.scrollLeft = idx * reel.clientWidth; });
   var start = fromHash();
