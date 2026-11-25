@@ -129,13 +129,18 @@ def landed(transcript: Path, offset: int, body: str, timeout: float = CONFIRM_TI
 
 def deliver(
     agent_id: str, text: str, transcript: Path | None = None, command=("claude", "attach")
-) -> None:
-    """Paste `text` into background session `agent_id`, press Enter, and (given its
-    `transcript`) confirm the session recorded it.
+) -> bool:
+    """Paste `text` into background session `agent_id` and press Enter. Returns
+    whether the session's `transcript` recorded it within CONFIRM_TIMEOUT (True
+    when no transcript is given).
 
-    Raises SendError when the TUI never shows its prompt, the text is empty, or the
-    message never reaches the transcript. `command` is the attach command, so tests
-    can stand in a fake.
+    False is not a failure. While the session is blocked on something other than a
+    model turn (a `!` command in its terminal, seen 2026-11-24), Claude Code holds
+    typed input in its queue and writes nothing until it runs, which took 106 s that
+    time. Calling that an error invited sending the message twice.
+
+    Raises SendError when the TUI never shows its prompt or the text is empty.
+    `command` is the attach command, so tests can stand in a fake.
     """
     import fcntl
     import pty
@@ -175,11 +180,7 @@ def deliver(
             _read_until(fd, b"", 0.8)
             os.write(fd, CTRL_Z)  # detach; the session keeps running
             _read_until(fd, b"", 0.5)
-            if transcript and not landed(transcript, offset, body):
-                raise SendError(
-                    "typed it, but the session never recorded it; check the terminal"
-                    f" with `claude attach {agent_id}`"
-                )
+            confirmed = not transcript or landed(transcript, offset, body)
         finally:
             if proc.poll() is None:
                 proc.terminate()
@@ -189,3 +190,4 @@ def deliver(
                     proc.kill()
                     proc.wait()
             os.close(fd)
+        return confirmed

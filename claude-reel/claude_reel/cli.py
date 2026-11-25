@@ -51,23 +51,34 @@ def _dump_reel(reel, out_path):
 
 
 def _reply_target(path):
-    """(sender, note): how to deliver a reply to this session, or why there is none."""
+    """(sender, note, check): how to deliver a reply to this session, or why there is
+    none, and where to look when a reply never shows up."""
     from . import send
 
     agent = send.find_agent(path.stem)
     if agent is None:
-        return None, "Replies need a running background session (claude --bg); this one isn't."
-    if agent.get("kind") != send.ATTACHABLE:
-        return None, (
-            f"Replies need a background session (claude --bg); this one is {agent.get('kind')}."
+        return (
+            None,
+            "Replies need a running background session (claude --bg); this one isn't.",
+            None,
         )
-    return (lambda text: send.deliver(agent["id"], text, transcript=path)), None
+    if agent.get("kind") != send.ATTACHABLE:
+        return (
+            None,
+            f"Replies need a background session (claude --bg); this one is {agent.get('kind')}.",
+            None,
+        )
+    return (
+        lambda text: send.deliver(agent["id"], text, transcript=path),
+        None,
+        f"`claude attach {agent['id']}`",
+    )
 
 
 def _live(path, build_deck, args) -> int:
     from . import live
 
-    sender, note = _reply_target(path) if not args.no_reply else (None, None)
+    sender, note, check = _reply_target(path) if not args.no_reply else (None, None, None)
 
     def ready(url):
         print(f"claude-reel: live at {url}  (Ctrl+C to stop)", flush=True)
@@ -75,7 +86,15 @@ def _live(path, build_deck, args) -> int:
         if args.open:
             webbrowser.open(url)
 
-    live.serve(path, build_deck, port=args.port, on_ready=ready, sender=sender, reply_note=note)
+    live.serve(
+        path,
+        build_deck,
+        port=args.port,
+        on_ready=ready,
+        sender=sender,
+        reply_note=note,
+        check=check,
+    )
     return 0
 
 

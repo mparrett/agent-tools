@@ -111,9 +111,13 @@ def _allowed_host(host: str, port: int) -> bool:
 MAX_REPLY_BYTES = 64 * 1024
 
 
-def make_handler(builder: Builder, token: str, port_ref: list, sender=None, reply_note=None):
-    """`sender(text)` delivers a reply (raising send.SendError when it can't);
-    without one there is no reply bar, and `reply_note` says why."""
+def make_handler(
+    builder: Builder, token: str, port_ref: list, sender=None, reply_note=None, check=None
+):
+    """`sender(text)` delivers a reply and returns whether the session has recorded it
+    yet (raising send.SendError when it can't deliver);
+    without one there is no reply bar, and `reply_note` says why. `check` names where
+    to look when a reply is never recorded (the session's attach command)."""
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # the terminal is the user's, not an access log
@@ -182,10 +186,13 @@ def make_handler(builder: Builder, token: str, port_ref: list, sender=None, repl
             if not isinstance(text, str) or not text.strip():
                 return self._json(400, {"error": "nothing to send"})
             try:
-                sender(text)
+                recorded = sender(text)
             except SendError as e:
                 return self._json(502, {"error": str(e)})
-            return self._json(200, {"ok": True})
+            # Only an explicit False is pending: a sender that returns nothing delivered.
+            if recorded is False:
+                return self._json(200, {"ok": True, "pending": True, "check": check})
+            return self._json(200, {"ok": True, "pending": False})
 
         def _page(self):
             try:
@@ -239,13 +246,15 @@ def make_handler(builder: Builder, token: str, port_ref: list, sender=None, repl
     return Handler
 
 
-def serve(path: Path, build_deck, port: int = 0, on_ready=None, sender=None, reply_note=None):
+def serve(
+    path: Path, build_deck, port: int = 0, on_ready=None, sender=None, reply_note=None, check=None
+):
     """Serve until interrupted. `on_ready(url)` runs once the port is bound."""
     token = secrets.token_urlsafe(16)
     builder = Builder(path, build_deck)
     port_ref = [port]
     server = ThreadingHTTPServer(
-        ("127.0.0.1", port), make_handler(builder, token, port_ref, sender, reply_note)
+        ("127.0.0.1", port), make_handler(builder, token, port_ref, sender, reply_note, check)
     )
     server.daemon_threads = True
     port_ref[0] = server.server_address[1]

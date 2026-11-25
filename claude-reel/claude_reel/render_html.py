@@ -335,6 +335,7 @@ LIVE_JS = """
       var s = reel.children[nav.last()]; s.scrollTop = s.scrollHeight;
     }
     badge.className = 'live on'; badge.textContent = 'live';
+    document.dispatchEvent(new Event('reel:update'));
   };
   es.onerror = function (){ badge.className = 'live off'; badge.textContent = 'reconnecting'; };
 })();
@@ -352,6 +353,28 @@ REPLY_JS = """
   box.addEventListener('keydown', function (e){
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
   });
+  // A pending reply is typed into the session but not yet in its transcript: the
+  // session is busy outside a model turn, or the text never took. Watch the slides
+  // for it; once it shows as yours it was sent, and if it never does, say where to look.
+  var PENDING_GIVE_UP = 180000;
+  var pending = null;
+  function key(t){ return t.toLowerCase().replace(/[^a-z0-9]+/g, ''); }
+  function arrived(){
+    var sel = '#reel > section:nth-last-child(-n+3) .say--user';
+    return Array.prototype.some.call(document.querySelectorAll(sel), function (el){ return key(el.textContent).indexOf(pending.key) >= 0; });
+  }
+  document.addEventListener('reel:update', function (){
+    if (pending && arrived()) { clearTimeout(pending.timer); pending = null; say('sent'); setTimeout(function (){ if (stat.textContent === 'sent') say(''); }, 2500); }
+  });
+  function watch(text, check){
+    if (pending) clearTimeout(pending.timer);
+    pending = { key: key(text).slice(0, 60) };
+    pending.timer = setTimeout(function (){
+      pending = null;
+      say('not in the session yet after 3 min; check ' + (check || 'its terminal'), true);
+    }, PENDING_GIVE_UP);
+    say('typed · waiting for the session to pick it up');
+  }
   form.addEventListener('submit', function (e){
     e.preventDefault();
     var text = box.value.trim();
@@ -361,8 +384,10 @@ REPLY_JS = """
       .then(function (r){ return r.json().then(function (j){ return { ok: r.ok, j: j }; }); })
       .then(function (x){
         if (!x.ok) throw new Error(x.j.error || 'send failed');
-        box.value = ''; grow(); say('sent');
+        box.value = ''; grow();
         window.reelNav.go(window.reelNav.last());
+        if (x.j.pending) { watch(text, x.j.check); return; }
+        say('sent');
         setTimeout(function (){ if (stat.textContent === 'sent') say(''); }, 2500);
       })
       .catch(function (err){ say(String(err.message || err), true); })
