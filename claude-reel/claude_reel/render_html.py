@@ -354,6 +354,10 @@ HINTS_JS = """
   function toggle(){ if (shown()) clear(); else show(); }
   help.addEventListener('click', function (e){ e.stopPropagation(); toggle(); });
   document.addEventListener('keydown', function (e){
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // Typing ? sends a Shift keydown first; letting it dismiss would make the
+    // second ? reopen the hints instead of closing them.
+    if (e.key === 'Shift') return;
     if (e.target.closest && e.target.closest('input, textarea, #reply')) return;
     if (e.key === '?') { e.preventDefault(); toggle(); return; }
     if (shown()) clear();
