@@ -167,12 +167,17 @@ def make_handler(builder: Builder, token: str, port_ref: list, sender=None, repl
                 return self._json(415, {"error": "send JSON"})
             if sender is None:
                 return self._json(409, {"error": reply_note or "replies are off"})
-            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if n < 0:  # read(-1) would wait for the client to hang up
+                return self._json(400, {"error": "bad Content-Length"})
             if n > MAX_REPLY_BYTES:
                 return self._json(413, {"error": "reply too long"})
             try:
                 text = json.loads(self.rfile.read(n) or b"{}").get("text", "")
-            except (json.JSONDecodeError, AttributeError):
+            except (ValueError, AttributeError):  # bad JSON or bad UTF-8, or not an object
                 return self._json(400, {"error": "bad JSON"})
             if not isinstance(text, str) or not text.strip():
                 return self._json(400, {"error": "nothing to send"})

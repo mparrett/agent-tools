@@ -20,12 +20,15 @@ import select
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 PASTE_START, PASTE_END = b"\x1b[200~", b"\x1b[201~"
 CTRL_Z = b"\x1a"
 # The input prompt's marker; seeing it means the TUI is drawn and takes input.
 READY_MARK = "❯".encode()
 READY_TIMEOUT = 15.0
+# How long a typed message may take to reach the transcript.
+CONFIRM_TIMEOUT = 6.0
 # Only background sessions are attachable; `claude agents --json` lists them.
 ATTACHABLE = "background"
 
@@ -79,11 +82,60 @@ def _read_until(fd, mark: bytes, timeout: float) -> bytes:
     return out
 
 
-def deliver(agent_id: str, text: str, command=("claude", "attach")) -> None:
-    """Paste `text` into background session `agent_id` and press Enter.
+def _quiet(fd, gap: float, limit: float) -> None:
+    """Read until the terminal has been silent for `gap` seconds (or `limit` passes):
+    the TUI has finished drawing, history replay included."""
+    end = time.monotonic() + limit
+    while time.monotonic() < end and _read_until(fd, b"", gap):
+        pass
 
-    Raises SendError when the TUI never shows its prompt or the text is empty.
-    `command` is the attach command, so tests can stand in a fake.
+
+def landed(transcript: Path, offset: int, body: str, timeout: float = CONFIRM_TIMEOUT) -> bool:
+    """Whether a record carrying `body` appeared in `transcript` past `offset`.
+
+    The transcript is the only record of what the session accepted: a typed user
+    message when idle, a queued command when busy. Reading it, rather than the
+    TUI's screen, is what lets the page say "sent" and mean it.
+    """
+
+    # Containment, not equality: Claude Code records a long paste wrapped in
+    # <pasted_content> tags, inside whatever else the message holds.
+    def carries(v):
+        if isinstance(v, str):
+            return body in v
+        if isinstance(v, dict):
+            return any(carries(x) for x in v.values())
+        if isinstance(v, list):
+            return any(carries(x) for x in v)
+        return False
+
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            with transcript.open("rb") as fh:
+                fh.seek(offset)
+                for line in fh:
+                    try:
+                        if carries(json.loads(line)):
+                            return True
+                    except ValueError:
+                        continue
+        except OSError:
+            pass
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.2)
+
+
+def deliver(
+    agent_id: str, text: str, transcript: Path | None = None, command=("claude", "attach")
+) -> None:
+    """Paste `text` into background session `agent_id`, press Enter, and (given its
+    `transcript`) confirm the session recorded it.
+
+    Raises SendError when the TUI never shows its prompt, the text is empty, or the
+    message never reaches the transcript. `command` is the attach command, so tests
+    can stand in a fake.
     """
     import fcntl
     import pty
@@ -115,13 +167,19 @@ def deliver(agent_id: str, text: str, command=("claude", "attach")) -> None:
         try:
             if READY_MARK not in _read_until(fd, READY_MARK, READY_TIMEOUT):
                 raise SendError(f"`{' '.join(command)} {agent_id}` never showed its prompt")
-            _read_until(fd, b"", 0.3)  # let the first frame finish drawing
+            _quiet(fd, 0.3, 3.0)
+            offset = transcript.stat().st_size if transcript else 0
             os.write(fd, PASTE_START + body.encode() + PASTE_END)
             _read_until(fd, b"", 0.4)
             os.write(fd, b"\r")
             _read_until(fd, b"", 0.8)
             os.write(fd, CTRL_Z)  # detach; the session keeps running
-            _read_until(fd, b"", 1.5)
+            _read_until(fd, b"", 0.5)
+            if transcript and not landed(transcript, offset, body):
+                raise SendError(
+                    "typed it, but the session never recorded it; check the terminal"
+                    f" with `claude attach {agent_id}`"
+                )
         finally:
             if proc.poll() is None:
                 proc.terminate()

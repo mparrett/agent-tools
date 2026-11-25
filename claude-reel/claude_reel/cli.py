@@ -61,7 +61,7 @@ def _reply_target(path):
         return None, (
             f"Replies need a background session (claude --bg); this one is {agent.get('kind')}."
         )
-    return (lambda text: send.deliver(agent["id"], text)), None
+    return (lambda text: send.deliver(agent["id"], text, transcript=path)), None
 
 
 def _live(path, build_deck, args) -> int:

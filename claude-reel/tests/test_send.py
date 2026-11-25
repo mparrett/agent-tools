@@ -5,6 +5,7 @@ import json
 import sys
 import threading
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 from claude_reel import live, send
@@ -12,12 +13,13 @@ from claude_reel.curate import curate
 from claude_reel.extract import extract
 from claude_reel.render_html import render
 
-# Stands in for `claude attach <id>`: draws the prompt, then records every byte the
-# terminal hands it until Ctrl+Z (the detach), raw, as the TUI would see them.
+# Stands in for `claude attach <id>`: draws the prompt, records every byte the
+# terminal hands it until Ctrl+Z (the detach), raw, as the TUI would see them, and
+# (unless told to drop it) appends the typed message to the session's transcript.
 FAKE_ATTACH = r"""
-import os, sys, tty
-out = sys.argv[1]
-if sys.argv[2] != "silent":
+import json, os, sys, tty
+out, mode = sys.argv[1], sys.argv[2]
+if mode != "silent":
     os.write(1, "draw ❯ ".encode())
 tty.setraw(0)
 got = b""
@@ -27,6 +29,11 @@ while not got.endswith(b"\x1a"):
         break
     got += c
 open(out, "wb").write(got)
+if mode == "ok":
+    text = got.split(b"\x1b[200~")[1].split(b"\x1b[201~")[0].decode()
+    rec = {"type": "user", "promptSource": "typed", "message": {"role": "user", "content": text}}
+    with open(out + ".jsonl", "a") as fh:
+        fh.write(json.dumps(rec) + "\n")
 """
 
 
@@ -40,10 +47,37 @@ def fake(tmp_path):
 
 def test_deliver_pastes_presses_enter_and_detaches(fake):
     cmd, rec = fake()
-    send.deliver("ab12cd34", "line one\r\nline two  ", command=cmd)
+    transcript = Path(str(rec) + ".jsonl")
+    transcript.write_text('{"type": "user", "message": {"content": "earlier"}}\n')
+    send.deliver("ab12cd34", "line one\r\nline two  ", transcript=transcript, command=cmd)
     assert rec.read_bytes() == (
         send.PASTE_START + b"line one\nline two" + send.PASTE_END + b"\r" + send.CTRL_Z
     )
+
+
+def test_deliver_fails_when_the_session_never_records_it(fake, monkeypatch):
+    monkeypatch.setattr(send, "CONFIRM_TIMEOUT", 0.5)
+    cmd, rec = fake("drop")
+    transcript = Path(str(rec) + ".jsonl")
+    transcript.write_text("")
+    with pytest.raises(send.SendError, match="never recorded"):
+        send.deliver("ab12cd34", "hello", transcript=transcript, command=cmd)
+
+
+def test_landed_looks_only_past_the_offset(tmp_path):
+    f = tmp_path / "t.jsonl"
+    f.write_text(json.dumps({"message": {"content": "keep going"}}) + "\n")
+    offset = f.stat().st_size
+    assert not send.landed(f, offset, "keep going", timeout=0.2)
+    with f.open("a") as fh:  # busy: the message is queued, wrapped as a paste
+        q = {
+            "attachment": {
+                "type": "queued_command",
+                "prompt": '<pasted_content id="x">\nkeep going\n',
+            }
+        }
+        fh.write("not json\n" + json.dumps(q) + "\n")
+    assert send.landed(f, offset, "keep going", timeout=0.2)
 
 
 def test_deliver_gives_up_without_a_prompt(fake, monkeypatch):
@@ -81,9 +115,9 @@ def _serve(tmp_path, sender, note=None):
     return srv, port[0]
 
 
-def _post(port, body, origin="same", ctype="application/json", path="/send?t=tok"):
+def _post(port, body, origin="same", ctype="application/json", path="/send?t=tok", extra=None):
     host = f"127.0.0.1:{port}"
-    headers = {"Host": host, "Content-Type": ctype}
+    headers = {"Host": host, "Content-Type": ctype, **(extra or {})}
     if origin:
         headers["Origin"] = f"http://{host}" if origin == "same" else origin
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
@@ -108,6 +142,19 @@ def test_send_route_gates_then_delivers(tmp_path):
         assert _post(port, ok, origin="http://evil.example")[0] == 403
         assert _post(port, "text=x", ctype="application/x-www-form-urlencoded")[0] == 415
         assert _post(port, json.dumps({"text": "  "}))[0] == 400
+        assert _post(port, b"\xff\xfe")[0] == 400  # not UTF-8
+        assert _post(port, "[1]")[0] == 400  # not an object
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        c.putrequest("POST", "/send?t=tok", skip_host=True)
+        for k, v in {
+            "Host": f"127.0.0.1:{port}",
+            "Origin": f"http://127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "Content-Length": "-1",
+        }.items():
+            c.putheader(k, v)
+        c.endheaders()
+        assert c.getresponse().status == 400  # answered, not stuck reading
         assert _post(port, ok) == (200, {"ok": True})
         assert _post(port, json.dumps({"text": "fail"})) == (502, {"error": "no prompt"})
         assert got == ["keep going"]

@@ -276,7 +276,7 @@ JS = """
 
   document.addEventListener('keydown', function (e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.target.closest && e.target.closest('textarea')) return;  // typing a reply
+    if (e.target.closest && e.target.closest('#reply, textarea')) return;  // in the reply bar
     if (e.key === '/') { e.preventDefault(); find.classList.add('on'); fq.focus(); fq.select(); return; }
     if (e.key === 'n' && query) { e.preventDefault(); step(1); return; }
     if (e.key === 'N' && query) { e.preventDefault(); step(-1); return; }
