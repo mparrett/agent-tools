@@ -647,3 +647,9 @@ def test_theme_toggle_and_both_palettes_ship_with_every_deck(tmp_path):
             for ink in ("ink", "ink-soft", "muted", "amber", "cyan", "green", "red", "magenta"):
                 assert contrast(pal[ink], pal[back]) >= 4.5, (ink, back)
             assert contrast(pal["amber-d"], pal[back]) >= 3, back
+
+
+def test_extra_navigation_keys_are_bound(tmp_path):
+    html = render(curate(extract(_transcript(tmp_path))))
+    for key in ("'l'", "']'", "'h'", "'['", "'G'", "'$'", "'0'", "'C'"):
+        assert f"e.key === {key}" in html, key
