@@ -85,9 +85,25 @@ async function refresh($: EngineInterface, withFrontier: boolean): Promise<void>
     error,
     isLoading: false,
   }))
-  // The engine draws every plugin status line as a pinned warning (⚠, yellow);
-  // the band is the opt-in for a quieter badge. The band redraws on the write above.
-  $.ui.status(mode === 'status' ? badgeText(next.attached, next.error) : undefined)
+  showBadge($, next)
+}
+
+// Where the pane is drawn now: set by its render, cleared when it closes.
+let seat: 'dock' | 'inline' | 'widget' | null = null
+
+// The engine draws every plugin status line as a pinned warning (⚠, yellow);
+// the band is the opt-in for a quieter badge. The band redraws on its own.
+// Inline (a narrow terminal seats the pane above the prompt) the pane already
+// names each workstream a line or two up, so the badge would only repeat it
+// on a row of its own.
+function showBadge($: EngineInterface, v: WorkstreamView): void {
+  $.ui.status(mode === 'status' && seat !== 'inline' ? badgeText(v.attached, v.error) : undefined)
+}
+
+async function setSeat($: EngineInterface, now: typeof seat): Promise<void> {
+  if (now === seat) return
+  seat = now
+  showBadge($, await read($, view))
 }
 
 // One refresh at a time: a timer firing while a slow frontier runs would
@@ -200,7 +216,17 @@ export const register: Register = (on, options) => {
     )
   })
 
+  // A pane closed by hand, by `/workstream close`, or with its plugin: the badge comes back.
+  on('ui.close', async ($, e, next) => {
+    const done = await next(e)
+    if (e.id === PANE) await setSeat($, null)
+    return done
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    // Any seat the engine adds later counts as `dock`, as its docs ask.
+    const p = e.props.placement
+    void setSeat($, p === 'inline' || p === 'widget' ? p : 'dock')
     const { Box, Text, Button, Link } = $.ui.resolve(e)
     const v = await read($, view)
     const flips = await read($, flipped)
@@ -230,16 +256,19 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    // [-] leads the row, as the HUD's does: at the right it sat under the
+    // pane's own close mark, where a press meant for one landed on the other.
     const header = (
       <Box flexDirection="row" justifyContent="space-between">
-        <Text dimColor>{v.isLoading ? 'refreshing…' : asOfLabel(v.frontiers[0]?.asOf ?? null)}</Text>
         <Box flexDirection="row">
-          <Button key="refresh" label="refresh" onPress={() => kick($, true)} />
-          <Text> </Text>
-          <Button plain key="size" label={isMin ? 'Restore' : 'Minimize'} onPress={() => update($, minimized, m => !m)}>
-            <Text dimColor>{isMin ? '[+]' : '[-]'}</Text>
-          </Button>
+          <Box flexShrink={0} marginRight={1}>
+            <Button plain key="size" label={isMin ? 'Restore' : 'Minimize'} onPress={() => update($, minimized, m => !m)}>
+              <Text dimColor>{isMin ? '[+]' : '[-]'}</Text>
+            </Button>
+          </Box>
+          <Text dimColor>{v.isLoading ? 'refreshing…' : asOfLabel(v.frontiers[0]?.asOf ?? null)}</Text>
         </Box>
+        <Button key="refresh" label="refresh" onPress={() => kick($, true)} />
       </Box>
     )
     if (v.error) {

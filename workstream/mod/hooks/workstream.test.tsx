@@ -233,6 +233,58 @@ test('an attached session gets the badge and a pane with its frontier', async ($
   await ui.unmount()
 })
 
+type Node = { type?: string; props?: { key?: string; flexDirection?: string }; children?: unknown[] }
+const kids = (n: Node) => (n.children ?? []).filter((c): c is Node => !!c && typeof c === 'object')
+const holds = (n: Node, key: string): boolean => n.props?.key === key || kids(n).some(c => holds(c, key))
+// the innermost row Box with the button somewhere inside it
+function rowOf(n: Node, key: string): Node | undefined {
+  for (const c of kids(n)) {
+    const inner = rowOf(c, key)
+    if (inner) return inner
+  }
+  return n.type === 'Box' && n.props?.flexDirection === 'row' && holds(n, key) ? n : undefined
+}
+
+test('drawn inline the pane stands in for the badge; docked or closed the badge is back', async ($, on) => {
+  const clock = mock.clock(on)
+  const statuses: (string | undefined)[] = []
+  on('session.id', () => ({ value: 'sid' }))
+  on('process.run', (_, e) => ok(e.argv.includes('ls') ? JSON.stringify([{ id: 'a', name: 'demo', owned: true }]) : FRONTIER))
+  on('ui.status', (_, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.panes', () => ({ value: [{ id: 'workstream', title: 'Workstream', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(statuses.at(-1)).toBe('demo (owner)')
+
+  const inline = await $.ui.mount({ ...PANE, props: { ...PANE.props, placement: 'inline' }, surface: 'terminal' })
+  await clock.settle()
+  expect(statuses.at(-1)).toBeUndefined()
+  // [-] leads the header row, clear of the pane's close mark at the right.
+  const row = rowOf((await inline.drawn()) as Node, 'size')
+  expect(row).toBeDefined()
+  expect(holds(kids(row!)[0]!, 'size')).toBe(true)
+  await inline.unmount()
+
+  const docked = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  expect(statuses.at(-1)).toBe('demo (owner)')
+  await docked.unmount()
+
+  await $.ui.mount({ ...PANE, props: { ...PANE.props, placement: 'inline' }, surface: 'terminal' })
+  await clock.settle()
+  expect(statuses.at(-1)).toBeUndefined()
+  await $.command.run(slash('close'))
+  await clock.settle()
+  expect(statuses.at(-1)).toBe('demo (owner)')
+})
+
 const ok = (stdout: string) => ({
   value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
 })
