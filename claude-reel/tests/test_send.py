@@ -135,7 +135,7 @@ def test_send_route_gates_then_delivers(tmp_path):
         if text == "fail":
             raise send.SendError("no prompt")
         got.append(text)
-        return text != "held"
+        return None if text == "old contract" else text != "held"
 
     srv, port = _serve(tmp_path, sender)
     try:
@@ -159,9 +159,11 @@ def test_send_route_gates_then_delivers(tmp_path):
         c.endheaders()
         assert c.getresponse().status == 400  # answered, not stuck reading
         assert _post(port, ok) == (200, {"ok": True, "pending": False})
-        assert _post(port, json.dumps({"text": "held"})) == (200, {"ok": True, "pending": True})
+        held = _post(port, json.dumps({"text": "held"}))
+        assert held == (200, {"ok": True, "pending": True, "check": None})
+        assert _post(port, json.dumps({"text": "old contract"}))[1]["pending"] is False
         assert _post(port, json.dumps({"text": "fail"})) == (502, {"error": "no prompt"})
-        assert got == ["keep going", "held"]
+        assert got == ["keep going", "held", "old contract"]
     finally:
         srv.shutdown()
         srv.server_close()

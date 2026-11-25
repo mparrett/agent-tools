@@ -44,8 +44,10 @@ would run on every change. Ctrl+C stops it.
 live page has a reply bar: Enter sends, Shift+Enter starts a new line. The server types
 the text into the session through `claude attach`, so Claude Code records it as yours,
 typed, and queues it if a turn is running. The page says "sent" once the transcript
-records it; while the session is blocked on something else, such as a `!` command in
-its terminal, Claude Code holds the text unrecorded, and the page says it is waiting. Other sessions get a line saying why there is
+records it. While the session is blocked on something else, such as a `!` command in
+its terminal, Claude Code holds the text unrecorded: the page says it is waiting, turns
+to "sent" when your message shows up in the deck, and after 3 minutes without it says
+to check the session with `claude attach <id>`. Other sessions get a line saying why there is
 no bar, and `--no-reply` turns it off. `attach` is a terminal UI rather than an API, so a
 Claude Code update can break this; `send.py` says how it works.
 
