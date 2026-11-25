@@ -88,27 +88,37 @@ async function refresh($: EngineInterface, withFrontier: boolean): Promise<void>
   await showBadge($, next)
 }
 
-// Where the pane is drawn now: set by its render, cleared when it closes.
-let seat: 'dock' | 'inline' | 'widget' | null = null
+// Where the pane is drawn now: set by its render, cleared when it closes. Not
+// an atom: a render may not write state.
+type Seat = 'dock' | 'inline' | 'widget' | null
+let seat: Seat = null
+
+// Inline (a narrow terminal seats the pane above the prompt) a pane listing
+// the workstreams names each a line or two up, so the badge or the band would
+// only repeat it on a row of its own. Only while it is drawn and listing them:
+// one still reading the store, showing an error, or left waiting undrawn names
+// nothing. No event says a pane stopped being drawn, so that is asked here each
+// time; the badge timer's refresh brings the badge back within a minute.
+async function paneNamesThem($: EngineInterface, v: WorkstreamView): Promise<boolean> {
+  if (seat !== 'inline' || v.frontiers.length === 0 || v.error) return false
+  const pane = (await $.ui.panes()).find(p => p.id === PANE)
+  return !!(pane?.isPlaced && pane.isShown)
+}
 
 // The engine draws every plugin status line as a pinned warning (⚠, yellow);
 // the band is the opt-in for a quieter badge. The band redraws on its own.
-// Inline (a narrow terminal seats the pane above the prompt) a pane listing
-// the workstreams names each a line or two up, so the badge would only repeat
-// it on a row of its own. Only while it is drawn and listing them: one still
-// reading the store, showing an error, or left waiting undrawn names nothing.
-// No event says a pane stopped being drawn, so that is asked here each time;
-// the badge timer brings the badge back within a minute.
 async function showBadge($: EngineInterface, v: WorkstreamView): Promise<void> {
   if (mode !== 'status') return $.ui.status(undefined)
-  const pane = seat === 'inline' && v.frontiers.length > 0 && !v.error ? (await $.ui.panes()).find(p => p.id === PANE) : undefined
-  $.ui.status(pane?.isPlaced && pane.isShown ? undefined : badgeText(v.attached, v.error))
+  $.ui.status((await paneNamesThem($, v)) ? undefined : badgeText(v.attached, v.error))
 }
 
-async function setSeat($: EngineInterface, now: typeof seat): Promise<void> {
+async function setSeat($: EngineInterface, now: Seat): Promise<void> {
   if (now === seat) return
   seat = now
   await showBadge($, await read($, view))
+  // The band redraws on a write to the view it reads, made once this render is done.
+  // A failed redraw only leaves the band as it was until the next refresh rewrites the view.
+  if (mode === 'band') $.clock.after(0, () => void update($, view, v => ({ ...v })).catch(() => undefined))
 }
 
 // One refresh at a time: a timer firing while a slow frontier runs would
@@ -135,6 +145,8 @@ function kick($: EngineInterface, withFrontier: boolean): Promise<void> {
 
 export const register: Register = (on, options) => {
   mode = badgeMode(options.badge)
+  // A reload drops the panes' renders; the next one says where the pane is.
+  seat = null
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: COMMAND, description: 'Open the workstream pane or bring it forward; /workstream close closes it' })
@@ -199,6 +211,9 @@ export const register: Register = (on, options) => {
     if (mode !== 'band' || e.props.hasSurvey) return next(e)
     const v = await read($, view)
     if (v.attached === null && !v.error) return next(e)
+    // Attached to none, the band has nothing to say; a pane drawn inline and
+    // listing the workstreams says it already.
+    if ((v.attached?.length === 0 && !v.error) || (await paneNamesThem($, v))) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     return (
       <Box flexDirection="row">

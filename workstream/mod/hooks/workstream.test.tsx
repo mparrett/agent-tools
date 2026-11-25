@@ -409,6 +409,60 @@ test('badge "band" draws above the prompt and leaves the status line empty', { o
   await ui.unmount()
 })
 
+test('the band says nothing when attached to none', { options: { badge: 'band' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  stubStart(on, '[]', [])
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /ws/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'engine band' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the band steps aside while the pane is drawn inline listing the workstreams', { options: { badge: 'band' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  let isDrawn = true
+  on('session.id', () => ({ value: SID }))
+  on('process.run', (_, e) => ok(e.argv.includes('ls') ? JSON.stringify([{ id: 'a', name: 'demo', owned: true }]) : FRONTIER))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.panes', () => ({ value: [{ id: 'workstream', title: 'Workstream', isShown: isDrawn, isFocused: false, isPlaced: isDrawn }] }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  // One band, mounted throughout: it has to redraw itself as the pane moves.
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const band = async () => (await ui.find({ type: 'Text', text: 'demo' })) !== undefined
+  // docked, the band shows as before
+  const docked = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  expect(await band()).toBe(true)
+  await docked.unmount()
+  // inline and listing, the pane says it already
+  const inline = await $.ui.mount({ ...PANE, props: { ...PANE.props, placement: 'inline' }, surface: 'terminal' })
+  await clock.settle()
+  expect(await band()).toBe(false)
+  // left waiting undrawn it names nothing, and no close says so: the next
+  // badge refresh rewrites the view and the band comes back
+  isDrawn = false
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(await band()).toBe(true)
+  await inline.unmount()
+  await ui.unmount()
+})
+
 test('the default leaves the band to others', async ($, on) => {
   const clock = mock.clock(on)
   const statuses: (string | undefined)[] = []
