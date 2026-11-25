@@ -263,8 +263,8 @@ export const register: Register = (on, options) => {
       })
     }
     // A bulleted line whose wrapped text lines up after the bullet, not under it.
-    const bullet = (text: string, style: { color?: string; dimColor?: boolean }) => (
-      <Box flexDirection="row" paddingLeft={2}>
+    const bullet = (text: string, i: number, style: { color?: string; dimColor?: boolean }, indent = 2) => (
+      <Box key={`${i}:${text}`} flexDirection="row" paddingLeft={indent}>
         <Box flexShrink={0}>
           <Text {...style}>• </Text>
         </Box>
@@ -412,7 +412,8 @@ export const register: Register = (on, options) => {
                   {f.next && isOpen(f.id, 'how') && (
                     <Box flexDirection="column" paddingLeft={2}>
                       {f.next.how ? <Text dimColor>{f.next.how}</Text> : null}
-                      {f.next.facts.map(x => bullet(x, { dimColor: true }))}
+                      {/* level with the `how` text above, which the column already indents */}
+                      {f.next.facts.map((x, i) => bullet(x, i, { dimColor: true }, 0))}
                     </Box>
                   )}
                   {f.looseEnds.length > 0 &&
@@ -422,7 +423,7 @@ export const register: Register = (on, options) => {
                       'loose',
                       'loose ends',
                       f.looseEnds.length,
-                      f.looseEnds.map(l => bullet(l, { color: 'warning' })),
+                      f.looseEnds.map((l, i) => bullet(l, i, { color: 'warning' })),
                     )}
                   {f.anchors.length > 0 &&
                     section(
