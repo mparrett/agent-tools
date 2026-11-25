@@ -672,3 +672,75 @@ def test_question_mark_shows_key_hints_for_every_control(tmp_path):
     for el in ('id="theme"', 'id="dens"', 'id="prev"', 'id="next"', 'id="last"'):
         tag = html[html.rfind("<", 0, html.index(el)) : html.index(">", html.index(el))]
         assert "data-keys=" in tag, el
+
+
+def test_a_run_chip_reads_as_a_terminal_with_its_whole_command(tmp_path):
+    html = render(curate(extract(_transcript(tmp_path))))
+    assert '<div class="chip-body term">' in html
+    assert '<span class="t-ps">$ </span><span class="t-prog">pytest</span>' in html
+
+
+def test_terminal_colors_clear_aa_on_the_terminal_background():
+    import re
+
+    from claude_reel.render_html import CSS
+
+    def lum(h):
+        c = [int(h[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+        c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+    bg = re.search(r"--t-bg:(#[0-9a-f]{6})", CSS).group(1)
+    rules = re.findall(r"^\.term \.t-[a-z.]+ \{ color: (#[0-9a-f]{6})", CSS, re.M)
+    assert len(rules) >= 10
+    for fg in rules:
+        hi, lo = sorted([lum(fg), lum(bg)], reverse=True)
+        assert (hi + 0.05) / (lo + 0.05) >= 4.5, fg
+
+
+def test_runs_sharing_a_first_line_stay_separate_chips(tmp_path):
+    # Two different heredoc scripts start with the same line; folding them would show
+    # the first script above the second one's output.
+    lines = []
+    for i, (script, out) in enumerate((("print(1)", "1"), ("raise SystemExit(1)", "boom"))):
+        cmd = f"python3 - <<'EOF'\n{script}\nEOF"
+        lines.append(
+            {
+                "type": "assistant",
+                "timestamp": f"2026-01-01T00:00:0{i}Z",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"r{i}",
+                            "name": "Bash",
+                            "input": {"command": cmd},
+                        }
+                    ]
+                },
+            }
+        )
+        lines.append(
+            {
+                "type": "user",
+                "timestamp": f"2026-01-01T00:00:0{i}Z",
+                "message": {
+                    "content": [{"type": "tool_result", "tool_use_id": f"r{i}", "content": out}]
+                },
+            }
+        )
+    src = tmp_path / "s.jsonl"
+    src.write_text(
+        "\n".join(
+            json.dumps(x)
+            for x in [
+                {"type": "user", "timestamp": "2026-01-01T00:00:00Z", "message": {"content": "go"}},
+                *lines,
+            ]
+        )
+    )
+    tools = [
+        e for s in curate(extract(src))["slides"] for e in s["elements"] if e.get("type") == "tool"
+    ]
+    assert [t["count"] for t in tools] == [1, 1]
+    assert ["print(1)" in t["command"] for t in tools] == [True, False]
