@@ -50,6 +50,26 @@ _INJECTED_PREFIXES = (
 )
 
 
+# Text the human pasted arrives wrapped in this tag inside the message they typed. It is
+# theirs, so it stays in their bubble (folded) rather than being dropped as an injection.
+# The closing tag repeats the id (`</pasted_content id="0f52">`). A message cut off
+# mid-paste has no closing tag; the paste runs to the end.
+PASTE_RE = re.compile(r"<pasted_content\b[^>]*>\n?(.*?)\n?(?:</pasted_content\b[^>]*>|\Z)", re.S)
+
+
+def split_pastes(text: str) -> list:
+    """[(is_paste, text)] in order, empty typed stretches dropped."""
+    parts, pos = [], 0
+    for m in PASTE_RE.finditer(text or ""):
+        if text[pos : m.start()].strip():
+            parts.append((False, text[pos : m.start()]))
+        parts.append((True, m.group(1)))
+        pos = m.end()
+    if (text or "")[pos:].strip():
+        parts.append((False, text[pos:]))
+    return parts
+
+
 def _iter_lines(path: Path):
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -222,13 +242,13 @@ def _context_summary(text: str) -> tuple[str, str]:
     return label, _first_line(first, 60)
 
 
-def _context_beat(text: str, ts, label=None) -> dict:
-    lbl, arg = _context_summary(text)
+def _context_beat(text: str, ts, label=None, arg=None) -> dict:
+    lbl, first = _context_summary(text)
     return {
         "kind": "context",
         "ts": ts,
         "label": label or lbl,
-        "arg": arg,
+        "arg": arg or first,
         "text": text,
         # Repeats render as "unchanged since beat N"; the budget varies every request
         # and is one line anyway, so it is never keyed.
@@ -405,6 +425,14 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
 
         def say(text):
             if not text.strip():
+                return
+            # A compaction's summary is a user record nobody typed, and it carries
+            # wrapper tags mid-text that the prefix check can't see. The flag is exact.
+            if role == "user" and obj.get("isCompactSummary"):
+                if context:
+                    beats.append(
+                        _context_beat(text, ts, "compaction", "the conversation so far, summarized")
+                    )
                 return
             if not _drop_user_text(role, text, is_meta):
                 beats.append({"kind": _say_kind(role), "ts": ts, "text": text, "model": model})
