@@ -600,3 +600,9 @@ def test_lineage_is_optional(monkeypatch, tmp_path):
 
     monkeypatch.setattr(credits.shutil, "which", lambda _: None)
     assert credits.fetch_lineage(tmp_path / "x.jsonl") is None
+
+
+def test_rail_has_a_jump_to_the_last_slide(tmp_path):
+    html = render(curate(extract(_transcript(tmp_path))))
+    assert 'id="last" aria-label="Last slide"' in html
+    assert "lastBtn.addEventListener('click', function(){ go(last); })" in html
