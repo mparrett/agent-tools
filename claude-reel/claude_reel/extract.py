@@ -53,8 +53,11 @@ _INJECTED_PREFIXES = (
 # Text the human pasted arrives wrapped in this tag inside the message they typed. It is
 # theirs, so it stays in their bubble (folded) rather than being dropped as an injection.
 # The closing tag repeats the id (`</pasted_content id="0f52">`). A message cut off
-# mid-paste has no closing tag; the paste runs to the end.
-PASTE_RE = re.compile(r"<pasted_content\b[^>]*>\n?(.*?)\n?(?:</pasted_content\b[^>]*>|\Z)", re.S)
+# mid-paste has no closing tag; the paste runs to the end. Requiring the id keeps a
+# typed mention of the bare tag (`<pasted_content>`) as prose, not a paste.
+PASTE_RE = re.compile(
+    r'<pasted_content id="[^"]*">\n?(.*?)\n?(?:</pasted_content\b[^>]*>|\Z)', re.S
+)
 
 
 def split_pastes(text: str) -> list:

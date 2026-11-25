@@ -405,10 +405,14 @@ def _user_body(text: str) -> str:
             continue
         # Pastes are mostly terminal output and logs, whose line breaks carry meaning
         # that Markdown would fold into one paragraph.
-        n = len(part.strip().splitlines())
+        # Only blank lines are trimmed: a paste's first-line indent is part of it.
+        part = part.strip("\n")
+        if not part.strip():
+            continue
+        n = len(part.splitlines())
         out.append(
             f'<details class="paste"><summary>pasted · {n} line{"s" if n != 1 else ""}</summary>'
-            f'<pre class="paste-body">{_esc(part.strip())}</pre></details>'
+            f'<pre class="paste-body">{_esc(part)}</pre></details>'
         )
     return "".join(out)
 

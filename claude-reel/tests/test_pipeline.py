@@ -329,6 +329,19 @@ def test_paste_folds_inside_your_turn(tmp_path):
     assert "pasted · 2 lines" in html and "pasted · 1 line<" in html
 
 
+def test_paste_needs_the_real_wrapper_and_keeps_its_indent():
+    from claude_reel.extract import split_pastes
+    from claude_reel.render_html import _user_body
+
+    typed = "why does `<pasted_content>` leak?"
+    assert split_pastes(typed) == [(False, typed)]
+    html = _user_body(
+        '<pasted_content id="x">\n    def f():\n        return 1\n</pasted_content id="x">'
+    )
+    assert '<pre class="paste-body">    def f():' in html
+    assert _user_body('see <pasted_content id="y">\n</pasted_content id="y">').count("details") == 0
+
+
 def test_repeated_context_points_back_and_budget_collapses(tmp_path):
     deck = curate(extract(_context_transcript(tmp_path)))
     s0, s1 = deck["slides"]
