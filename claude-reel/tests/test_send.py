@@ -49,19 +49,21 @@ def test_deliver_pastes_presses_enter_and_detaches(fake):
     cmd, rec = fake()
     transcript = Path(str(rec) + ".jsonl")
     transcript.write_text('{"type": "user", "message": {"content": "earlier"}}\n')
-    send.deliver("ab12cd34", "line one\r\nline two  ", transcript=transcript, command=cmd)
+    assert send.deliver("ab12cd34", "line one\r\nline two  ", transcript=transcript, command=cmd)
     assert rec.read_bytes() == (
         send.PASTE_START + b"line one\nline two" + send.PASTE_END + b"\r" + send.CTRL_Z
     )
 
 
-def test_deliver_fails_when_the_session_never_records_it(fake, monkeypatch):
+def test_deliver_reports_a_reply_the_session_has_not_recorded_yet(fake, monkeypatch):
+    # A session blocked on a `!` command holds typed input unwritten; that is
+    # pending, not failed.
     monkeypatch.setattr(send, "CONFIRM_TIMEOUT", 0.5)
     cmd, rec = fake("drop")
     transcript = Path(str(rec) + ".jsonl")
     transcript.write_text("")
-    with pytest.raises(send.SendError, match="never recorded"):
-        send.deliver("ab12cd34", "hello", transcript=transcript, command=cmd)
+    assert send.deliver("ab12cd34", "hello", transcript=transcript, command=cmd) is False
+    assert send.PASTE_START + b"hello" in rec.read_bytes()
 
 
 def test_landed_looks_only_past_the_offset(tmp_path):
@@ -133,6 +135,7 @@ def test_send_route_gates_then_delivers(tmp_path):
         if text == "fail":
             raise send.SendError("no prompt")
         got.append(text)
+        return text != "held"
 
     srv, port = _serve(tmp_path, sender)
     try:
@@ -155,9 +158,10 @@ def test_send_route_gates_then_delivers(tmp_path):
             c.putheader(k, v)
         c.endheaders()
         assert c.getresponse().status == 400  # answered, not stuck reading
-        assert _post(port, ok) == (200, {"ok": True})
+        assert _post(port, ok) == (200, {"ok": True, "pending": False})
+        assert _post(port, json.dumps({"text": "held"})) == (200, {"ok": True, "pending": True})
         assert _post(port, json.dumps({"text": "fail"})) == (502, {"error": "no prompt"})
-        assert got == ["keep going"]
+        assert got == ["keep going", "held"]
     finally:
         srv.shutdown()
         srv.server_close()

@@ -361,9 +361,12 @@ REPLY_JS = """
       .then(function (r){ return r.json().then(function (j){ return { ok: r.ok, j: j }; }); })
       .then(function (x){
         if (!x.ok) throw new Error(x.j.error || 'send failed');
-        box.value = ''; grow(); say('sent');
+        // Pending: typed into the session, which is busy outside a model turn and
+        // hasn't recorded it yet. It will land on its own; sending again would repeat it.
+        var done = x.j.pending ? 'typed · waiting for the session to pick it up' : 'sent';
+        box.value = ''; grow(); say(done);
         window.reelNav.go(window.reelNav.last());
-        setTimeout(function (){ if (stat.textContent === 'sent') say(''); }, 2500);
+        setTimeout(function (){ if (stat.textContent === done) say(''); }, x.j.pending ? 15000 : 2500);
       })
       .catch(function (err){ say(String(err.message || err), true); })
       .then(function (){ btn.disabled = false; });

@@ -112,7 +112,8 @@ MAX_REPLY_BYTES = 64 * 1024
 
 
 def make_handler(builder: Builder, token: str, port_ref: list, sender=None, reply_note=None):
-    """`sender(text)` delivers a reply (raising send.SendError when it can't);
+    """`sender(text)` delivers a reply and returns whether the session has recorded it
+    yet (raising send.SendError when it can't deliver);
     without one there is no reply bar, and `reply_note` says why."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -182,10 +183,10 @@ def make_handler(builder: Builder, token: str, port_ref: list, sender=None, repl
             if not isinstance(text, str) or not text.strip():
                 return self._json(400, {"error": "nothing to send"})
             try:
-                sender(text)
+                recorded = sender(text)
             except SendError as e:
                 return self._json(502, {"error": str(e)})
-            return self._json(200, {"ok": True})
+            return self._json(200, {"ok": True, "pending": not recorded})
 
         def _page(self):
             try:
