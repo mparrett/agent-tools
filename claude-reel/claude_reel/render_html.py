@@ -170,6 +170,9 @@ h1.title {
 .castline { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); margin: -14px 0 22px; }
 .castline a { color: var(--cyan); text-decoration: none; }
 .castline a:hover { text-decoration: underline; }
+.live { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.14em; text-transform: uppercase; margin-left: 10px; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+.live.on { color: var(--amber); border-color: var(--amber-d); }
+.live.on::before { content: '● '; }
 .hit > summary, .hit.say, .hit .row { box-shadow: inset 2px 0 0 var(--amber); background: var(--surface2); }
 """
 
@@ -180,6 +183,7 @@ JS = """
   var curEl = document.getElementById('cur');
   var fill = document.getElementById('fill');
   var posEl = document.getElementById('pos');
+  var totEl = document.getElementById('tot');
   var prev = document.getElementById('prev');
   var next = document.getElementById('next');
   var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -199,6 +203,7 @@ JS = """
     remember();
     curEl.textContent = pad(idx);
     posEl.textContent = pad(idx) + ' / ' + pad(last);
+    totEl.textContent = pad(last);
     fill.style.width = (last ? (idx / last) * 100 : 100) + '%';
     prev.disabled = idx === 0;
     next.disabled = idx === last;
@@ -210,7 +215,8 @@ JS = """
     if (raf) return;
     raf = requestAnimationFrame(function () { raf = null; var i = Math.round(reel.scrollLeft / reel.clientWidth); if (i !== idx) { idx = i; paint(); } });
   });
-  document.querySelectorAll('.arow').forEach(function (row) { row.addEventListener('click', function () { go(parseInt(row.dataset.goto, 10)); }); });
+  // Delegated, so agenda rows a live update adds navigate too.
+  document.addEventListener('click', function (e){ var row = e.target.closest && e.target.closest('.arow'); if (row) go(parseInt(row.dataset.goto, 10)); });
   window.addEventListener('hashchange', function () { var h = fromHash(); if (h !== null && h !== idx) go(h); });
 
   // Find: "/" opens; Enter / n go to the next slide whose text matches, Shift+Enter / N back.
@@ -280,6 +286,47 @@ JS = """
     requestAnimationFrame(function (){ reel.style.scrollBehavior = ''; });
   }
   paint();
+  // The live page's hook: slides were replaced or appended, so re-read them.
+  window.reelNav = {
+    sync: function (){ slides = Array.prototype.slice.call(reel.children); last = slides.length - 1; texts = null; if (query) search(query); idx = clamp(idx); paint(); },
+    go: go,
+    at: function (){ return idx; },
+    last: function (){ return last; }
+  };
+})();
+"""
+
+# Live mode: the server pushes changed slides over SSE. The page follows the tail
+# only while you are on the last slide, so reading back isn't yanked forward.
+LIVE_JS = """
+(function () {
+  var reel = document.getElementById('reel'), badge = document.getElementById('live');
+  var es = new EventSource(badge.dataset.events);
+  function swap(i, html){
+    var t = document.createElement('template'); t.innerHTML = html.trim();
+    var el = t.content.firstElementChild, old = reel.children[i];
+    if (!old) { reel.appendChild(el); return; }
+    // Keep what the reader opened and how far they scrolled in a slide that grew.
+    var was = Array.prototype.map.call(old.querySelectorAll('details'), function (d){ return d.open; });
+    el.querySelectorAll('details').forEach(function (d, j){ if (was[j] !== undefined) d.open = was[j]; });
+    var top = old.scrollTop;
+    reel.replaceChild(el, old);
+    el.scrollTop = top;
+  }
+  es.onmessage = function (e){
+    var d = JSON.parse(e.data), nav = window.reelNav;
+    var follow = nav.at() >= nav.last();
+    d.changed.forEach(function (c){ swap(c.i, c.html); });
+    while (reel.children.length > d.count) reel.removeChild(reel.lastElementChild);
+    document.getElementById('sess').innerHTML = d.session;
+    nav.sync();
+    if (follow && d.changed.length) {
+      nav.go(nav.last());
+      var s = reel.children[nav.last()]; s.scrollTop = s.scrollHeight;
+    }
+    badge.className = 'live on'; badge.textContent = 'live';
+  };
+  es.onerror = function (){ badge.className = 'live off'; badge.textContent = 'reconnecting'; };
 })();
 """
 
@@ -598,7 +645,9 @@ def _agenda_html(deck, credits_slide: int | None = None) -> str:
     )
 
 
-def render(deck: dict) -> str:
+def render_parts(deck: dict) -> tuple[list, str]:
+    """(every slide's HTML, the topbar's session line). The live server diffs these
+    between builds and sends only the slides that changed."""
     meta = deck["meta"]
     total = len(deck["slides"])
     open_chips = deck.get("density") == "firehose"
@@ -626,7 +675,22 @@ def render(deck: dict) -> str:
         f"<span>{total} beat{'s' if total != 1 else ''}</span>"
         + (f'<span class="t">{_esc(span)}</span>' if span else "")
     )
+    return slides_html, session_meta
+
+
+def render(deck: dict, live_events: str | None = None) -> str:
+    """The whole deck. With `live_events` (the live server's stream URL, relative to
+    the page), the page subscribes to it and applies the slides it sends."""
+    meta = deck["meta"]
+    slides_html, session_meta = render_parts(deck)
     counter_total = len(slides_html) - 1  # excludes the agenda
+    live = live_events is not None
+    badge = (
+        f'<span class="live" id="live" data-events="{_esc(live_events)}">connecting</span>'
+        if live
+        else ""
+    )
+    scripts = f"<script>{JS}</script>" + (f"<script>{LIVE_JS}</script>" if live else "")
 
     return f"""<!doctype html>
 <html lang="en"><head>
@@ -637,9 +701,9 @@ def render(deck: dict) -> str:
 </head><body>
 <div class="app">
   <div class="topbar">
-    <div class="brand"><span class="disc">◉</span><span class="name">claude<b>·</b>reel</span><span class="tag">recap</span></div>
-    <div class="session">{session_meta}</div>
-    <div class="counter"><b id="cur">00</b> / {counter_total:02d}</div>
+    <div class="brand"><span class="disc">◉</span><span class="name">claude<b>·</b>reel</span><span class="tag">recap</span>{badge}</div>
+    <div class="session" id="sess">{session_meta}</div>
+    <div class="counter"><b id="cur">00</b> / <span id="tot">{counter_total:02d}</span></div>
   </div>
   <div class="reel" id="reel">
     {"".join(slides_html)}
@@ -652,5 +716,5 @@ def render(deck: dict) -> str:
   </div>
 </div>
 <div class="find" id="find"><span>/</span><input id="fq" type="search" placeholder="find in session" aria-label="Find in session"><span id="fc"></span></div>
-<script>{JS}</script>
+{scripts}
 </body></html>"""

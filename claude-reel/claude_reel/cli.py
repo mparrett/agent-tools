@@ -6,6 +6,7 @@ claude-reel <id> --since 2026-07-05       # only what landed on/after that date
 claude-reel <id> --reel                   # dump the reel (pivot format) instead
 claude-reel <id> --subagents brief        # agent chips expand to the agent's run
 claude-reel <id> --context none           # hide what the harness injected
+claude-reel <id> --live --open            # follow a running session as it grows
 """
 
 import argparse
@@ -49,6 +50,18 @@ def _dump_reel(reel, out_path):
         sys.stdout.write(text)
 
 
+def _live(path, build_deck, args) -> int:
+    from . import live
+
+    def ready(url):
+        print(f"claude-reel: live at {url}  (Ctrl+C to stop)", flush=True)
+        if args.open:
+            webbrowser.open(url)
+
+    live.serve(path, build_deck, port=args.port, on_ready=ready)
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="claude-reel", description="Render a Claude session as a slideshow."
@@ -88,6 +101,13 @@ def main(argv=None) -> int:
     p.add_argument(
         "--reel", action="store_true", help="dump the reel (pivot JSONL) instead of a deck"
     )
+    p.add_argument(
+        "--live",
+        action="store_true",
+        help="serve the deck on 127.0.0.1 and push new slides as the session grows"
+        " (no credits card; Ctrl+C stops)",
+    )
+    p.add_argument("--port", type=int, default=0, help="--live port (default: any free one)")
     p.add_argument("--version", action="version", version=f"claude-reel {__version__}")
     args = p.parse_args(argv)
 
@@ -96,9 +116,22 @@ def main(argv=None) -> int:
         print(f"claude-reel: no session matching '{args.target}'", file=sys.stderr)
         return 1
 
-    reel = extract(path, context=args.context == "chips", subagents=args.subagents)
-    reel["beats"] = _filter_beats(reel["beats"], args.tail, args.since)
+    if args.live and (args.reel or args.out):
+        print(
+            "claude-reel: --live serves the deck; it can't be combined with --reel or -o",
+            file=sys.stderr,
+        )
+        return 2
 
+    def build_reel():
+        reel = extract(path, context=args.context == "chips", subagents=args.subagents)
+        reel["beats"] = _filter_beats(reel["beats"], args.tail, args.since)
+        return reel
+
+    if args.live:
+        return _live(path, lambda: curate(build_reel(), density=args.density), args)
+
+    reel = build_reel()
     if args.reel:
         _dump_reel(reel, args.out)
         return 0
