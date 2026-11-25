@@ -256,7 +256,8 @@ test('drawn inline the pane stands in for the badge; docked or closed the badge 
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.close', () => ({ value: undefined }))
-  on('ui.panes', () => ({ value: [{ id: 'workstream', title: 'Workstream', isShown: true, isFocused: false, isPlaced: true }] }))
+  let isDrawn = true
+  on('ui.panes', () => ({ value: [{ id: 'workstream', title: 'Workstream', isShown: isDrawn, isFocused: false, isPlaced: isDrawn }] }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -266,10 +267,18 @@ test('drawn inline the pane stands in for the badge; docked or closed the badge 
   const inline = await $.ui.mount({ ...PANE, props: { ...PANE.props, placement: 'inline' }, surface: 'terminal' })
   await clock.settle()
   expect(statuses.at(-1)).toBeUndefined()
-  // [-] leads the header row, clear of the pane's close mark at the right.
+  // [-] then refresh lead the header row, clear of the pane's close mark at the right.
   const row = rowOf((await inline.drawn()) as Node, 'size')
   expect(row).toBeDefined()
   expect(holds(kids(row!)[0]!, 'size')).toBe(true)
+  expect(holds(kids(row!)[1]!, 'refresh')).toBe(true)
+  // Left waiting undrawn (the terminal narrowed further) it names nothing, and
+  // no close says so: the next badge refresh puts the badge back.
+  isDrawn = false
+  await clock.advance(60_000)
+  await clock.settle()
+  expect(statuses.at(-1)).toBe('demo (owner)')
+  isDrawn = true
   await inline.unmount()
 
   const docked = await $.ui.mount({ ...PANE, surface: 'terminal' })
