@@ -26,7 +26,7 @@ claude-reel <id> --live --open                     # follow a running session; r
 With the project installed, `uv run claude-reel …` works via the `[project.scripts]`
 entry; `python -m claude_reel …` also works.
 
-In the deck: `←`/`→` (or `j`/`k`, space) to move, `e` to expand every chip on a slide,
+In the deck: `←`/`→` (or `j`/`k`, space) to move, `»` or End for the last slide, `e` to expand every chip on a slide,
 `g` for the agenda. Chips are folded by default (`--density firehose` opens them).
 `/` finds text across every slide, folded chips included; Enter or `n` jumps to the next
 matching slide, Shift+Enter or `N` back. The URL tracks the slide (`deck.html#s42`), so a

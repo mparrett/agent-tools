@@ -195,6 +195,7 @@ JS = """
   var totEl = document.getElementById('tot');
   var prev = document.getElementById('prev');
   var next = document.getElementById('next');
+  var lastBtn = document.getElementById('last');
   var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   var last = slides.length - 1;
   var idx = 0;
@@ -216,9 +217,11 @@ JS = """
     fill.style.width = (last ? (idx / last) * 100 : 100) + '%';
     prev.disabled = idx === 0;
     next.disabled = idx === last;
+    lastBtn.disabled = idx === last;
   }
   prev.addEventListener('click', function(){ go(idx - 1); });
   next.addEventListener('click', function(){ go(idx + 1); });
+  lastBtn.addEventListener('click', function(){ go(last); });
   var raf;
   reel.addEventListener('scroll', function () {
     if (raf) return;
@@ -805,6 +808,7 @@ def render(
     <div class="track"><div class="fill" id="fill"></div></div>
     <span class="pos" id="pos">00 / {counter_total:02d}</span>
     <button class="nav" id="next" aria-label="Next slide" title="Next (→)">›</button>
+    <button class="nav" id="last" aria-label="Last slide" title="Last (End)">»</button>
   </div>
 </div>
 <div class="find" id="find"><span>/</span><input id="fq" type="search" placeholder="find in session" aria-label="Find in session"><span id="fc"></span></div>
