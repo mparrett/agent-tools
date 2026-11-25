@@ -153,6 +153,10 @@ h1.title {
 .strip.dense-compact .arg { display: none; }
 .dens { flex: 0 0 auto; height: 32px; padding: 0 10px; font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
 .dens:hover { color: var(--amber); }
+/* On a phone the rail's buttons would squeeze the progress bar away. */
+@media (max-width: 520px) { .dens-k { display: none; } .rail { gap: 10px; } }
+/* The top bar repeats the slide counter, so the rail's copy goes first. */
+@media (max-width: 360px) { .rail .pos { display: none; } }
 .track { flex: 1 1 auto; max-width: 480px; height: 4px; background: var(--line); border-radius: 100px; overflow: hidden; }
 .fill { height: 100%; width: 0; background: var(--amber); transition: width 0.2s ease; }
 .pos { flex: 0 0 auto; min-width: 62px; text-align: right; font-family: var(--mono); font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -317,7 +321,7 @@ JS = """
   // Chip density. The global level is the reader's (remembered across reloads); a
   // strip the reader unfolded keeps its own, lower level in data-unfold.
   var LEVELS = ['rows', 'inline', 'compact'];
-  var densBtn = document.getElementById('dens');
+  var densBtn = document.getElementById('dens'), densVal = document.getElementById('densv');
   var level = 0;
   try { level = Math.max(0, LEVELS.indexOf(localStorage.getItem('claude-reel.chips'))); } catch (e) {}
   function stripLevel(st){ var u = st.dataset.unfold; return u === undefined ? level : Math.min(level, parseInt(u, 10)); }
@@ -333,7 +337,7 @@ JS = """
   }
   function applyAll(){
     reel.querySelectorAll('.strip').forEach(applyStrip);
-    densBtn.textContent = 'chips: ' + LEVELS[level];
+    densVal.textContent = LEVELS[level];
   }
   function unfoldStrip(el, to){
     var st = el.classList && el.classList.contains('strip') ? el : el.closest && el.closest('.strip');
@@ -865,7 +869,7 @@ def render(
   </div>
   {reply}
   <div class="rail">
-    <button class="dens" id="dens" title="Chip density: rows, inline, compact (c)">chips: rows</button>
+    <button class="dens" id="dens" title="Chip density: rows, inline, compact (c)"><span class="dens-k">chips: </span><span id="densv">rows</span></button>
     <button class="nav" id="prev" aria-label="Previous slide" title="Previous (←)">‹</button>
     <div class="track"><div class="fill" id="fill"></div></div>
     <span class="pos" id="pos">00 / {counter_total:02d}</span>
