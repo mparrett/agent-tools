@@ -262,6 +262,17 @@ export const register: Register = (on, options) => {
         return xs.includes(k) ? kept : [...kept, k]
       })
     }
+    // A bulleted line whose wrapped text lines up after the bullet, not under it.
+    const bullet = (text: string, style: { color?: string; dimColor?: boolean }) => (
+      <Box flexDirection="row" paddingLeft={2}>
+        <Box flexShrink={0}>
+          <Text {...style}>• </Text>
+        </Box>
+        <Box flexGrow={1} flexShrink={1}>
+          <Text {...style}>{text}</Text>
+        </Box>
+      </Box>
+    )
     // A section's header is its own toggle, caret first; folded, it gives a count.
     const section = (id: string, color: string, fold: Fold, title: string, count: number, rows: RenderChildren[]) => {
       const shut = !isOpen(id, fold)
@@ -372,30 +383,36 @@ export const register: Register = (on, options) => {
                 <Text color={color}>{rule}</Text>
               </Button>
               {shut ? null : (
-                <Box flexDirection="column">
+                // Indented under the name, past the caret, so a block reads as
+                // belonging to its header.
+                <Box flexDirection="column" paddingLeft={2}>
                   <Text>{f.title}</Text>
                   {f.next && (
-                    <Box flexDirection="row" justifyContent="space-between">
-                      <Text>
-                        <Text color={color}>
-                          next: {f.next.action}
-                          {f.next.session ? ` ${f.next.session}` : ''}
+                    // The text wraps in a column of its own; `how` keeps its
+                    // place at the right of the first line, never cut or wrapped.
+                    <Box flexDirection="row">
+                      <Box flexGrow={1} flexShrink={1}>
+                        <Text>
+                          <Text color={color}>
+                            next: {f.next.action}
+                            {f.next.session ? ` ${f.next.session}` : ''}
+                          </Text>
+                          {f.next.why ? <Text dimColor> · {f.next.why}</Text> : null}
                         </Text>
-                        {f.next.why ? <Text dimColor> · {f.next.why}</Text> : null}
-                      </Text>
+                      </Box>
                       {f.next.how || f.next.facts.length ? (
-                        <Button plain dimColor key={`how:${f.id}`} label="how" onPress={() => toggle(f.id, 'how')}>
-                          {isOpen(f.id, 'how') ? '▾ how' : '▸ how'}
-                        </Button>
+                        <Box flexShrink={0} marginLeft={1}>
+                          <Button plain dimColor key={`how:${f.id}`} label="how" onPress={() => toggle(f.id, 'how')}>
+                            {isOpen(f.id, 'how') ? '▾ how' : '▸ how'}
+                          </Button>
+                        </Box>
                       ) : null}
                     </Box>
                   )}
                   {f.next && isOpen(f.id, 'how') && (
-                    <Box flexDirection="column">
-                      {f.next.how ? <Text dimColor>  {f.next.how}</Text> : null}
-                      {f.next.facts.map(x => (
-                        <Text dimColor>  • {x}</Text>
-                      ))}
+                    <Box flexDirection="column" paddingLeft={2}>
+                      {f.next.how ? <Text dimColor>{f.next.how}</Text> : null}
+                      {f.next.facts.map(x => bullet(x, { dimColor: true }))}
                     </Box>
                   )}
                   {f.looseEnds.length > 0 &&
@@ -405,7 +422,7 @@ export const register: Register = (on, options) => {
                       'loose',
                       'loose ends',
                       f.looseEnds.length,
-                      f.looseEnds.map(l => <Text color="warning">  • {l}</Text>),
+                      f.looseEnds.map(l => bullet(l, { color: 'warning' })),
                     )}
                   {f.anchors.length > 0 &&
                     section(

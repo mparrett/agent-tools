@@ -188,6 +188,16 @@ test('an attached session gets the badge and a pane with its frontier', async ($
 
   // The agent's instructions stay folded behind `how` until pressed.
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // `how` sits in a box of its own beside the next line's text, which alone
+  // shrinks and wraps; the block under the header is indented past the caret.
+  const tree = (await ui.drawn()) as Node
+  const nextRow = rowOf(tree, 'how:abc123def4567890')!
+  const [text, how] = kids(nextRow) as (Node & { props: { flexShrink?: number } })[]
+  expect(text!.props.flexShrink).toBe(1)
+  expect(holds(how!, 'how:abc123def4567890')).toBe(true)
+  expect(how!.props.flexShrink).toBe(0)
+  const body = (n: Node): Node | undefined => (kids(n).includes(nextRow) ? n : kids(n).map(body).find(Boolean))
+  expect((body(tree) as { props: { paddingLeft?: number } }).props.paddingLeft).toBe(2)
   expect(await ui.find({ type: 'Text', text: /next: message 5d5c9a2e/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /SendMessage to/ })).toBeUndefined()
   await ui.press({ key: 'how:abc123def4567890' })
