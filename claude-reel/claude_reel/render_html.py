@@ -138,6 +138,21 @@ h1.title {
 .nav:active { transform: scale(0.93); }
 .nav:disabled { opacity: 0.28; cursor: default; }
 .nav:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+/* Chip density: a strip of chips can show as rows (one per line), inline (chips
+   flowing side by side, label and a short argument), or compact (labels only).
+   Dense strips hide chip bodies; clicking a chip steps its strip one level less dense. */
+.strip.dense-inline, .strip.dense-compact { flex-direction: row; flex-wrap: wrap; gap: 6px; }
+.strip.dense-inline .chip, .strip.dense-compact .chip { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.strip.dense-inline .chip > summary, .strip.dense-compact .chip > summary,
+.strip.dense-inline .chip.flat .row, .strip.dense-compact .chip.flat .row { padding: 4px 9px; gap: 7px; }
+.strip.dense-inline .chip-body, .strip.dense-compact .chip-body, .strip.dense-inline .sub-body, .strip.dense-compact .sub-body,
+.strip.dense-inline .tri, .strip.dense-compact .tri, .strip.dense-inline .meta, .strip.dense-compact .meta,
+.strip.dense-inline .chip.flat .row::before, .strip.dense-compact .chip.flat .row::before { display: none; }
+.strip.dense-inline .ck, .strip.dense-compact .ck { min-width: 0; }
+.strip.dense-inline .arg { max-width: 24ch; }
+.strip.dense-compact .arg { display: none; }
+.dens { flex: 0 0 auto; height: 32px; padding: 0 10px; font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.dens:hover { color: var(--amber); }
 .track { flex: 1 1 auto; max-width: 480px; height: 4px; background: var(--line); border-radius: 100px; overflow: hidden; }
 .fill { height: 100%; width: 0; background: var(--amber); transition: width 0.2s ease; }
 .pos { flex: 0 0 auto; min-width: 62px; text-align: right; font-family: var(--mono); font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -248,7 +263,7 @@ JS = """
     slides[i].querySelectorAll('.chip, .say').forEach(function (el){
       if (el.textContent.toLowerCase().indexOf(query) < 0) return;
       el.classList.add('hit');
-      if (el.tagName === 'DETAILS') el.open = true;
+      if (el.tagName === 'DETAILS') { unfoldStrip(el, 0); el.open = true; }
       first = first || el;
     });
     if (first) first.scrollIntoView({ block: 'center' });
@@ -289,7 +304,8 @@ JS = """
     else if (e.key === ' ') { e.preventDefault(); go(idx + (e.shiftKey ? -1 : 1)); }
     else if (e.key === 'g' || e.key === 'Home') { e.preventDefault(); go(0); }
     else if (e.key === 'End') { e.preventDefault(); go(last); }
-    else if (e.key === 'e') { var d = slides[idx].querySelectorAll('details'); var anyClosed = Array.prototype.some.call(d, function (x){ return !x.open; }); d.forEach(function (x){ x.open = anyClosed; }); }
+    else if (e.key === 'c') { cycleDensity(); }
+    else if (e.key === 'e') { slides[idx].querySelectorAll('.strip').forEach(function (st){ unfoldStrip(st, 0); }); var d = slides[idx].querySelectorAll('details'); var anyClosed = Array.prototype.some.call(d, function (x){ return !x.open; }); d.forEach(function (x){ x.open = anyClosed; }); }
   });
   window.addEventListener('resize', function () { reel.scrollLeft = idx * reel.clientWidth; });
   var start = fromHash();
@@ -298,10 +314,53 @@ JS = """
     idx = start; reel.style.scrollBehavior = 'auto'; reel.scrollLeft = idx * reel.clientWidth;
     requestAnimationFrame(function (){ reel.style.scrollBehavior = ''; });
   }
+  // Chip density. The global level is the reader's (remembered across reloads); a
+  // strip the reader unfolded keeps its own, lower level in data-unfold.
+  var LEVELS = ['rows', 'inline', 'compact'];
+  var densBtn = document.getElementById('dens');
+  var level = 0;
+  try { level = Math.max(0, LEVELS.indexOf(localStorage.getItem('claude-reel.chips'))); } catch (e) {}
+  function stripLevel(st){ var u = st.dataset.unfold; return u === undefined ? level : Math.min(level, parseInt(u, 10)); }
+  function applyStrip(st){
+    var l = stripLevel(st);
+    st.classList.toggle('dense-inline', l === 1);
+    st.classList.toggle('dense-compact', l === 2);
+    // Dense chips hide their argument (compact) or clip it (inline): hover shows it.
+    st.querySelectorAll('.chip').forEach(function (c){
+      var arg = c.querySelector('.arg'), tip = c.querySelector('summary, .row');
+      if (tip) { if (l > 0 && arg) tip.title = arg.textContent; else tip.removeAttribute('title'); }
+    });
+  }
+  function applyAll(){
+    reel.querySelectorAll('.strip').forEach(applyStrip);
+    densBtn.textContent = 'chips: ' + LEVELS[level];
+  }
+  function unfoldStrip(el, to){
+    var st = el.classList && el.classList.contains('strip') ? el : el.closest && el.closest('.strip');
+    if (st && stripLevel(st) > to) { st.dataset.unfold = to; applyStrip(st); }
+  }
+  function cycleDensity(){
+    level = (level + 1) % LEVELS.length;
+    try { localStorage.setItem('claude-reel.chips', LEVELS[level]); } catch (e) {}
+    reel.querySelectorAll('.strip').forEach(function (st){ delete st.dataset.unfold; });
+    applyAll();
+  }
+  densBtn.addEventListener('click', cycleDensity);
+  // A click on a chip in a dense strip steps that strip one level less dense,
+  // rather than opening a body the strip can't show yet.
+  reel.addEventListener('click', function (e){
+    var chip = e.target.closest && e.target.closest('.strip .chip');
+    if (!chip) return;
+    var st = chip.closest('.strip'), l = stripLevel(st);
+    if (l === 0) return;
+    e.preventDefault();
+    unfoldStrip(st, l - 1);
+  }, true);
+  applyAll();
   paint();
   // The live page's hook: slides were replaced or appended, so re-read them.
   window.reelNav = {
-    sync: function (){ slides = Array.prototype.slice.call(reel.children); last = slides.length - 1; texts = null; if (query) search(query); idx = clamp(idx); paint(); },
+    sync: function (){ slides = Array.prototype.slice.call(reel.children); last = slides.length - 1; texts = null; if (query) search(query); idx = clamp(idx); applyAll(); paint(); },
     go: go,
     at: function (){ return idx; },
     last: function (){ return last; }
@@ -322,6 +381,8 @@ LIVE_JS = """
     // Keep what the reader opened and how far they scrolled in a slide that grew.
     var was = Array.prototype.map.call(old.querySelectorAll('details'), function (d){ return d.open; });
     el.querySelectorAll('details').forEach(function (d, j){ if (was[j] !== undefined) d.open = was[j]; });
+    var unfolded = Array.prototype.map.call(old.querySelectorAll('.strip'), function (st){ return st.dataset.unfold; });
+    el.querySelectorAll('.strip').forEach(function (st, j){ if (unfolded[j] !== undefined) st.dataset.unfold = unfolded[j]; });
     var top = old.scrollTop;
     reel.replaceChild(el, old);
     el.scrollTop = top;
@@ -804,6 +865,7 @@ def render(
   </div>
   {reply}
   <div class="rail">
+    <button class="dens" id="dens" title="Chip density: rows, inline, compact (c)">chips: rows</button>
     <button class="nav" id="prev" aria-label="Previous slide" title="Previous (←)">‹</button>
     <div class="track"><div class="fill" id="fill"></div></div>
     <span class="pos" id="pos">00 / {counter_total:02d}</span>
