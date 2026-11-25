@@ -604,7 +604,7 @@ def test_lineage_is_optional(monkeypatch, tmp_path):
 
 def test_rail_has_a_jump_to_the_last_slide(tmp_path):
     html = render(curate(extract(_transcript(tmp_path))))
-    assert 'id="last" aria-label="Last slide"' in html
+    assert 'aria-label="Last slide"' in html
     assert "lastBtn.addEventListener('click', function(){ go(last); })" in html
 
 
@@ -664,3 +664,11 @@ def test_extra_navigation_keys_do_what_they_say(tmp_path):
     ):
         bound = [ln for ln in lines if f"e.key === {key}" in ln]
         assert bound and action in bound[0], (key, action)
+
+
+def test_question_mark_shows_key_hints_for_every_control(tmp_path):
+    html = render(curate(extract(_transcript(tmp_path))))
+    assert 'id="help"' in html and 'id="keys"' in html and "e.key === '?'" in html
+    for el in ('id="theme"', 'id="dens"', 'id="prev"', 'id="next"', 'id="last"'):
+        tag = html[html.rfind("<", 0, html.index(el)) : html.index(">", html.index(el))]
+        assert "data-keys=" in tag, el
