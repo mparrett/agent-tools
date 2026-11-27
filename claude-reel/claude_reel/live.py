@@ -12,8 +12,10 @@ The Host check stops DNS rebinding, where a hostile domain resolves to 127.0.0.1
 and its pages count as same-origin with this server.
 """
 
+import contextlib
 import json
 import secrets
+import signal
 import sys
 import threading
 import time
@@ -97,13 +99,22 @@ def diff(old: list, new: list) -> list:
     return [{"i": i, "html": h} for i, h in enumerate(new) if i >= len(old) or old[i] != h]
 
 
-def _allowed_host(host: str, port: int) -> bool:
-    """Loopback or *.localhost, on this port or none (a local proxy drops it)."""
+def _split_host(host: str):
     name, sep, p = (host or "").rpartition(":")
     if not sep or not p.isdigit():
-        name = host or ""
-    elif p != str(port):
+        return host or "", None
+    return name, p
+
+
+def _allowed_host(host: str, port: int, tailnet: str | None = None) -> bool:
+    """Loopback or *.localhost, on this port or none (a local proxy drops it); or, with
+    --tailscale, this machine's tailnet name, which `tailscale serve` maps to the same
+    port number."""
+    name, p = _split_host(host)
+    if p is not None and p != str(port):
         return False
+    if tailnet and name == tailnet:
+        return True
     return name in ("127.0.0.1", "localhost") or name.endswith(".localhost")
 
 
@@ -112,7 +123,13 @@ MAX_REPLY_BYTES = 64 * 1024
 
 
 def make_handler(
-    builder: Builder, token: str, port_ref: list, sender=None, reply_note=None, check=None
+    builder: Builder,
+    token: str,
+    port_ref: list,
+    sender=None,
+    reply_note=None,
+    check=None,
+    tailnet: str | None = None,
 ):
     """`sender(text)` delivers a reply and returns whether the session has recorded it
     yet (raising send.SendError when it can't deliver);
@@ -131,7 +148,7 @@ def make_handler(
 
         def do_GET(self):
             url = urlsplit(self.path)
-            if not _allowed_host(self.headers.get("Host", ""), port_ref[0]):
+            if not _allowed_host(self.headers.get("Host", ""), port_ref[0], tailnet):
                 return self._deny(403, "bad host\n")
             if not secrets.compare_digest(parse_qs(url.query).get("t", [""])[0], token):
                 return self._deny(403, "missing or wrong token\n")
@@ -155,7 +172,7 @@ def make_handler(
         def do_POST(self):
             url = urlsplit(self.path)
             host = self.headers.get("Host", "")
-            if not _allowed_host(host, port_ref[0]):
+            if not _allowed_host(host, port_ref[0], tailnet):
                 return self._json(403, {"error": "bad host"})
             if not secrets.compare_digest(parse_qs(url.query).get("t", [""])[0], token):
                 return self._json(403, {"error": "missing or wrong token"})
@@ -165,7 +182,9 @@ def make_handler(
             # the reads: the request must come from this page's own origin, and a JSON
             # body means a cross-site form can't send it without a CORS preflight,
             # which nothing here answers.
-            if self.headers.get("Origin") != f"http://{host}":
+            # The tailnet page is HTTPS: `tailscale serve` terminates TLS in front of us.
+            scheme = "https" if tailnet and _split_host(host)[0] == tailnet else "http"
+            if self.headers.get("Origin") != f"{scheme}://{host}":
                 return self._json(403, {"error": "bad origin"})
             if not self.headers.get("Content-Type", "").startswith("application/json"):
                 return self._json(415, {"error": "send JSON"})
@@ -246,25 +265,61 @@ def make_handler(
     return Handler
 
 
+_STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+def _interrupt(signum, frame):
+    # The first signal starts the shutdown; later ones are ignored so they can't cut the
+    # cleanup short. They come in pairs: the `claude-reel` script runs under uv, which
+    # forwards a signal it gets to this process, and `pkill -f` or Ctrl+C reaches both.
+    for sig in _STOP_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+    raise KeyboardInterrupt
+
+
 def serve(
-    path: Path, build_deck, port: int = 0, on_ready=None, sender=None, reply_note=None, check=None
+    path: Path,
+    build_deck,
+    port: int = 0,
+    on_ready=None,
+    sender=None,
+    reply_note=None,
+    check=None,
+    tailscale: bool = False,
 ):
-    """Serve until interrupted. `on_ready(url)` runs once the port is bound."""
+    """Serve until interrupted. `on_ready(url, tailnet_url)` runs once the port is bound
+    (and, with `tailscale`, mapped on the tailnet; tailnet_url is None otherwise)."""
     token = secrets.token_urlsafe(16)
     builder = Builder(path, build_deck)
     port_ref = [port]
-    server = ThreadingHTTPServer(
-        ("127.0.0.1", port), make_handler(builder, token, port_ref, sender, reply_note, check)
-    )
-    server.daemon_threads = True
+    tailnet_ref = [None]
+    server = ThreadingHTTPServer(("127.0.0.1", port), None)
     port_ref[0] = server.server_address[1]
-    url = f"http://127.0.0.1:{port_ref[0]}/?t={token}"
-    if on_ready:
-        on_ready(url)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    # SIGTERM (a plain `kill`) unwinds like Ctrl+C, so the tailnet mapping comes down too.
+    # Python only lets the main thread install a handler.
+    old = {}
+    if threading.current_thread() is threading.main_thread():
+        old = {sig: signal.signal(sig, _interrupt) for sig in _STOP_SIGNALS}
+    with contextlib.ExitStack() as stack:
+        # Registered first so they run last: the socket closes and the signal handlers go
+        # back to what they were however the block ends, including a failed tailnet setup.
+        stack.callback(server.server_close)
+        for sig, handler in old.items():
+            stack.callback(signal.signal, sig, handler)
+        if tailscale:
+            from . import tailnet
+
+            tailnet_ref[0] = stack.enter_context(tailnet.expose(port_ref[0]))
+        server.RequestHandlerClass = make_handler(
+            builder, token, port_ref, sender, reply_note, check, tailnet_ref[0]
+        )
+        server.daemon_threads = True
+        url = f"http://127.0.0.1:{port_ref[0]}/?t={token}"
+        ts_url = f"https://{tailnet_ref[0]}:{port_ref[0]}/?t={token}" if tailnet_ref[0] else None
+        if on_ready:
+            on_ready(url, ts_url)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
     return server
