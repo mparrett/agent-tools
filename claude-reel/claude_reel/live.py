@@ -265,7 +265,15 @@ def make_handler(
     return Handler
 
 
+_STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
 def _interrupt(signum, frame):
+    # The first signal starts the shutdown; later ones are ignored so they can't cut the
+    # cleanup short. They come in pairs: the `claude-reel` script runs under uv, which
+    # forwards a signal it gets to this process, and `pkill -f` or Ctrl+C reaches both.
+    for sig in _STOP_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
     raise KeyboardInterrupt
 
 
@@ -289,9 +297,15 @@ def serve(
     port_ref[0] = server.server_address[1]
     # SIGTERM (a plain `kill`) unwinds like Ctrl+C, so the tailnet mapping comes down too.
     # Python only lets the main thread install a handler.
+    old = {}
     if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, _interrupt)
+        old = {sig: signal.signal(sig, _interrupt) for sig in _STOP_SIGNALS}
     with contextlib.ExitStack() as stack:
+        # Registered first so they run last: the socket closes and the signal handlers go
+        # back to what they were however the block ends, including a failed tailnet setup.
+        stack.callback(server.server_close)
+        for sig, handler in old.items():
+            stack.callback(signal.signal, sig, handler)
         if tailscale:
             from . import tailnet
 
@@ -308,6 +322,4 @@ def serve(
             server.serve_forever()
         except KeyboardInterrupt:
             pass
-        finally:
-            server.server_close()
     return server

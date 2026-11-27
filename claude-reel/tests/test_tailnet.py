@@ -4,6 +4,7 @@ is set up for the run and taken down after, without touching anyone else's mappi
 import http.client
 import json
 import os
+import subprocess
 import threading
 from http.server import ThreadingHTTPServer
 
@@ -103,3 +104,100 @@ def test_expose_says_why_when_tailscale_is_stopped(fake_tailscale, tmp_path):
     with pytest.raises(tailnet.TailnetError, match="tailscale is Stopped"):
         with tailnet.expose(4321):
             pass
+
+
+def test_expose_refuses_a_raw_tcp_forward_on_the_port(fake_tailscale):
+    log, serve = fake_tailscale
+    serve.write_text(json.dumps({"TCP": {"4321": {"TCPForward": "127.0.0.1:22"}}}))
+    with pytest.raises(tailnet.TailnetError, match="a TCP forward"):
+        with tailnet.expose(4321):
+            pass
+    assert "--bg" not in log.read_text()
+
+
+def test_a_hung_or_garbled_tailscale_is_a_tailnet_error(fake_tailscale, tmp_path, monkeypatch):
+    (tmp_path / "status.json").write_text("warning: something\n{}")
+    with pytest.raises(tailnet.TailnetError, match="not JSON"):
+        tailnet.dns_name()
+
+    def hang(*a, **k):
+        raise subprocess.TimeoutExpired("tailscale", 10)
+
+    monkeypatch.setattr(tailnet.subprocess, "run", hang)
+    with pytest.raises(tailnet.TailnetError, match="enable it"):
+        tailnet.dns_name()
+
+
+def test_a_failed_tailnet_setup_closes_the_socket_and_restores_sigterm(tmp_path, monkeypatch):
+    import signal
+    import socket
+
+    def boom(port):
+        raise tailnet.TailnetError("tailscale is Stopped")
+
+    monkeypatch.setattr(tailnet, "expose", boom)
+    before = signal.getsignal(signal.SIGTERM)
+    seen = []
+    real = live.ThreadingHTTPServer
+
+    def spy(*a, **k):
+        srv = real(*a, **k)
+        seen.append(srv)
+        return srv
+
+    monkeypatch.setattr(live, "ThreadingHTTPServer", spy)
+    f = tmp_path / "s.jsonl"
+    f.write_text("")
+    with pytest.raises(tailnet.TailnetError):
+        live.serve(f, lambda: None, tailscale=True)
+    assert signal.getsignal(signal.SIGTERM) is before
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    assert seen[0].socket.fileno() == -1  # closed
+    socket.create_server(("127.0.0.1", seen[0].server_address[1])).close()  # port is free
+
+
+def test_a_second_signal_does_not_cut_the_tailnet_cleanup_short(fake_tailscale, tmp_path):
+    """uv forwards the signal it gets, so `pkill -f` or Ctrl+C delivers two, the second a
+    moment later. It used to land inside the cleanup and leave the tailnet mapping up."""
+    import signal
+    import sys
+    import time
+    from pathlib import Path
+
+    log, _ = fake_tailscale
+    # Make the unmapping slow enough for the second signal to arrive during it.
+    exe = Path(os.environ["PATH"].split(os.pathsep)[0]) / "tailscale"
+    exe.write_text(
+        exe.read_text().replace(
+            "exit 0\n", f'case "$*" in *off) sleep 0.6; echo unmapped >> "{log}";; esac\nexit 0\n'
+        )
+    )
+    f = tmp_path / "s.jsonl"
+    f.write_text("")
+    ready = tmp_path / "ready"
+    code = (
+        "import pathlib\n"
+        "from claude_reel import live\n"
+        f"live.serve(pathlib.Path({str(f)!r}), lambda: None, tailscale=True,"
+        f" on_ready=lambda *a: pathlib.Path({str(ready)!r}).write_text('ok'))\n"
+    )
+    root = Path(__file__).resolve().parent.parent
+    proc = subprocess.Popen([sys.executable, "-c", code], cwd=root, stderr=subprocess.PIPE)
+
+    def wait_for(cond):
+        for _ in range(200):
+            if cond():
+                return True
+            time.sleep(0.02)
+        return False
+
+    try:
+        assert wait_for(ready.exists)
+        proc.send_signal(signal.SIGTERM)
+        assert wait_for(lambda: " off" in log.read_text())  # the cleanup has started
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=10)
+    finally:
+        proc.kill()
+    assert "unmapped" in log.read_text(), err.decode()
+    assert b"Traceback" not in err and proc.returncode == 0, err.decode()

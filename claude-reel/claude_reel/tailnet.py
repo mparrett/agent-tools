@@ -19,15 +19,33 @@ def _ts(*args, timeout=10) -> str:
     exe = shutil.which("tailscale")
     if not exe:
         raise TailnetError("tailscale isn't on PATH")
-    r = subprocess.run([exe, *args], capture_output=True, text=True, timeout=timeout)
+    try:
+        r = subprocess.run([exe, *args], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # First use of serve on a tailnet prints a link to enable it, then waits.
+        raise TailnetError(
+            f"tailscale {args[0]} didn't answer in {timeout}s"
+            " (if Serve isn't enabled on this tailnet, run `tailscale serve` once to enable it)"
+        ) from None
+    except OSError as e:
+        raise TailnetError(f"couldn't run tailscale: {e}") from None
     if r.returncode != 0:
         raise TailnetError(f"tailscale {args[0]}: {(r.stderr or r.stdout).strip()}")
     return r.stdout
 
 
+def _json(*args) -> dict:
+    out = _ts(*args)
+    try:
+        data = json.loads(out or "{}")
+    except ValueError:
+        raise TailnetError(f"tailscale {' '.join(args)}: not JSON: {out[:80]!r}") from None
+    return data if isinstance(data, dict) else {}
+
+
 def dns_name() -> str:
     """This machine's MagicDNS name, e.g. `mac.tail1234.ts.net`."""
-    status = json.loads(_ts("status", "--json"))
+    status = _json("status", "--json")
     if status.get("BackendState") != "Running":
         raise TailnetError(f"tailscale is {status.get('BackendState') or 'not running'}")
     name = ((status.get("Self") or {}).get("DNSName") or "").rstrip(".")
@@ -38,7 +56,13 @@ def dns_name() -> str:
 
 def _mapped(port: int):
     """What `tailscale serve` already sends HTTPS on `port` to, or None."""
-    web = json.loads(_ts("serve", "status", "--json") or "{}").get("Web") or {}
+    status = _json("serve", "status", "--json")
+    tcp = (status.get("TCP") or {}).get(str(port))
+    # An HTTPS mapping is listed under TCP too, with HTTPS set; one without it is a raw
+    # TCP forward, which `--https=<port> off` would also take down.
+    if tcp is not None and not (isinstance(tcp, dict) and tcp.get("HTTPS")):
+        return "a TCP forward"
+    web = status.get("Web") or {}
     for hostport, conf in web.items():
         if hostport.rsplit(":", 1)[-1] == str(port):
             handler = ((conf or {}).get("Handlers") or {}).get("/") or {}
