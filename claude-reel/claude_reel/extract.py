@@ -106,7 +106,14 @@ def _image_size(data: bytes) -> tuple[int, int] | None:
     if data[:2] == b"\xff\xd8":  # JPEG: walk the segments to a start-of-frame marker
         i = 2
         while i + 9 < len(data) and data[i] == 0xFF:
-            marker, seg = data[i + 1], int.from_bytes(data[i + 2 : i + 4], "big")
+            if data[i + 1] == 0xFF:  # fill byte before a marker
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker == 0x01 or 0xD0 <= marker <= 0xD7:  # TEM, RSTn: no length field
+                i += 2
+                continue
+            seg = int.from_bytes(data[i + 2 : i + 4], "big")
             if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
                 return int.from_bytes(data[i + 7 : i + 9], "big"), int.from_bytes(
                     data[i + 5 : i + 7], "big"
@@ -123,11 +130,15 @@ def _image_kind(data: bytes) -> str:
 
 
 def image_label(block: dict) -> str:
-    """A one-line stand-in for an image block, e.g. `[image · png · 1200×800 · 240 KB]`.
-    The deck doesn't embed images (one screenshot is ~240 KB of base64), and their raw
+    """A one-line stand-in for an image block, e.g. `[image · png · 1200×800 · 126 KB]`.
+    The deck doesn't embed images (a screenshot is hundreds of KB of base64), and their raw
     JSON in a chip body is noise."""
-    src = block.get("source") or {}
-    if src.get("type") != "base64" or not isinstance(src.get("data"), str):
+    src = block.get("source")
+    if (
+        not isinstance(src, dict)
+        or src.get("type") != "base64"
+        or not isinstance(src.get("data"), str)
+    ):
         return "[image]"
     try:
         data = base64.b64decode(src["data"], validate=False)

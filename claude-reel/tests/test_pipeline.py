@@ -785,6 +785,10 @@ def test_an_image_in_a_tool_result_becomes_a_label_not_json(tmp_path):
     assert (
         image_label({"type": "image", "source": {"type": "url", "url": "https://x"}}) == "[image]"
     )
+    assert image_label({"type": "image", "source": "not a dict"}) == "[image]"
+    # Fill bytes before a marker, and a length-less RST marker, on the way to SOF0.
+    padded = b"\xff\xd8\xff\xd0\xff\xff\xc0" + struct.pack(">HBHH", 11, 8, 300, 400) + b"\0" * 6
+    assert image_label(b64(padded)) == "[image · jpeg · 400×300 · 1 KB]"
 
     src = tmp_path / "s.jsonl"
     recs = [
