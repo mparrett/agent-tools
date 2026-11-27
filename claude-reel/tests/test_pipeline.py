@@ -744,3 +744,77 @@ def test_runs_sharing_a_first_line_stay_separate_chips(tmp_path):
     ]
     assert [t["count"] for t in tools] == [1, 1]
     assert ["print(1)" in t["command"] for t in tools] == [True, False]
+
+
+def test_an_image_in_a_tool_result_becomes_a_label_not_json(tmp_path):
+    import base64
+    import struct
+
+    from claude_reel.extract import image_label
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13)
+        + b"IHDR"
+        + struct.pack(">II", 1200, 800)
+        + b"\0" * 2000
+    )
+    # A minimal JPEG: SOI, an APP0 segment to skip, then SOF0 with height 300, width 400.
+    jpeg = (
+        b"\xff\xd8"
+        + b"\xff\xe0"
+        + struct.pack(">H", 4)
+        + b"\0\0"
+        + b"\xff\xc0"
+        + struct.pack(">HBHH", 11, 8, 300, 400)
+        + b"\0" * 6
+    )
+
+    def b64(d):
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": base64.b64encode(d).decode(),
+            },
+        }
+
+    assert image_label(b64(png)) == "[image · png · 1200×800 · 2 KB]"
+    assert image_label(b64(jpeg)) == "[image · jpeg · 400×300 · 1 KB]"
+    assert (
+        image_label({"type": "image", "source": {"type": "url", "url": "https://x"}}) == "[image]"
+    )
+    assert image_label({"type": "image", "source": "not a dict"}) == "[image]"
+    # Fill bytes before a marker, and a length-less RST marker, on the way to SOF0.
+    padded = b"\xff\xd8\xff\xd0\xff\xff\xc0" + struct.pack(">HBHH", 11, 8, 300, 400) + b"\0" * 6
+    assert image_label(b64(padded)) == "[image · jpeg · 400×300 · 1 KB]"
+
+    src = tmp_path / "s.jsonl"
+    recs = [
+        {"type": "user", "timestamp": "2026-01-01T00:00:00Z", "message": {"content": "shoot"}},
+        {
+            "type": "assistant",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "r1",
+                        "name": "Read",
+                        "input": {"file_path": "/x/shot.png"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-01-01T00:00:02Z",
+            "message": {
+                "content": [{"type": "tool_result", "tool_use_id": "r1", "content": [b64(png)]}]
+            },
+        },
+    ]
+    src.write_text("\n".join(json.dumps(r) for r in recs))
+    html = render(curate(extract(src)))
+    assert "[image · png · 1200×800 · 2 KB]" in html and "iVBOR" not in html

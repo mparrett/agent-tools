@@ -10,6 +10,8 @@ model's request), and subagent (a launch with no tool call of its own). Tool cal
 carry a derived `label`/`arg`/`stat` so the renderer can show a chip without re-deriving.
 """
 
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -95,6 +97,62 @@ def _drop_user_text(role, text, is_meta) -> bool:
     )
 
 
+def _image_size(data: bytes) -> tuple[int, int] | None:
+    """Width and height from an image's header, for the formats whose header says so."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+        return int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little")
+    if data[:2] == b"\xff\xd8":  # JPEG: walk the segments to a start-of-frame marker
+        i = 2
+        while i + 9 < len(data) and data[i] == 0xFF:
+            if data[i + 1] == 0xFF:  # fill byte before a marker
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker == 0x01 or 0xD0 <= marker <= 0xD7:  # TEM, RSTn: no length field
+                i += 2
+                continue
+            seg = int.from_bytes(data[i + 2 : i + 4], "big")
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                return int.from_bytes(data[i + 7 : i + 9], "big"), int.from_bytes(
+                    data[i + 5 : i + 7], "big"
+                )
+            i += 2 + seg
+    return None
+
+
+def _image_kind(data: bytes) -> str:
+    for magic, kind in ((b"\x89PNG", "png"), (b"\xff\xd8", "jpeg"), (b"GIF8", "gif")):
+        if data.startswith(magic):
+            return kind
+    return "webp" if data[8:12] == b"WEBP" else "image"
+
+
+def image_label(block: dict) -> str:
+    """A one-line stand-in for an image block, e.g. `[image · png · 1200×800 · 126 KB]`.
+    The deck doesn't embed images (a screenshot is hundreds of KB of base64), and their raw
+    JSON in a chip body is noise."""
+    src = block.get("source")
+    if (
+        not isinstance(src, dict)
+        or src.get("type") != "base64"
+        or not isinstance(src.get("data"), str)
+    ):
+        return "[image]"
+    try:
+        data = base64.b64decode(src["data"], validate=False)
+    except (ValueError, binascii.Error):
+        return "[image]"
+    bits = ["image", _image_kind(data)]
+    size = _image_size(data)
+    if size:
+        bits.append(f"{size[0]}×{size[1]}")
+    kb = len(data) / 1024
+    bits.append(f"{kb / 1024:.1f} MB" if kb >= 1024 else f"{max(1, round(kb))} KB")
+    return "[" + " · ".join(bits) + "]"
+
+
 def _normalize_result(content) -> tuple[str, bool]:
     """Tool results arrive as a string or a list of blocks. Flatten to text, report
     whether we truncated."""
@@ -104,7 +162,12 @@ def _normalize_result(content) -> tuple[str, bool]:
         parts = []
         for b in content:
             if isinstance(b, dict):
-                parts.append(b.get("text", "") if b.get("type") == "text" else json.dumps(b)[:500])
+                if b.get("type") == "text":
+                    parts.append(b.get("text", ""))
+                elif b.get("type") == "image":
+                    parts.append(image_label(b))
+                else:
+                    parts.append(json.dumps(b)[:500])
             else:
                 parts.append(str(b))
         text = "\n".join(parts)
