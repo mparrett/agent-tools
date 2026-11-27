@@ -80,21 +80,30 @@ def _live(path, build_deck, args) -> int:
 
     sender, note, check = _reply_target(path) if not args.no_reply else (None, None, None)
 
-    def ready(url):
+    def ready(url, tailnet_url=None):
         print(f"claude-reel: live at {url}  (Ctrl+C to stop)", flush=True)
+        if tailnet_url:
+            print(f"claude-reel: on the tailnet at {tailnet_url}", flush=True)
         print(f"claude-reel: {'replies on' if sender else note or 'replies off'}", flush=True)
         if args.open:
             webbrowser.open(url)
 
-    live.serve(
-        path,
-        build_deck,
-        port=args.port,
-        on_ready=ready,
-        sender=sender,
-        reply_note=note,
-        check=check,
-    )
+    from .tailnet import TailnetError
+
+    try:
+        live.serve(
+            path,
+            build_deck,
+            port=args.port,
+            on_ready=ready,
+            sender=sender,
+            reply_note=note,
+            check=check,
+            tailscale=args.tailscale,
+        )
+    except TailnetError as e:
+        print(f"claude-reel: --tailscale: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -145,6 +154,12 @@ def main(argv=None) -> int:
     )
     p.add_argument("--port", type=int, default=0, help="--live port (default: any free one)")
     p.add_argument(
+        "--tailscale",
+        action="store_true",
+        help="--live, also at https://<this machine's tailnet name>:<port> via `tailscale serve`"
+        " (tailnet only; removed on exit)",
+    )
+    p.add_argument(
         "--no-reply",
         action="store_true",
         help="--live without the reply bar (read-only, even for a background session)",
@@ -157,6 +172,9 @@ def main(argv=None) -> int:
         print(f"claude-reel: no session matching '{args.target}'", file=sys.stderr)
         return 1
 
+    if args.tailscale and not args.live:
+        print("claude-reel: --tailscale goes with --live", file=sys.stderr)
+        return 2
     if args.live and (args.reel or args.out):
         print(
             "claude-reel: --live serves the deck; it can't be combined with --reel or -o",

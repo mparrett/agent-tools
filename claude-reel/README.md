@@ -21,6 +21,7 @@ claude-reel <id> --subagents brief                 # agent chips expand to the a
 claude-reel <id> --context none                    # hide injected context
 claude-reel <id> --no-credits                      # skip the closing credits card
 claude-reel <id> --live --open                     # follow a running session; reply if it's --bg
+claude-reel <id> --live --tailscale                # ...and on the tailnet, for your phone
 ```
 
 With the project installed, `uv run claude-reel …` works via the `[project.scripts]`
@@ -57,6 +58,14 @@ to "sent" when your message shows up in the deck, and after 3 minutes without it
 to check the session with `claude attach <id>`. Other sessions get a line saying why there is
 no bar, and `--no-reply` turns it off. `attach` is a terminal UI rather than an API, so a
 Claude Code update can break this; `send.py` says how it works.
+
+**On the tailnet.** `--live --tailscale` also serves the deck at
+`https://<this machine's tailnet name>:<port>/?t=…`, for a phone or another machine. It
+maps the port with `tailscale serve` (tailnet only, never Funnel) and removes the mapping
+when the server stops, on Ctrl+C or a plain `kill`. It refuses a port that `tailscale
+serve` already uses for something else. The server still binds only `127.0.0.1`, and the
+token is still required. Any device on your tailnet that has the URL can use the reply bar,
+so add `--no-reply` when you only want to read.
 
 **Run chips** open as a terminal: the whole command at a `$` prompt, shell-colored
 (commands, flags, strings, variables, operators; a heredoc's body stays plain), then its
@@ -108,6 +117,7 @@ transcript.jsonl ──[extract]──▶ reel (beats) ──[curate]──▶ d
 - `live.py` — `--live`: a stdlib HTTP server that polls the transcript, rebuilds on change,
   and streams the slides that changed over server-sent events.
 - `send.py` — the reply bar's delivery: `claude attach` driven under a pty.
+- `tailnet.py` — `--tailscale`: maps the live port with `tailscale serve` for the run.
 - `credits.py` — the closing card: subagents from the session's own pool, family and
   compactions from `claude-ls lineage --json` (a subprocess, so no import of claude-ls).
 - `cli.py` — entry point.
