@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from .render_html import render, render_parts
 from .send import SendError
+from .shots import Shots
 
 POLL_SECONDS = 1.0
 # An SSE comment line, so a client that went away is noticed on the next write.
@@ -40,9 +41,10 @@ class Builder:
     and keyed on the file's (size, mtime).
     """
 
-    def __init__(self, path: Path, build_deck):
+    def __init__(self, path: Path, build_deck, img=None):
         self.path = path
         self.build_deck = build_deck
+        self.img = img
         self._lock = threading.Lock()
         self._key = None
         self._built = None
@@ -68,7 +70,7 @@ class Builder:
                 if key == self._key:
                     return self._built
                 deck = self.build_deck()
-                slides, session = render_parts(deck)
+                slides, session = render_parts(deck, self.img)
             except Exception as e:
                 if self._built is None:
                     raise
@@ -136,6 +138,8 @@ def make_handler(
     without one there is no reply bar, and `reply_note` says why. `check` names where
     to look when a reply is never recorded (the session's attach command)."""
 
+    shots = Shots(builder.path)
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # the terminal is the user's, not an access log
             pass
@@ -154,6 +158,8 @@ def make_handler(
                 return self._deny(403, "missing or wrong token\n")
             if url.path == "/":
                 return self._page()
+            if url.path.startswith("/img/"):
+                return self._image(url.path)
             if url.path == "/events":
                 # EventSource reconnects to the same URL, so `v` is the page's first
                 # build; Last-Event-ID is the last one this browser applied.
@@ -223,6 +229,7 @@ def make_handler(
                 live_events=f"events?t={token}&v={version}",
                 live_send=f"send?t={token}" if sender else None,
                 reply_note=reply_note,
+                img=builder.img,
             ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -230,6 +237,25 @@ def make_handler(
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _image(self, path):
+            _, _, tool_id, n = (path.split("/") + [""])[:4]
+            # isascii too: isdigit() accepts '²', which int() then refuses.
+            got = shots.get(tool_id, int(n)) if n.isascii() and n.isdigit() else None
+            if got is None:
+                return self._deny(404, "no such image\n")
+            data, ctype = got
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            # A tool result never changes, so the browser can keep it.
+            self.send_header("Cache-Control", "private, max-age=86400, immutable")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def _events(self, since):
             self.send_response(200)
@@ -290,7 +316,7 @@ def serve(
     """Serve until interrupted. `on_ready(url, tailnet_url)` runs once the port is bound
     (and, with `tailscale`, mapped on the tailnet; tailnet_url is None otherwise)."""
     token = secrets.token_urlsafe(16)
-    builder = Builder(path, build_deck)
+    builder = Builder(path, build_deck, img=lambda tool_id, n: f"img/{tool_id}/{n}?t={token}")
     port_ref = [port]
     tailnet_ref = [None]
     server = ThreadingHTTPServer(("127.0.0.1", port), None)

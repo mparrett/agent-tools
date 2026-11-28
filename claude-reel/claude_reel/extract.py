@@ -547,6 +547,12 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
                 beats.append(beat)
             elif bt == "tool_result":
                 text, truncated = _normalize_result(b.get("content"))
+                inner = b.get("content")
+                images = [
+                    image_label(x)
+                    for x in (inner if isinstance(inner, list) else [])
+                    if isinstance(x, dict) and x.get("type") == "image"
+                ]
                 beats.append(
                     {
                         "kind": "tool_result",
@@ -555,6 +561,8 @@ def extract(path: Path, context: bool = True, subagents: str = "none") -> dict:
                         "is_error": bool(b.get("is_error")),
                         "text": text,
                         "truncated": truncated,
+                        # Labels only; live mode serves the bytes from the transcript.
+                        "images": images,
                     }
                 )
 
