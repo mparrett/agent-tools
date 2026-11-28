@@ -4,6 +4,7 @@ rendered as lazy thumbnails only when the page has somewhere to fetch them from.
 import base64
 import http.client
 import json
+import socket
 import struct
 import threading
 from http.server import ThreadingHTTPServer
@@ -129,7 +130,25 @@ def test_the_image_route_is_behind_the_token(tmp_path):
         assert get("/img/toolu_0/0")[0] == 403
         assert get("/img/toolu_0/5?t=tok")[0] == 404
         assert get("/img/toolu_0/x?t=tok")[0] == 404
+        assert get("/img/toolu_0/%C2%B2?t=tok")[0] == 404
+        # A raw '²' (latin-1 0xB2), which isdigit() accepts; http.client won't send it.
+        with socket.create_connection(("127.0.0.1", port[0]), timeout=5) as raw:
+            raw.sendall(
+                b"GET /img/toolu_0/\xb2?t=tok HTTP/1.0\r\nHost: x\r\n\r\n".replace(
+                    b"x", f"127.0.0.1:{port[0]}".encode()
+                )
+            )
+            assert raw.recv(64).split()[1] == b"404"
         page = get("/?t=tok")[2].decode()
         assert 'src="img/toolu_0/0?t=tok"' in page
     finally:
         srv.shutdown()
+
+
+def test_a_vanished_transcript_is_a_missing_image_not_a_crash(tmp_path):
+    f = _transcript(tmp_path, [[PNG]])
+    s = Shots(f)
+    assert s.get("toolu_0", 0)  # cached offset
+    f.unlink()
+    assert s.get("toolu_0", 0) is None
+    assert s.get("toolu_1", 0) is None  # and an uncached one

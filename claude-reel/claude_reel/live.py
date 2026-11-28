@@ -240,7 +240,8 @@ def make_handler(
 
         def _image(self, path):
             _, _, tool_id, n = (path.split("/") + [""])[:4]
-            got = shots.get(tool_id, int(n)) if n.isdigit() else None
+            # isascii too: isdigit() accepts '²', which int() then refuses.
+            got = shots.get(tool_id, int(n)) if n.isascii() and n.isdigit() else None
             if got is None:
                 return self._deny(404, "no such image\n")
             data, ctype = got

@@ -77,9 +77,16 @@ class Shots:
         return None
 
     def get(self, tool_id: str, n: int):
-        """(bytes, content type) for image `n` of `tool_id`'s result, or None."""
+        """(bytes, content type) for image `n` of `tool_id`'s result, or None, including
+        when the transcript has moved or vanished under a running server."""
         if not TOOL_ID.fullmatch(tool_id) or n < 0:
             return None
+        try:
+            return self._get(tool_id, n)
+        except (OSError, ValueError):
+            return None
+
+    def _get(self, tool_id: str, n: int):
         with self._lock:
             where = self._where.get(tool_id)
         if where is None:
