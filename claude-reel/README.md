@@ -59,6 +59,12 @@ to check the session with `claude attach <id>`. Other sessions get a line saying
 no bar, and `--no-reply` turns it off. `attach` is a terminal UI rather than an API, so a
 Claude Code update can break this; `send.py` says how it works.
 
+**Screenshots.** A written deck shows each image in a tool result as a label, such as
+`[image · png · 1200×800 · 126 KB]`, and stays one self-contained file. In `--live`, the
+chip also shows the image as a thumbnail that opens full size. The server reads the bytes
+from the transcript when a chip is opened, not before, behind the same token, and serves
+only PNG, JPEG, GIF and WebP.
+
 **On the tailnet.** `--live --tailscale` also serves the deck at
 `https://<this machine's tailnet name>:<port>/?t=…`, for a phone or another machine. It
 maps the port with `tailscale serve` (tailnet only, never Funnel) and removes the mapping
@@ -117,6 +123,7 @@ transcript.jsonl ──[extract]──▶ reel (beats) ──[curate]──▶ d
 - `live.py` — `--live`: a stdlib HTTP server that polls the transcript, rebuilds on change,
   and streams the slides that changed over server-sent events.
 - `send.py` — the reply bar's delivery: `claude attach` driven under a pty.
+- `shots.py` — `--live`'s screenshots: finds a tool result's image in the transcript.
 - `tailnet.py` — `--tailscale`: maps the live port with `tailscale serve` for the run.
 - `credits.py` — the closing card: subagents from the session's own pool, family and
   compactions from `claude-ls lineage --json` (a subprocess, so no import of claude-ls).

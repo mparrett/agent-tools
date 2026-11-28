@@ -56,6 +56,9 @@ def _tool_element(call, result):
     if result:
         el["result"] = result.get("text", "")
         el["is_error"] = result.get("is_error", False)
+        if result.get("images"):
+            el["images"] = result["images"]
+            el["tool_use_id"] = result.get("tool_use_id")
     if call.get("subagent"):
         el["subagent"] = call["subagent"]
     if call.get("agent_id"):
@@ -223,6 +226,10 @@ def curate(reel: dict, density: str = "jazz") -> dict:
                 prev["is_error"] = prev["is_error"] or el["is_error"]
                 if el["result"] is not None:
                     prev["result"] = el["result"]
+                    # The images go with the result shown, the latest one.
+                    prev.pop("images", None)
+                    prev.pop("tool_use_id", None)
+                    prev.update({k: el[k] for k in ("images", "tool_use_id") if k in el})
             else:
                 cur.append(el)
         elif kind == "subagent":

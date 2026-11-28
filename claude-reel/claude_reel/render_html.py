@@ -119,6 +119,11 @@ h1.title {
 .term .t-kw { color: #d99ccb; font-weight: 600; }
 .term .t-comment { color: #8f8574; font-style: italic; }
 .term .t-here { color: #c9c0ae; }
+/* Live mode's screenshots: thumbnails under the result; a click opens one full size. */
+.shots { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px 12px; border-top: 1px solid var(--line); background: var(--bg); }
+.shot { display: block; line-height: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.shot:hover { border-color: var(--amber); }
+.shot img { max-height: 240px; max-width: 100%; width: auto; height: auto; }
 .chip-body { border-top: 1px solid var(--line); padding: 12px 14px; background: var(--bg); font-family: var(--mono); font-size: 0.8rem; color: var(--ink-soft); white-space: pre-wrap; word-break: break-word; max-height: 340px; overflow: auto; }
 .code { font-family: var(--mono); font-size: 0.8rem; line-height: 1.65; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 13px 15px; overflow-x: auto; white-space: pre; color: var(--ink-soft); }
 .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
@@ -175,7 +180,7 @@ h1.title {
 .strip.dense-inline .chip, .strip.dense-compact .chip { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .strip.dense-inline .chip > summary, .strip.dense-compact .chip > summary,
 .strip.dense-inline .chip.flat .row, .strip.dense-compact .chip.flat .row { padding: 4px 9px; gap: 7px; }
-.strip.dense-inline .chip-body, .strip.dense-compact .chip-body, .strip.dense-inline .sub-body, .strip.dense-compact .sub-body,
+.strip.dense-inline .chip-body, .strip.dense-compact .chip-body, .strip.dense-inline .shots, .strip.dense-compact .shots, .strip.dense-inline .sub-body, .strip.dense-compact .sub-body,
 .strip.dense-inline .tri, .strip.dense-compact .tri, .strip.dense-inline .meta, .strip.dense-compact .meta,
 .strip.dense-inline .chip.flat .row::before, .strip.dense-compact .chip.flat .row::before { display: none; }
 .strip.dense-inline .ck, .strip.dense-compact .ck { min-width: 0; }
@@ -739,7 +744,22 @@ def _subagent_body(sub: dict, result) -> str:
     return f'<div class="sub-body">{"".join(parts)}</div>'
 
 
-def _chip_html(el, open_by_default: bool, slide_no: int = 0) -> str:
+def _shots_html(el, img) -> str:
+    """Live mode's thumbnails for a tool result's images: lazy, so a folded chip costs
+    nothing until it's opened, and each opens full size in a new tab."""
+    if not (img and el.get("images") and el.get("tool_use_id")):
+        return ""
+    out = []
+    for n, label in enumerate(el["images"]):
+        url = _esc(img(el["tool_use_id"], n))
+        out.append(
+            f'<a class="shot" href="{url}" target="_blank" rel="noopener" title="{_esc(label)}">'
+            f'<img loading="lazy" src="{url}" alt="{_esc(label)}"></a>'
+        )
+    return f'<div class="shots">{"".join(out)}</div>'
+
+
+def _chip_html(el, open_by_default: bool, slide_no: int = 0, img=None) -> str:
     if el["type"] == "context":
         return _context_html(el, open_by_default, slide_no)
     if el["type"] == "thinking":
@@ -777,6 +797,7 @@ def _chip_html(el, open_by_default: bool, slide_no: int = 0) -> str:
             if command
             else f'<div class="chip-body">{_esc(body)}</div>'
         )
+        + _shots_html(el, img)
         + "</details>"
     )
 
@@ -813,7 +834,7 @@ def _user_body(text: str) -> str:
     return "".join(out)
 
 
-def _slide_html(slide, total_beats, open_chips: bool) -> str:
+def _slide_html(slide, total_beats, open_chips: bool, img=None) -> str:
     beatno = slide["index"] + 1
     when = _fmt_ts(slide["ts_range"][0])
     parts = [
@@ -832,7 +853,7 @@ def _slide_html(slide, total_beats, open_chips: bool) -> str:
 
     for el in slide["elements"]:
         if el["type"] in ("tool", "thinking", "context"):
-            chip_buf.append(_chip_html(el, open_chips, beatno))
+            chip_buf.append(_chip_html(el, open_chips, beatno, img))
             continue
         flush_chips()
         who = "you" if el["type"] == "user" else "claude"
@@ -994,9 +1015,10 @@ def _agenda_html(deck, credits_slide: int | None = None) -> str:
     )
 
 
-def render_parts(deck: dict) -> tuple[list, str]:
+def render_parts(deck: dict, img=None) -> tuple[list, str]:
     """(every slide's HTML, the topbar's session line). The live server diffs these
-    between builds and sends only the slides that changed."""
+    between builds and sends only the slides that changed. `img(tool_use_id, n)` is
+    the URL of a tool result's image; without it images stay labels."""
     meta = deck["meta"]
     total = len(deck["slides"])
     open_chips = deck.get("density") == "firehose"
@@ -1007,7 +1029,7 @@ def render_parts(deck: dict) -> tuple[list, str]:
         )
 
     body = (
-        [_slide_html(s, total, open_chips) for s in deck["slides"]]
+        [_slide_html(s, total, open_chips, img) for s in deck["slides"]]
         if deck.get("density") != "tldr"
         else []
     )
@@ -1046,12 +1068,14 @@ def render(
     live_events: str | None = None,
     live_send: str | None = None,
     reply_note: str | None = None,
+    img=None,
 ) -> str:
     """The whole deck. With `live_events` (the live server's stream URL, relative to
     the page), the page subscribes to it and applies the slides it sends. With
-    `live_send` too, a reply bar posts there; `reply_note` says why there is none."""
+    `live_send` too, a reply bar posts there; `reply_note` says why there is none.
+    `img` makes image URLs, as in render_parts."""
     meta = deck["meta"]
-    slides_html, session_meta = render_parts(deck)
+    slides_html, session_meta = render_parts(deck, img)
     counter_total = len(slides_html) - 1  # excludes the agenda
     live = live_events is not None
     badge = (
